@@ -21,7 +21,9 @@
  *
  * The DSPs are compute islands for LOAD/STORE: they cannot reach SYSRAM,
  * ULM, CRAM or the UMAC pool at any address (a 448-probe scan of every
- * 16 MiB base found no alias). Data reaches DTCM only by MCU copy (35 MB/s),
+ * 16 MiB base found no alias). MEM_DMA TX0 -> RX0 can reach DSP0 DTCM
+ * at ~0.9 GB/s (see mcu_dma.h and tools/dsp). Other input paths are
+ * MCU copy (35 MB/s),
  * the download engine, or the PHY-side DFE capture engine, which addresses
  * DTCM 0x206000..0x20ffff as 0x80206000..0x8020ffff (see the capture
  * headers; unproven as an RX input).

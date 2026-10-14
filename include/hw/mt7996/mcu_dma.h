@@ -228,7 +228,7 @@
  */
 
 /* ========================================================================
- * MEM_DMA (engine 1) [static; never used for data on hardware]
+ * MEM_DMA (engine 1): local TX0 -> RX0 payload transfer
  * ======================================================================== */
 /* WM: engine-1 TX0 adapter 0x0222c928 (descriptors 0x0223fec0..0x0223ff40,
  * 8), RX1 adapter 0x0222c978 (descriptors 0x0223fcc0..0x0223fd40, 8). WA:
@@ -237,5 +237,21 @@
  * 0x2c0 (unresolved). */
 #define MT7996_MEM_DMA_WM_TX0_ADAPTER     0x0222c928u
 #define MT7996_MEM_DMA_WM_RX1_ADAPTER     0x0222c978u
+
+/* Measured on W1700K2 / MT7996 (2026-10-14), own firmware, capture stopped:
+ * TX0 -> RX0 moves 8 KiB from ICAP pool 0xe0400000 to DSP0 DTCM 0x8620d000
+ * in ~8.7 us at WM 720 MHz, without a CPU payload copy. Two stopped window
+ * pages at 0x00464000 / 0x00466000 also work (2 x 4 KiB, ~9.5 us total).
+ * tools/dsp/wm-dma.c contains the transfer implementation and its README
+ * documents setup, ownership, validation and limits.
+ *
+ * Completion requires matching TX/RX DIDX AND RX descriptor DDONE:
+ * DIDX was observed advancing before DDONE. Preserve the ROM prefetch
+ * allocation (TX0 0x00800002, RX0 0x02200002), fence descriptor publication,
+ * and stop/drain before reusing memory. DSP must be running via normal PDA
+ * load; accessing TCM while DSP reset is held can hang the radio bus.
+ * These measurements do not establish continuous capture or concurrent
+ * host streaming. The default receiver does not use this test helper.
+ */
 
 #endif /* HW_MT7996_MCU_DMA_H */
