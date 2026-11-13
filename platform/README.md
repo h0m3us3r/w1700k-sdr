@@ -55,7 +55,7 @@ requiring the pinned commit.
 
 | Directory | Contents |
 | --- | --- |
-| `rootfs/` | Buildroot configuration and the overlay: init scripts, network and storage configuration, `verify-storage`, the `durable-*` helpers |
+| `rootfs/` | Buildroot configuration and the overlay: init scripts, network and storage configuration, `verify-storage`, the `durable-*` helpers, `system-update` |
 | `linux/` | kernel configuration, the board device tree, our kernel patches, the Linux BMT binding, `board_check.py` |
 | `loader/` | our U-Boot: defconfig, default environment, device tree, patches, the U-Boot BMT binding |
 | `dumper/` | the write-free dumper: defconfig, environment, device tree, patches; it links the loader's BMT binding read side only, with `bmtdetach` for raw dumps |
@@ -90,7 +90,7 @@ never rewritten.
 | `calibration` | 0x0400000 | 2 MiB | identity and radio calibration | read-only |
 | `loader` | 0x0600000 | 2 MiB | our U-Boot FIT | read-only |
 | `system` | 0x0800000 | 48 MiB | UBI: `ubootenv`, `ubootenv2`, `fit`, `rootfs` | attached read-only |
-| `durable` | 0x3800000 | 32 MiB | UBI: `durable`, an empty UBIFS for persistent files | detached; `durable-open` |
+| `durable` | 0x3800000 | 32 MiB | UBI: `durable`, a UBIFS for persistent files, and for a root update on its way in (below) | detached; `durable-open` |
 | `scratch` | 0x5800000 | 358 MiB | unused | read-only |
 | `reserved-bmt` | 0x1be00000 | 66 MiB | vendor bad-block reserve pool | read-only |
 
@@ -110,6 +110,40 @@ U-Boot printed at its boot in the same run (`bmt pool size: N`) is the one our
 U-Boot computed. Linux waits for the chip by polling its status with `udelay()`
 (patch 0012): the kernel has no high-resolution timers, so a sleeping poll
 would take a 4 ms tick per page.
+
+### Updating the root without a console
+
+Linux cannot write `system`, and that stays so. To replace the root over the
+network, `system-update stage` (in the root's `/usr/sbin`, driven by
+`init/flash --rootfs --ssh`) leaves three files in `durable`, under `update/`:
+`rootfs.new`, `rootfs.old` (the root that runs, to go back to) and, last and
+by a rename, `request`, two lines naming both by SHA-256.
+
+The loader's boot command begins with `run update_apply`
+(`loader/an7581_w1700k_sdr_env`). With a valid request in `durable` it:
+
+- writes `rootfs.new` to the `rootfs` volume once its digest matches, reads the
+  volume back, and saves `update_tried` in its environment;
+- on a later boot that finds the request still there and `update_tried` set,
+  takes the update for one that was never confirmed: writes `rootfs.old` back
+  and saves `update_failed` instead, after which that image is left alone;
+- puts `rootfs.old` back at once if the write of the new root does not read
+  back;
+- once the request is gone (`system-update confirm` or `cancel` removes the
+  files), erases its saved environment again.
+
+An interrupted write is repeated by the next boot, since the note is saved only
+after the read-back. The loader's environment is otherwise never saved, and
+with `CONFIG_ENV_WRITEABLE_LIST` (loader patch 0008) the only variables a saved
+copy can set are those two: the boot and update scripts are always the ones the
+loader was built with. A request counts only by its content, not by the file
+being there: a read of a missing file is not relied on to fail (this U-Boot's
+UBIFS reader took the end of a directory for a match, loader patch 0009).
+`tests/test_loader_update.py` runs the scripts as they are written, in a POSIX
+shell with U-Boot's commands modelled.
+
+The loader's FIT description carries `staged-update 1`; `system-update` reads
+it from the `loader` partition and refuses to stage for a loader without it.
 
 ## Checks in the build
 

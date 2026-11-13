@@ -134,6 +134,45 @@ what was asked, skips a volume that already holds the new bytes, reads every
 write back, and boots the result. `--rootfs` and `--fit` update one volume of
 the system each. With more than one installed unit, name it with `--unit SERIAL`.
 
+### The root over the network alone
+
+```sh
+make
+init/flash --rootfs --ssh     # no serial console: ssh to the unit, and its loader does the writing
+```
+
+The root holds the driver, the unit's programs and its start-up scripts, which
+is what most updates change; it can be replaced with nothing but the Ethernet
+cable to `lan3`. The kernel image (`--fit`), the loader and durable storage
+still take the serial console.
+
+What happens:
+
+1. The new root is copied to the unit over ssh and left in its durable
+   storage, with a copy of the root that runs beside it
+   (`system-update stage`, in the unit's `/usr/sbin`; the tool brings its own
+   copy, so an older root is updated the same way).
+2. The unit reboots. Its loader finds the staged root, checks it against the
+   digest left with it, writes it to the `rootfs` volume, reads that back, and
+   boots it. Linux itself never writes the system flash.
+3. When the unit answers again on the new root and its storage check passes,
+   the tool confirms it (`system-update confirm`) and the staged files are
+   removed.
+
+If the new root does not come up, the tool says so and asks for a power cycle:
+a boot that finds the update still unconfirmed puts the previous root back, and
+does not try that image again. So does any later reboot of a new root that was
+never confirmed; a run that was interrupted before confirming is finished by
+running the same command again. `ssh root@UNIT system-update status` shows what
+runs, what is staged and what the loader made of it. (`verify-storage` on the
+unit holds that nothing has written flash since the boot: the tool runs it
+before confirming, and confirming, which removes the staged files, is itself
+such a write, so run by hand afterwards it objects until the next boot.)
+
+It needs a loader that applies staged updates. A unit installed before this
+existed says so before anything is sent; give it the new loader once, over the
+serial console: `init/flash --loader`.
+
 ## Returning to stock
 
 ```sh
@@ -175,6 +214,8 @@ most of it rewriting what changed (about ten blocks a second).
   writing anything; then `init/flash --system`.
 - Our U-Boot does not start: power-cycle; the tools stop stock U-Boot and
   `init/install --force` reinstalls everything, keeping the backup.
+- An update over the network (`init/flash --rootfs --ssh`) left the unit
+  unreachable: power-cycle it; its loader puts the previous root back.
 - The SSH host key of a unit installed elsewhere can be kept with
   `init/provision --unit SERIAL --import-host-key FILE` before the first
   `init/flash --rootfs`.
@@ -207,6 +248,7 @@ the console to you for the rest of the run.
 | `initkit/steps.py` | the write steps, each read back |
 | `initkit/provision.py` | the unit's root filesystem with its keys |
 | `initkit/install.py`, `initkit/update.py`, `initkit/restore.py`, `initkit/rawdump.py` | the procedures |
+| `initkit/remote.py` | the root's update over ssh (`init/flash --rootfs --ssh`) |
 
 Stock U-Boot's TFTP client gives up after ten timeouts that its broken timer
 spends at about a hundred per second, so images go to stock in 32 KiB pieces,

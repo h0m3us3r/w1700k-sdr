@@ -11,7 +11,16 @@ bootpart=system
 bootvol=fit
 bootconf=conf-sdr
 bootlimit=1
-bootcmd=ubi part.ro ${bootpart} && ubi read ${loadaddr} ${bootvol} && iminfo ${loadaddr} && bootm ${loadaddr}#${bootconf}
+bootcmd=run update_apply; ubi part.ro ${bootpart} && ubi read ${loadaddr} ${bootvol} && iminfo ${loadaddr} && bootm ${loadaddr}#${bootconf}
+update_spare=0x94000000
+update_check=hash sha256 ${loadaddr} ${filesize} update_got && test "${update_got}" = "${update_want}"
+update_fetch=ubi part.ro durable && ubifsmount ubi0:durable && ubifsload ${loadaddr} update/${update_file} && run update_check
+update_store=ubifsumount; ubi part.rw ${bootpart} && ubi write ${loadaddr} rootfs ${filesize} && ubi read ${update_spare} rootfs ${filesize} && hash sha256 ${update_spare} ${filesize} update_got && test "${update_got}" = "${update_want}"
+update_done=setenv update_new; setenv update_old; setenv update_file; setenv update_want; setenv update_got; saveenv
+update_back=echo "update: putting the previous root back"; setenv update_file rootfs.old; setenv update_want ${update_old}; if run update_fetch && run update_store; then setenv update_failed ${update_new}; setenv update_tried; run update_done; echo "update: the previous root is back"; else echo "update: the previous root could not be put back"; fi
+update_try=echo "update: writing the staged root"; setenv update_file rootfs.new; setenv update_want ${update_new}; if run update_fetch; then if run update_store; then setenv update_tried ${update_new}; setenv update_failed; run update_done; echo "update: written; it stays once confirmed"; else echo "update: the write failed"; run update_back; fi; else echo "update: the staged root is unreadable or not the one announced; nothing written"; fi
+update_decide=if test "${update_tried}" = "${update_new}"; then echo "update: the new root was not confirmed"; run update_back; else if test "${update_failed}" = "${update_new}"; then echo "update: this one failed before; left alone"; else run update_try; fi; fi
+update_apply=if ubi part.ro durable && ubifsmount ubi0:durable; then setenv update_new; setenv update_old; if ubifsload ${update_spare} update/request; then env import -t ${update_spare} ${filesize} update_new update_old; fi; if test -n "${update_new}" && test -n "${update_old}"; then run update_decide; else if env exists update_tried || env exists update_failed; then echo "update: settled"; env erase; setenv update_tried; setenv update_failed; fi; fi; ubifsumount; fi
 altbootcmd=echo *** boot limit exceeded, stopping at prompt ***
 boot_tftp=tftpboot ${loadaddr} ${bootfile} && iminfo ${loadaddr} && bootm ${loadaddr}#${bootconf}
 update_fit=tftpboot ${loadaddr} ${fitfile} && ubi part.rw ${bootpart} && ubi write ${loadaddr} fit ${filesize}

@@ -1,0 +1,14 @@
+SPDX-License-Identifier: GPL-2.0+
+Subject: [PATCH] ubifs: a name that is not in a directory is not found
+
+ubifs_finddir returned -ENOENT at the end of a directory, which its caller
+took for a match: looking up a file that is not there succeeded, and loading
+it read the directory above it (seen on a W1700K: ubifsload of a deleted
+file "Done", 160 bytes of nothing). The end of the directory is 0, not found.
+
+--- a/fs/ubifs/ubifs.c
++++ b/fs/ubifs/ubifs.c
+@@ -492,0 +493,3 @@
++	/* The end of the directory is no entry of that name, which 0 says. */
++	if (ret < 0)
++		ret = 0;

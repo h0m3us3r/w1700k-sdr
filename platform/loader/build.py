@@ -22,6 +22,9 @@ import uboot
 
 FIT = IMAGES / 'w1700k-loader.itb'
 DEFCONFIG = 'an7581_w1700k_sdr_defconfig'
+# In the FIT's description, where a running unit can read it from its `loader`
+# partition: this loader applies a root staged in durable storage (init/flash --ssh).
+STAGED_UPDATE = 'staged-update 1'
 BMT = UNIT.parent / 'bmt'
 FILES = {
     f'configs/{DEFCONFIG}': UNIT / DEFCONFIG,
@@ -48,7 +51,15 @@ ENABLED = ('AN7581_W1700K_SDR', 'POSITION_INDEPENDENT', 'LINUX_KERNEL_IMAGE_HEAD
            'CMD_TFTPBOOT', 'CMD_HASH', 'AUTOBOOT', 'MTD_SPI_NAND', 'AIROHA_BMT',
            'AIROHA_BMT_WRITE', 'MTD_UBI', 'AIROHA_SNFI_SPI', 'AIROHA_ETH',
            'ENV_IS_IN_UBI', 'ENV_REDUNDANT', 'CMD_SAVEENV', 'BOOTCOUNT_LIMIT',
-           'BOOTCOUNT_ENV')
+           'BOOTCOUNT_ENV',
+           # the staged root update (update_apply in the environment): a file from the
+           # durable UBIFS, its name and digest from a text file, and the saved
+           # environment erased again once the update is settled
+           # (the durable UBIFS compresses with zstd: platform/images.py)
+           'CMD_UBIFS', 'ZSTD', 'CMD_IMPORTENV', 'CMD_ENV_EXISTS', 'CMD_ERASEENV', 'HUSH_PARSER',
+           # only the update's two state variables come back from a saved environment
+           # (patch 0008): the scripts are always this build's
+           'ENV_WRITEABLE_LIST')
 DISABLED = ('ENV_IS_NOWHERE', 'ENV_IS_IN_MTD', 'BOOTSTD', 'EFI_LOADER', 'MMC', 'PCI',
             'USB', 'CMD_GO')
 LINKED = ('airoha_bmt_attach', 'airoha_bmt_translate', 'airoha_bmt_transaction_recover',
@@ -97,7 +108,7 @@ def main():
     payload = BUILD / 'loader/u-boot.bin.lzma'
     write_if_changed(payload, compress(image))
     IMAGES.mkdir(parents=True, exist_ok=True)
-    its = uboot.stock_fit('W1700K SDR persistent ARM loader', 'loader', payload, 'lzma',
+    its = uboot.stock_fit(f'W1700K SDR persistent ARM loader, {STAGED_UPDATE}', 'loader', payload, 'lzma',
                           out / 'u-boot.dtb')
     uboot.make_fit(its, FIT, out / 'scripts/dtc', LOGS / 'loader.log')
     size = FIT.stat().st_size

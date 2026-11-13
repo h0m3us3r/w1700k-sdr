@@ -5,6 +5,7 @@
     init/flash --system            # FIT (kernel, device tree) and root
     init/flash --fit               # FIT only
     init/flash --rootfs            # the unit's root only
+    init/flash --rootfs --ssh      # the same over the network alone, no serial console
     init/flash --loader            # our U-Boot in the loader partition
     init/flash --durable           # erase durable storage
     init/flash --recovery          # boot the recovery system from RAM; writes nothing
@@ -17,7 +18,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from initkit import config, session, update           # noqa: E402
+from initkit import config, remote, session, update   # noqa: E402
 from initkit.console import StepFailed                # noqa: E402
 from initkit.provision import ProvisionError          # noqa: E402
 
@@ -37,6 +38,9 @@ def main():
                         help='boot the recovery system from RAM instead of writing')
     parser.add_argument('--detect-only', action='store_true',
                         help='report the console state and exit')
+    parser.add_argument('--ssh', action='store_true',
+                        help="with --rootfs: over the network alone; the unit's loader "
+                             'writes the root at its next boot')
     parser.add_argument('--no-boot', action='store_true',
                         help='stay at the loader prompt afterwards')
     parser.add_argument('--unit', metavar='SERIAL',
@@ -51,10 +55,15 @@ def main():
         parser.error('--recovery writes nothing; it cannot be combined with an update')
     if not (args.detect_only or args.recovery or any(targets)):
         parser.error('say what to update: --system, --fit, --rootfs, --loader or --durable')
+    if args.ssh and (not args.rootfs or args.system or args.fit or args.loader or args.durable
+                     or args.detect_only or args.no_boot):
+        parser.error('--ssh updates the root alone: use it with --rootfs and nothing else')
     settings = session.settings_from(args)
     try:
         if args.detect_only:
             return update.detect(settings)
+        if args.ssh:
+            return remote.run(settings, args.unit, authorized_key=args.authorized_key)
         return update.run(settings, args.unit, fit=args.fit or args.system,
                           rootfs=args.rootfs or args.system, durable=args.durable,
                           loader=args.loader, recovery=args.recovery,

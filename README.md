@@ -160,6 +160,18 @@ Then open `http://HOST:8073/` and press ▶. The first start loads the radio
 firmware and brings the radio up (about 2 s). Without the browser, the same
 operations are `host/bin/w1700k load|start|band|tune|gain|filter|stop|status`.
 
+To update an installed unit after a `git pull`, over the network alone:
+
+```sh
+make
+init/flash --rootfs --ssh              # the driver, the unit's programs and its start-up
+```
+
+The unit's loader writes the new root at its next boot, and puts the previous
+one back if the new one is never confirmed; see
+[init/README.md](init/README.md#updates) for that, and for the kernel and the
+loader, which take the serial console.
+
 Build requirements: a C/C++ compiler, make, git, Python 3.10+, the usual
 Buildroot prerequisites, clang, ld.lld, llvm-objcopy and llvm-readobj (RISC-V
 firmware), openssl (firmware container encryption), and

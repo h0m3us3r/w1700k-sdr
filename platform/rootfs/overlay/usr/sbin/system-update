@@ -1,0 +1,120 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# The root's update without a serial console: Linux never writes `system`, so it
+# leaves the new root in durable storage and the loader writes it at the next
+# boot (update_apply in the loader's environment). init/flash --ssh drives this.
+#
+#   system-update status                what runs, what is staged, what the loader made of it
+#   system-update stage IMAGE SHA256    leave IMAGE (a SquashFS root, e.g. in /work) for the
+#                                       loader, with the running root beside it to go back to
+#   system-update confirm               the staged root runs and is wanted: settle on it
+#   system-update cancel                forget a staged root
+#
+# After `stage`, reboot. The loader writes the new root, reads it back and boots
+# it; `confirm` then keeps it. A boot that finds it still unconfirmed puts the
+# previous root back, so a root that does not come up is undone by a power cycle.
+set -eu
+. /etc/w1700k/storage.conf
+STAGED=/durable/update
+MARK='staged-update 1'		# in the description of a loader that applies updates
+
+fail() { echo "system-update: $*" >&2; exit 1; }
+
+volume()	# the UBI volume named $1 on ubi0, as /dev/ubi0_N
+{
+	for v in /sys/class/ubi/ubi0_*; do
+		[ "$(cat "$v/name")" = "$1" ] && { echo "/dev/${v##*/}"; return; }
+	done
+	fail "no $1 volume"
+}
+
+partition()	# the read-only node of the MTD partition named $1
+{
+	for m in /sys/class/mtd/mtd[0-9]*; do
+		case $m in *ro) continue ;; esac
+		[ "$(cat "$m/name")" = "$1" ] && { echo "/dev/${m##*/}ro"; return; }
+	done
+	fail "no $1 partition"
+}
+
+digest() { sha256sum | cut -d' ' -f1; }
+running() { digest < "$(volume rootfs)"; }
+installed() { grep -Eq '^/dev/ubiblock0_[0-9]+ /\.lower squashfs ' /proc/mounts; }
+loader_applies() { grep -q "$MARK" "$(partition loader)"; }
+
+# What the loader keeps while an update is neither confirmed nor undone.
+loader_note() { fw_printenv -n "$1" 2>/dev/null || :; }
+
+staged()	# the staged request's two digests, new then old; nothing when none is staged
+{
+	/usr/sbin/durable-run sh -c '
+		[ ! -f "$1/request" ] || echo "request: $(sed -n "s/^update_new=//p; s/^update_old=//p" "$1/request" | tr "\n" " ")"
+	' sh "$STAGED" | sed -n 's/^request: //p'
+}
+
+forget()
+{
+	/usr/sbin/durable-run rm -rf "$STAGED" > /dev/null || fail "the staged files are still there"
+}
+
+case ${1:-} in
+status)
+	echo "running=$(running)"
+	installed && echo "boot=installed" || echo "boot=ram"
+	loader_applies && echo "loader=applies" || echo "loader=serial-only"
+	set -- $(staged)
+	echo "staged=${1:-}"
+	echo "previous=${2:-}"
+	echo "tried=$(loader_note update_tried)"
+	echo "failed=$(loader_note update_failed)"
+	;;
+stage)
+	image=${2:-} want=${3:-}
+	[ -f "$image" ] && [ -n "$want" ] || fail "usage: system-update stage IMAGE SHA256"
+	installed || fail "this boot runs from RAM, not from the installed root"
+	loader_applies || fail "the loader on this unit does not apply staged updates: " \
+		"flash it once over the serial console (init/flash --loader)"
+	[ "$(digest < "$image")" = "$want" ] || fail "$image is not $want"
+	root=$(volume rootfs)
+	sys=/sys/class/ubi/${root##*/}
+	room=$(($(cat "$sys/reserved_ebs") * $(cat "$sys/usable_eb_size")))
+	size=$(wc -c < "$image")
+	[ "$size" -le "$room" ] || fail "$image ($size bytes) does not fit the root volume ($room)"
+	old=$(running)
+	[ "$old" != "$want" ] || { echo "system-update: this root already runs"; exit 0; }
+	/usr/sbin/durable-run sh -eu -c '
+		staged=$1 image=$2 want=$3 root=$4 old=$5 size=$6
+		rm -rf "$staged"
+		mkdir -p "$staged"
+		free=$(($(df -k /durable | sed -n 2p | tr -s " " | cut -d" " -f4) * 1024))
+		[ "$free" -gt $((2 * size + 1048576)) ] || { echo "durable storage has $free bytes free" >&2; exit 1; }
+		cp "$image" "$staged/rootfs.new"
+		cat "$root" > "$staged/rootfs.old"
+		sync
+		[ "$(sha256sum < "$staged/rootfs.new" | cut -d" " -f1)" = "$want" ]
+		[ "$(sha256sum < "$staged/rootfs.old" | cut -d" " -f1)" = "$old" ]
+		# The request last and whole: the loader acts on it alone.
+		printf "update_new=%s\nupdate_old=%s\n" "$want" "$old" > "$staged/request.part"
+		sync
+		mv "$staged/request.part" "$staged/request"
+		sync
+	' sh "$STAGED" "$image" "$want" "$root" "$old" "$size" || fail "nothing is staged"
+	echo "system-update: staged $want over $old; reboot to have the loader write it"
+	;;
+confirm)
+	now=$(running)
+	set -- $(staged)
+	[ -n "${1:-}" ] || fail "nothing is staged"
+	[ "$now" = "$1" ] || fail "the staged root is $1, and $now runs"
+	forget
+	echo "system-update: settled on $now"
+	;;
+cancel)
+	forget
+	echo "system-update: nothing is staged"
+	;;
+*)
+	echo "usage: system-update status | stage IMAGE SHA256 | confirm | cancel" >&2
+	exit 2
+	;;
+esac
