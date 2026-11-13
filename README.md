@@ -59,8 +59,8 @@ refused with the rate the link would need.
   is 1.28 GB/s. Reduced packings stop at 160 Msps.
 - **No jumbo frames?** `"export": {"piece": 1456}` in the configuration sends
   every slice as datagrams a 1500-byte MTU carries (each costs 82 bytes of the
-  link; the unit sends about 250 thousand a second: 80 Msps lossless, 160 Msps
-  at 16 bits).
+  link; the unit sends 120 thousand a second without loss: 40 Msps lossless,
+  80 Msps at 16 or 14 bits).
 
 The 5 Gbit/s rows and the small datagrams are measured on a unit (no slice
 lost); the 2.5 and 1 Gbit/s rows follow from the same arithmetic and have not

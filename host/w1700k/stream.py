@@ -43,7 +43,10 @@ PACKED_SHARE = {'raw': 0.0, 'half': 0.5, 'full': 1.0}
 # That reads every sample through the SoC's memory bus, which carries 1.0 GB/s of it beside the
 # capture (measured: one core 0.60, two 1.0, three 0.93): 160 Msps (0.64 GB/s), not 320 (1.28).
 REDUCED_MAX_RATE = 160_000_000
-SENDER_MAX_DATAGRAMS = 250_000    # a second: the senders' reach through the network stack (234k measured)
+# Datagrams a second the senders carry without loss: 117 thousand measured clean (40 Msps raw or
+# 80 Msps at 14 bits in 1456-byte pieces); at 235 thousand the unit's own transmit path lost
+# 0.1-0.2 % of them after the send calls had succeeded.
+SENDER_MAX_DATAGRAMS = 120_000
 SENDERS = 2                       # two sender threads read more between them than three (the bus again)
 REDUCED = {'16': 16, '14': 14, '8': 8, '7': 7}
 REDUCED_CHUNK = {'16': 4096, '14': 3584, '8': 2048, '7': 1792}

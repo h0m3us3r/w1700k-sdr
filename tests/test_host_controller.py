@@ -217,11 +217,12 @@ class Streaming(ControllerTest):
         self.assertFalse(packing_fits('full', 320_000_000, 10000), 'the packers carry every chunk to 160 Msps')
         self.assertFalse(packing_fits('14', 320_000_000, 10000), 'the SoC reduces up to 160 Msps')
         # small datagrams: more of the link, and no more of them than the senders manage
-        self.assertEqual(packing_for(80_000_000, 5000, 1456), 'raw')
-        self.assertEqual(packing_for(80_000_000, 2500, 1456), 'full')
-        self.assertEqual(packing_for(160_000_000, 5000, 1456), '16', '160 Msps packed would be 391k datagrams/s')
-        with self.assertRaisesRegex(ControlError, 'more than the unit sends'):
-            packing_for(320_000_000, 10000, 1456)
+        self.assertEqual(packing_for(40_000_000, 5000, 1456), 'raw')
+        self.assertEqual(packing_for(80_000_000, 5000, 1456), '16', '80 Msps raw would be 234k datagrams/s')
+        self.assertEqual(packing_for(80_000_000, 1000, 1456), '8')
+        for rate in (160_000_000, 320_000_000):
+            with self.assertRaisesRegex(ControlError, 'more than the unit sends'):
+                packing_for(rate, 10000, 1456)
 
     def test_a_rate_the_link_cannot_carry_is_refused(self):
         self.loaded(1)

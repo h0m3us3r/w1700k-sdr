@@ -104,8 +104,9 @@ analog filter. Defaults, all set by every load:
 - **Small datagrams** (`export.piece`): each chunk leaves as datagrams of at most that many of
   its bytes, through the unit's senders, whatever the packing: for a host interface or a path
   that carries no jumbo frames. Each datagram costs 82 bytes of the link and CPU on both ends;
-  the senders manage about 250 thousand a second (80 Msps raw or 160 Msps at `16` in 1456-byte
-  pieces), and the packing choice counts that in.
+  the senders carry 120 thousand a second without loss (40 Msps lossless or 80 Msps at `16` or
+  `14` in 1456-byte pieces; at 235 thousand the unit's transmit path lost 0.1–0.2 % of them),
+  and the packing choice counts that in.
 - **Filter** 20..320 MHz. It follows the sample rate by default (as wide as the rate, 320 MHz at
   640/2): it is the receiver's only anti-alias filter, and whatever it passes 320 MHz from the LO
   folds onto the band (18..20 dB down at 320 MHz, 32 at 160, 45 at 80, 65 at 40, 77 at 20, measured

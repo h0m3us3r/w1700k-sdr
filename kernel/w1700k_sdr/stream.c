@@ -72,7 +72,14 @@
 #define SNAP_MARGIN 64U
 #define SENDERS_MAX 4U
 #define SEND_BATCH 64U		/* datagrams, and slices or pieces, per sendmmsg */
-#define SEND_SLICES 16U		/* slices per batch */
+/* Slices per batch: few, so that what a sender has reduced is still in the
+ * cache when the kernel copies it out. The four cores share a 512 KiB L2, and a
+ * batch of 16 (128 KiB read, 58 KiB written) pushed its own output out to
+ * memory and fetched it back: at 320 Msps with the radio reducing half the
+ * chunks, two senders reduced 92 % of the other half in batches of 16, and all
+ * of it in batches of 2, 4 or 8.
+ */
+#define SEND_SLICES 4U
 #define SEND_CLAIM 4U		/* completions a sender takes at a time */
 #define SEND_PORTS_MAX 64U	/* sockets per sender */
 #define SEND_PIECE_MIN 256U

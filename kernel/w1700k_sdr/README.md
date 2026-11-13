@@ -210,7 +210,11 @@ one sender read 0.60 GB/s of slices, two 1.0 and three 0.93, so the senders
 carry 160 Msps (0.64 GB/s; all four formats, no slice lost, 20–45 % of each
 sender's core idle) and not 320 (1.28 GB/s); reading further ahead of the
 device than the slice in hand slowed the pump until the firmware overran.
-In pieces they send about 250 thousand datagrams a second. Senders the ring
+In pieces they send 117 thousand datagrams a second without loss; at 235
+thousand the port transmitted 0.1–0.2 % fewer than the send calls accepted.
+A batch is four slices: what a sender has reduced must still be in the
+512 KiB L2 the four cores share when the kernel copies it out (batches of 16
+cost the 160 Msps case 15–25 % of each sender's core). Senders the ring
 laps skip to the newest completions and count what they skipped (`"send"` in
 the result line: `slices`, `reduced`, `datagrams`, `lapped`, `errors`, `busy`).
 
