@@ -64,7 +64,9 @@ refused with the rate the link would need.
   a test tone at the same level and phase in the chunks from both. (That is
   the unit and the stream service. With the spectrum server and a browser
   also running on that host, an 8-core N350 behind a USB adapter, the
-  adapter itself dropped 1 datagram in 10,000: the host, not the link.) The radio's chunks follow the level with a second's memory, so
+  adapter itself missed 1 datagram in 2400, and between 1 in 25,000 and 1 in
+  100,000 once its packets were spread over the CPUs, as `init/host/link` now
+  does: the host, not the link.) The radio's chunks follow the level with a second's memory, so
   in a band with strong bursts they are quantised for the bursts.
 - **No jumbo frames?** `"export": {"piece": 1456}` in the configuration sends
   every slice as datagrams a 1500-byte MTU carries (each costs 82 bytes of the
@@ -134,7 +136,7 @@ between them, in 1.22 kHz bins.*
 | [`init/`](init/README.md) | Installation from stock, updates, recovery, return to stock |
 | [`include/hw/`](include/hw/README.md) | Register reference: every known MT7996, A-die and AN7581 register, as C headers |
 | [`docs/`](docs/) | [Architecture](docs/architecture.md), [the front LED](docs/led.md), [roadmap](docs/roadmap.md) |
-| `tests/`, `tools/` | The test suite and its report page (`tools/test_report.py`), the on-unit sweep of the stream modes (`tools/unit_sweep.py`) |
+| `tests/`, `tools/` | The test suite and its report page (`tools/test_report.py`), the on-unit sweep of the stream modes (`tools/unit_sweep.py`), a trial of the host's receive settings (`tools/host_rx_trial`), and the driver and notes for a USB adapter on the stream link ([`tools/r8152-rtl8159`](tools/r8152-rtl8159/README.md)) |
 
 ## Getting started
 
@@ -143,11 +145,14 @@ its console header, an Ethernet cable to its `lan3` port for installation, and
 a 10 GbE NIC on the host cabled to its `wan` port (10GBASE-T; an X710 with a
 copper SFP+ module works) for the IQ stream; a slower NIC or USB adapter works
 at lower sample rates (see "Links slower than 10 GbE"). The stream port is
-linked 5 to 6 s after it starts where the far end trains at what it offers. An
-RTL8159 USB adapter offers 10 Gbit/s and, without the PHY patch file its Linux
-driver asks for (`rtl_nic/rtl8159-1.fw`, not in linux-firmware), does not train
-at it: three attempts, then 5 Gbit/s, 18 s in all, the front LED breathing
-yellow meanwhile. Both revisions run the same images.
+linked 5 to 6 s after it starts where the far end trains at what it offers.
+
+A host without a 10 GbE port can use a USB adapter with Realtek's RTL8159,
+about 80 dollars: it links at 5 Gbit/s (18 s after the unit's port starts),
+which carries 160 Msps lossless and 320 Msps at 14 bits per sample pair, and
+every mode of the 5 Gbit/s row above passes on a unit with one.
+[`tools/r8152-rtl8159`](tools/r8152-rtl8159/README.md) has its driver for
+kernels that lack it, what was measured, and how the host is set up for it. Both revisions run the same images.
 Most units carry a W25N04KV NAND; some W1700K2s carry a W25N04LV (ID `ef 8b 23`),
 which is supported but has never been run on a unit: `init/install` stops on
 one until you pass `--i-dont-care-about-nand-corruption`, and asks for a raw

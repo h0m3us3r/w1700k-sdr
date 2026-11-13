@@ -66,6 +66,8 @@ public:
     void refresh();
     std::shared_ptr<const StreamView> view() const;  // nullptr: no service
     bool alive() const;
+    // The CPU the service asks its consumers to stay off (w1700k_stream.h, receive_cpu); -1: none.
+    int receive_cpu() const;
 
     struct Position {
         uint64_t run = 0, newest = 0;  // run: a run identifier (StreamView::run_id), 0: none

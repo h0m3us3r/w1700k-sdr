@@ -28,6 +28,7 @@
 #include <thread>
 
 #include "controller.h"
+#include "../../stream/src/placement.h"
 #include "stream.h"
 #include "json.h"
 #include "serve.h"
@@ -543,6 +544,15 @@ private:
     void on_tick()
     {
         stream_.refresh();
+        // Off the CPU that takes the stream's packets, as the stream service is (placement.h).
+        if (Clock::now() - placed_at_ >= std::chrono::seconds(2)) {
+            placed_at_ = Clock::now();
+            const int cpu = stream_.alive() ? stream_.receive_cpu() : -1;
+            if (cpu != kept_off_) {
+                placement::keep_off(cpu);
+                kept_off_ = cpu;
+            }
+        }
         if (controller_) controller_->poll();
         if (dump_requested.exchange(false)) {
             if (dumping_) {
@@ -921,6 +931,8 @@ private:
     double byte_rate_ = 0, datagram_rate_ = 0, sample_rate_ = 0, packed_share_ = 0;
     std::thread dump_thread_;
     std::atomic<bool> dumping_{false};
+    Clock::time_point placed_at_{};
+    int kept_off_ = -1;
 
     // Last: destroyed first, while the web server its reader wakes still exists.
     std::unique_ptr<Controller> controller_;

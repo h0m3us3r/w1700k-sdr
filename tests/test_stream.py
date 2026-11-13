@@ -176,6 +176,7 @@ class StreamServiceTest(unittest.TestCase):
         self.assertEqual((self.shm.get("packed"), self.shm.get("events"), self.shm.get("lost")), (1, 1, 1))
         self.assertEqual(self.shm.get("slices"), 1198)
         self.assertEqual(self.shm.get("flatten_active"), 0)
+        self.assertEqual(self.shm.get("receive_cpu"), 0, "loopback has no CPU of its own to stay off")
 
     def test_reduced_slices_are_restored_by_their_scale(self):
         formats = (16, 14, 8, 7)

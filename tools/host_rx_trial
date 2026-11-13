@@ -1,0 +1,82 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Try, one at a time, the host settings that could stop a single-queue adapter (a USB one) from
+# missing stream datagrams, and say what each does to the miss rate. Run it while a stream flows.
+#
+#   sudo tools/host_rx_trial IFACE [SECONDS]
+#
+# Each trial changes one thing, measures for SECONDS (default 20), and puts it back:
+#
+#   steer    receive packet steering: the IP and UDP work of each datagram is done on the other
+#            CPUs, not on the one the adapter interrupts (queues/rx-0/rps_cpus)
+#   irq      the adapter's interrupt (its USB controller's) on the last CPU, away from CPU 0,
+#            where most other interrupts land
+#   both     steer and irq together
+#
+# Nothing is kept: every setting is as it was when the script ends, also when it is interrupted.
+# It leaves the driver's own settings alone on purpose: changing an r8152 adapter's ring
+# (ethtool -G) while a stream arrived left its receive side dead until the interface was taken
+# down and up.
+# What it reads: the adapter's own count of datagrams it missed (ethtool -S, rx_missed) and its
+# packet count.
+set -eu
+[ "$(id -u)" = 0 ] || { echo "$0: run as root (sudo)" >&2; exit 1; }
+[ $# -ge 1 ] || { echo "usage: $0 IFACE [SECONDS]" >&2; exit 2; }
+iface=$1 seconds=${2:-20}
+net=/sys/class/net/$iface
+[ -e "$net" ] || { echo "$0: no interface $iface" >&2; exit 1; }
+ethtool -S "$iface" 2>/dev/null | grep -q rx_missed ||
+	{ echo "$0: $iface does not count missed datagrams (ethtool -S, rx_missed)" >&2; exit 1; }
+
+cpus=$(nproc)
+last=$((cpus - 1))
+# The interrupt behind the interface: its own, or the one of the controller it hangs from.
+dev=$(readlink -f "$net/device")
+irq=
+while [ "$dev" != /sys/devices ] && [ "$dev" != / ]; do
+	if [ -d "$dev/msi_irqs" ]; then irq=$(ls "$dev/msi_irqs" | head -1); break; fi
+	if [ -r "$dev/irq" ] && [ "$(cat "$dev/irq")" != 0 ]; then irq=$(cat "$dev/irq"); break; fi
+	dev=$(dirname "$dev")
+done
+[ -n "$irq" ] && [ -w "/proc/irq/$irq/smp_affinity_list" ] || irq=
+
+rps_was=$(cat "$net/queues/rx-0/rps_cpus")
+irq_was=$([ -z "$irq" ] || cat "/proc/irq/$irq/smp_affinity_list")
+
+restore() {
+	echo "$rps_was" > "$net/queues/rx-0/rps_cpus" 2>/dev/null || true
+	[ -z "$irq" ] || echo "$irq_was" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
+}
+trap restore EXIT INT TERM
+
+# Every CPU but one, as a hexadecimal mask.
+mask_without() { printf '%x' $(( ((1 << cpus) - 1) & ~(1 << $1) )); }
+count() { ethtool -S "$iface" | awk -v k="$1" '$1 == k ":" { print $2 }'; }
+
+measure() {
+	sleep 2				# the change settles
+	m0=$(count rx_missed) p0=$(count rx_packets) t0=$(date +%s.%N)
+	sleep "$seconds"
+	m1=$(count rx_missed) p1=$(count rx_packets) t1=$(date +%s.%N)
+	awk -v label="$1" -v m=$((m1 - m0)) -v p=$((p1 - p0)) -v dt="$(echo "$t1 - $t0" | bc)" 'BEGIN {
+		if (p < 1000) { printf "%-8s no stream: %d datagrams in %.0f s\n", label, p, dt; exit }
+		printf "%-8s %7.1f missed per second (%d of %d, %.4f %%)\n", label, m / dt, m, m + p, 100 * m / (m + p) }'
+}
+
+echo "$iface: interrupt ${irq:-not found} on CPUs ${irq_was:-?}, steering $rps_was; $cpus CPUs, $seconds s each"
+measure as-is
+
+echo "$(mask_without 0)" > "$net/queues/rx-0/rps_cpus"
+measure steer
+echo "$rps_was" > "$net/queues/rx-0/rps_cpus"
+
+if [ -n "$irq" ]; then
+	echo "$last" > "/proc/irq/$irq/smp_affinity_list"
+	measure irq
+	echo "$(mask_without "$last")" > "$net/queues/rx-0/rps_cpus"
+	measure both
+	echo "$rps_was" > "$net/queues/rx-0/rps_cpus"
+	echo "$irq_was" > "/proc/irq/$irq/smp_affinity_list"
+fi
+
+measure as-is

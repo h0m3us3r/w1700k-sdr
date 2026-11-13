@@ -11,7 +11,7 @@ TAG_KIND = TAG_EVENT | TAG_LOST | TAG_FLAT
 # Field offsets in struct w1700k_stream_header (all u64 but the first four u32).
 FIELDS = {
     "ring_slices": 16, "tags_offset": 24, "samples_offset": 32, "total_bytes": 40, "service_pid": 48,
-    "heartbeat_ns": 56, "position_seq": 128, "run": 136, "newest": 144, "received": 168,
+    "heartbeat_ns": 56, "receive_cpu": 64, "position_seq": 128, "run": 136, "newest": 144, "received": 168,
     "datagrams": 256, "bytes": 264, "slices": 272, "packed": 280, "events": 288, "lost": 296, "pieces": 304,
     "bad": 312, "late": 320, "before_start": 328, "duplicates": 336, "socket_drops": 344, "spare_words": 352,
     "stale_slices": 360, "stale_lines": 368, "flattened": 376, "saturated": 384, "overruns": 392, "reduced": 400, "suspect": 408,

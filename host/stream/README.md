@@ -27,6 +27,14 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 | `--ring-mib N` | 512 | the shared ring, a power of two (512 MiB holds 0.42 s at 320 Msps) |
 | `--name NAME` | `/w1700k-stream` | the shared-memory object (`/dev/shm/w1700k-stream`) |
 | `--report S` | 0 | a JSON status line on stdout every S seconds |
+| `--share-irq-cpu` | | run also on the CPU that takes the interface's packets (see below) |
+
+Where one CPU takes every packet of the interface that holds the bind address (an interface
+with a single receive queue, such as a USB adapter: the CPU its interrupt is delivered to), the
+service keeps its threads off that CPU, looks again every two seconds, and names the CPU in the
+shared header (`receive_cpu`) for its consumers; `w1700k-spectrum` follows it. That CPU has
+nothing to spare at 320 Msps, and what the adapter cannot hand over in time it drops
+([`tools/r8152-rtl8159`](../../tools/r8152-rtl8159/README.md) has the measurements).
 
 The host needs the destination address on the 10G link, an MTU of at least 8236
 (`sudo init/host/link keep IFACE 10.77.0.10/24 9216` gives the interface both and keeps them

@@ -35,7 +35,11 @@ For the 10 GbE IQ link (unit `eth1`, 10.77.0.1), give the host side its
 address and jumbo frames: `sudo init/host/link keep IFACE10G 10.77.0.10/24 9216`.
 `up` sets them until the interface goes away; `keep` also writes them into the
 NetworkManager connection of that interface, so a reboot or a USB adapter
-plugged in again comes up the same way. That matters: an adapter back at an
+plugged in again comes up the same way. Both also spread the packets of an
+interface with a single receive queue (a USB adapter) over the CPUs: its
+interrupt on a CPU of its own, the IP and UDP work on the others, which took
+such an adapter from 53 missed datagrams a second to between 1 and 5 at
+320 Msps ([`tools/r8152-rtl8159`](../tools/r8152-rtl8159/README.md)). That matters: an adapter back at an
 MTU of 1500 drops the stream's 8 KiB packets without a word. The controller
 checks it where it runs on the receiving host, and refuses to start a stream
 its interface would drop, naming this command.

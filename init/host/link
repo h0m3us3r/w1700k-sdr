@@ -15,16 +15,56 @@
 # holds 3.4 ms, and a host stall longer than that (a parallel build, say) drops
 # slices before any socket sees them.
 #
+# Given an MTU, an interface with one receive queue (a USB adapter) also gets its
+# packets spread: all of them arrive on the one CPU its interrupt lands on, by
+# default the CPU most other interrupts share, and at 127,000 datagrams a second
+# (320 Msps on 5 Gbit/s) that CPU fell behind often enough for the adapter to
+# miss 1 datagram in 2400. The interrupt (the adapter's, or its USB controller's)
+# is moved to the last CPU, and the IP and UDP work of each datagram is steered to
+# the others (receive packet steering). Measured with tools/host_rx_trial: 53
+# datagrams missed a second as it was, 13 with steering alone, 32 with the
+# interrupt moved alone, 1 with both. An interface with several queues is left as
+# it is. `down` puts both back.
+#
 # `up` lasts until the interface goes away: a reboot, or a USB adapter pulled and
 # plugged in again, which comes back with an MTU of 1500 and drops the stream's
 # 8 KiB packets without a word. `keep` also writes the address, the MTU and the
 # ring into the NetworkManager connection that manages IFACE (made if there is
-# none), so that they are applied whenever it appears. Without NetworkManager it
+# none), and the spreading into a hook NetworkManager runs when IFACE comes up
+# (/etc/NetworkManager/dispatcher.d/60-w1700k-IFACE; delete it to undo), so that
+# all of it is applied whenever the interface appears. Without NetworkManager it
 # says so, and `up` has to be repeated.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "$0: run as root (sudo)" >&2; exit 1; }
 [ $# -ge 2 ] || { echo "usage: $0 up|down|keep IFACE [CIDR [MTU]]" >&2; exit 2; }
 action=$1 iface=$2 cidr=${3:-192.168.1.10/24} mtu=${4:-}
+
+# spread IFACE on|off, as text: `keep` writes the same lines into NetworkManager's hook.
+spread_source=$(cat <<'SPREAD'
+spread() {
+	net=/sys/class/net/$1
+	[ -e "$net/queues/rx-0/rps_cpus" ] && [ ! -e "$net/queues/rx-1" ] || return 0
+	cpus=$(nproc --all)
+	[ "$cpus" -ge 2 ] && [ "$cpus" -le 32 ] || return 0
+	last=$((cpus - 1))
+	# The interrupt behind the interface: its own, or that of the controller it hangs from.
+	dev=$(readlink -f "$net/device") irq=
+	while [ "$dev" != /sys/devices ] && [ "$dev" != / ]; do
+		if [ -d "$dev/msi_irqs" ]; then irq=$(ls "$dev/msi_irqs" | head -1); break; fi
+		if [ -r "$dev/irq" ] && [ "$(cat "$dev/irq")" != 0 ]; then irq=$(cat "$dev/irq"); break; fi
+		dev=$(dirname "$dev")
+	done
+	if [ "$2" = on ]; then
+		[ -z "$irq" ] || echo "$last" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
+		printf '%x\n' $(( ((1 << cpus) - 1) & ~(1 << last) )) > "$net/queues/rx-0/rps_cpus"
+	else
+		[ -z "$irq" ] || echo "0-$last" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
+		echo 0 > "$net/queues/rx-0/rps_cpus"
+	fi
+}
+SPREAD
+)
+eval "$spread_source"
 
 keep()	# the connection that manages $iface keeps $cidr, $mtu and the largest receive ring
 {
@@ -52,16 +92,32 @@ keep()	# the connection that manages $iface keeps $cidr, $mtu and the largest re
 			echo "$0: this NetworkManager does not keep the receive ring" >&2
 	fi
 	echo "$0: kept in the NetworkManager connection \"$con\""
+	[ -n "$mtu" ] && [ -d /etc/NetworkManager/dispatcher.d ] || return 0
+	hook=/etc/NetworkManager/dispatcher.d/60-w1700k-$iface
+	{
+		echo '#!/bin/sh'
+		echo "# Written by init/host/link keep $iface: the W1700K stream link's packets are spread"
+		echo '# over the CPUs whenever the interface comes up. Delete this file to undo.'
+		echo "[ \"\$1\" = \"$iface\" ] && [ \"\$2\" = up ] || exit 0"
+		echo "$spread_source"
+		echo "spread \"$iface\" on"
+	} > "$hook"
+	chmod 755 "$hook"
+	echo "$0: and in $hook"
 }
 
 case "$action" in
 up|keep)
 	[ -z "$mtu" ] || ip link set dev "$iface" mtu "$mtu"
 	if [ -n "$mtu" ] && command -v ethtool >/dev/null; then
+		# Only where it is not there yet: an r8152 adapter whose ring was set while a
+		# stream arrived stopped receiving until it was taken down and up.
 		rx=$(ethtool -g "$iface" 2>/dev/null | awk '/^RX:/ { print $2; exit }')
-		[ -z "$rx" ] || ethtool -G "$iface" rx "$rx" 2>/dev/null ||
+		now=$(ethtool -g "$iface" 2>/dev/null | awk '/^RX:/ { n = $2 } END { print n }')
+		[ -z "$rx" ] || [ "$rx" = "$now" ] || ethtool -G "$iface" rx "$rx" 2>/dev/null ||
 			echo "$0: could not raise the $iface receive ring" >&2
 	fi
+	[ -z "$mtu" ] || spread "$iface" on
 	ip link set dev "$iface" up
 	ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/" ||
 		ip address add "$cidr" dev "$iface"
@@ -70,6 +126,7 @@ up|keep)
 down)
 	! ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/" ||
 		ip address del "$cidr" dev "$iface"
+	spread "$iface" off
 	;;
 *)
 	echo "usage: $0 up|down|keep IFACE [CIDR [MTU]]" >&2

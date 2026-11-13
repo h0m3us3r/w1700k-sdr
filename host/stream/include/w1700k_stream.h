@@ -53,7 +53,11 @@ struct w1700k_stream_header {
 	uint64_t tags_offset, samples_offset, total_bytes;
 	uint64_t service_pid;
 	uint64_t heartbeat_ns;		/* CLOCK_MONOTONIC, refreshed about every 100 ms */
-	uint64_t reserved0[8];
+	uint64_t receive_cpu;		/* 1 + the CPU that takes every datagram of the stream's interface,
+					 * where one CPU does (an adapter with one receive queue): a
+					 * consumer does well to keep its threads off it, as the service
+					 * keeps its own; 0: none */
+	uint64_t reserved0[7];
 
 	/* the published position */
 	uint64_t position_seq;		/* odd while the service writes run and newest */
