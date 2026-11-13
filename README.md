@@ -28,7 +28,43 @@ register against a trace of MediaTek's own firmware, and takes its commands
 | Tuning | No channels: the LO is any Hz a band's synthesizer locks at (unit A: 2.081–2.748, 4.647–7.509 and 4.707–7.576 GHz), on its grid of 2.98 Hz (2.4 GHz) or 11.9–14.3 Hz steps; retuned mid-stream (about 1 ms) |
 | Front end | AGC or manual LNA/baseband gain; analog filter 20–320 MHz |
 | Transport | the radio DMAs into a 1 GiB ring in SoC DRAM; the kernel sends every 8 KiB slice as one UDP datagram, zero-copy, on the 10 GbE port; at 320 Msps half the slices are packed to 28 bits per sample pair on the radio's own cores to fit the link (lossless, automatic) |
+| Slower links | the stream's packing follows the link's speed: every slice packed to 28 bits (lossless) carries 160 Msps on 5 Gbit/s; below that the SoC requantises to 16, 14, 8 or 7 bits per sample pair with a scale per slice (up to 160 Msps), and can send in datagrams small enough for a 1500-byte MTU; see the table below |
 | Host | `w1700k-stream` receives the export and serves the IQ stream to every consumer on the host (shared memory, complex int16, gap-tagged), with an optional correction ("flatten") of the decimation's roll-off applied to the samples themselves; `w1700k-spectrum`: 262,144-point FFT at 100 frames/s over every sample, browser UI, live controls; `sdr-recv` records the stream |
+
+## Links slower than 10 GbE
+
+The stream fits whatever the unit's port negotiates (a 5 or 2.5 Gbit/s adapter, a
+1 Gbit/s port); `w1700k` reads the speed at each start and picks the packing, or
+takes one set by hand (`--packing`, `export.packing`). A rate nothing fits is
+refused with the rate the link would need.
+
+| Link | 14-bit, lossless | Reduced on the unit |
+| --- | --- | --- |
+| 10 Gbit/s | 320 Msps (half the slices packed), 160 Msps raw | |
+| 5 Gbit/s | 160 Msps (every slice packed, 4.5 Gbit/s), 80 Msps raw | |
+| 2.5 Gbit/s | 80 Msps (packed), 40 Msps raw | 160 Msps at 14 bits per sample pair |
+| 1 Gbit/s | | 80 Msps at 8 bits, 40 Msps at 16 bits |
+
+- **Lossless** packings are made by the radio's own cores and leave the SoC
+  zero-copy: `raw` (32 bits per sample pair on the link), `half` (30) and
+  `full` (28, up to 160 Msps).
+- **Reduced** packings (`16`, `14`, `8`, `7`: 8, 7 or 4 bits, or 11 levels, for
+  each of I and Q) are requantised on the SoC, every 2048 samples with a scale
+  of their own, and scaled back to 14-bit samples by `w1700k-stream`, so
+  consumers see no difference but quantisation noise about 53, 47, 28 and
+  25 dB below each block's peak. On a 2.4 GHz test tone the noise floor rose
+  0.6, 0.7, 3.1 and 5.8 dB against the lossless stream.
+- **320 Msps needs 10 GbE.** Reducing means reading every sample through the
+  SoC's memory bus, which carries about 1.0 GB/s beside the capture; 320 Msps
+  is 1.28 GB/s. Reduced packings stop at 160 Msps.
+- **No jumbo frames?** `"export": {"piece": 1456}` in the configuration sends
+  every slice as datagrams a 1500-byte MTU carries (each costs 82 bytes of the
+  link; the unit sends about 250 thousand a second: 80 Msps lossless, 160 Msps
+  at 16 bits).
+
+The 5 Gbit/s rows and the small datagrams are measured on a unit (no slice
+lost); the 2.5 and 1 Gbit/s rows follow from the same arithmetic and have not
+been run on such a link. Details: [`host/w1700k/README.md`](host/w1700k/README.md).
 
 ## Screenshots
 
@@ -67,7 +103,8 @@ between them, in 1.22 kHz bins.*
 You need a W1700K (HW 1.x) or W1700K2 (HW 2.1), a 3.3 V USB serial adapter on
 its console header, an Ethernet cable to its `lan3` port for installation, and
 a 10 GbE NIC on the host cabled to its `wan` port (10GBASE-T; an X710 with a
-copper SFP+ module works) for the IQ stream. Both revisions run the same images.
+copper SFP+ module works) for the IQ stream; a slower NIC or USB adapter works
+at lower sample rates (see "Links slower than 10 GbE"). Both revisions run the same images.
 Most units carry a W25N04KV NAND; some W1700K2s carry a W25N04LV (ID `ef 8b 23`),
 which is supported but has never been run on a unit: `init/install` stops on
 one until you pass `--i-dont-care-about-nand-corruption`, and asks for a raw

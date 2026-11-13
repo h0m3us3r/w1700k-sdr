@@ -709,6 +709,7 @@ function toast(text, kind = '') {
     $('toasts').append(element);
     if (++toastCount > 4) $('toasts').firstElementChild?.remove();
     setTimeout(() => { element.remove(); toastCount--; }, 6000);
+    return element;
 }
 
 // ---- status ----------------------------------------------------------------------------------------
@@ -752,9 +753,15 @@ function onHello(m) {
     followRestored = false;
 }
 
+// A refused request arrives twice: as the controller's own log line, then as the request's failure
+// ("configure failed: " and the same words). One pop-up says it, in the fuller wording.
+let lastNotice = null;
 function onNotice(m) {
-    const level = m.level || 'error';
-    toast(m.text, level === 'info' ? '' : 'bad');
+    const level = m.level || 'error', now = performance.now();
+    const repeats = lastNotice && now - lastNotice.at < 5000 && lastNotice.element.isConnected &&
+        (m.text === lastNotice.text || m.text.endsWith(`: ${lastNotice.text}`));
+    if (repeats) lastNotice.element.textContent = m.text;
+    else lastNotice = {element: toast(m.text, level === 'info' ? '' : 'bad'), text: m.text, at: now};
     if (level !== 'info' && pendingLo !== null) {  // a refused tune: show the LO the receiver has
         pendingLo = null;
         showFrequency();
@@ -1082,8 +1089,17 @@ function bindSlider(id, onValue) {
 // ---- receiver ---------------------------------------------------------------------------------
 
 const RF_NAMES = {'2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz'};
-// The controller's packings: the samples are the radio's 14-bit I and Q in each, bit for bit.
+// The controller's packings. raw, half and full carry the radio's 14-bit I and Q bit for bit; the
+// numbered ones are requantised on the unit, each block of 2048 samples with a scale of its own.
+const reduced = (bits, each, below) => ({
+    label: `${each}, reduced (${bits} b/sample)`,
+    detail: `I and Q requantised on the unit to ${each} each, every 2048 samples with their own scale: not ` +
+        `lossless, the quantisation noise lies about ${below} dB below each block's peak.`});
 const PACKING = {
+    16: reduced(16, '8-bit', 53),
+    14: reduced(14, '7-bit', 47),
+    8: reduced(8, '4-bit', 28),
+    7: reduced(7, '11-level', 25),
     raw: {label: '14-bit, raw (32 b/sample)', detail: '14-bit I and Q as captured, 32 bits per sample on the link.'},
     half: {label: '14-bit, half packed (30 b/sample)',
            detail: '14-bit I and Q, lossless: every other chunk packed to 28 bits per sample, 30 on average.'},
