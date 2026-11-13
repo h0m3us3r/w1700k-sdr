@@ -22,9 +22,13 @@ Rules the hardware imposes:
   fits the unit port's speed, else every chunk packed to 28 bits (full, up to 160 Msps: all the
   radio's two packers carry), else every other chunk (half: 320 Msps on 10 GbE). Packing is
   lossless (8 samples in 7 words); a band switch keeps a running stream as it is where its packing
-  carries the new rate. A rate no packing fits on the link is refused. Where that choice is wrong
-  for a link, export.packing (or `start --packing`, `serve --packing`) sets the packing by hand:
-  the link is then not consulted, only what the packers can do.
+  carries the new rate. Where none of those fits, the unit's SoC requantises each slice to fewer
+  bits with a scale of its own (stream.REDUCED: 16, 14, 8 or 7 bits per I/Q pair, the deepest
+  that fits: 160 Msps is 14 bits on 2.5 Gbit/s, 80 Msps is 8 on 1); that is not lossless, and the
+  SoC does it only up to 160 Msps (its memory bus cannot read a 320 Msps capture). A rate no
+  packing fits on the link is refused. Where that choice is wrong for a link, export.packing (or
+  `start --packing`, `serve --packing`) sets the packing by hand: the link is then not consulted,
+  only what the packers can do.
 - The analog filter is the receiver's only anti-alias filter: the converter samples at 320 MHz, and
   what the filter passes 320 MHz from the LO folds onto the band (18..20 dB down with the 320 MHz
   filter, 32 at 160, 45 at 80: include/hw/adie/mt7976.h). So each band's filter follows its sample
@@ -41,14 +45,16 @@ from .config import local_mac_for
 from dataclasses import replace
 
 from .radio import DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image
-from .stream import GO_ADDR, PACKED_SHARE, Result, Stream, StreamError, wire_rate
+from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MAX_DATAGRAMS, Result, Stream,
+                     StreamError, datagram_rate, wire_rate)
 from .unit import Unit
 
 STATE_FILE = '/tmp/w1700k-state.json'
 BANDS = (0, 1, 2)
 DEFAULT_BAND = 1
 PACKINGS = config.PACKINGS
-assert PACKINGS == tuple(PACKED_SHARE)
+assert PACKINGS == tuple(PACKED_SHARE) + tuple(REDUCED)
+AUTOMATIC = ('raw', 'full', 'half') + tuple(REDUCED)   # the order tried: lossless first, then the deepest
 FULL_MAX_RATE = 160_000_000       # the WM and the WA pack every chunk up to this rate, half of them above
 DEFAULT_LINK_MBPS = 10_000        # a port that reports no speed: the unit's 10 GbE
 LINK_FILL = 0.975                 # the share of the link a stream may take (320 Msps half is 97.0 % of 10 GbE)
@@ -60,27 +66,44 @@ class ControlError(RuntimeError):
     pass
 
 
+class Refused(ControlError):
+    """A request turned down before anything changed: the receiver is as it was."""
+
+
 LOCK_RESOLUTION_HZ = 100_000            # the lock-edge search's resolution
 LOCK_NEAR_HZ = 20_000_000               # the edges lie this close to TUNE's reach: tried first
 LOCK_MARGIN_HZ = 1_000_000              # the span kept inside the edges found (they wander ~0.1 MHz)
 
 
-def packing_fits(packing, rate, link_mbps):
-    """Whether a stream at `rate` under `packing` fits the link and the packers."""
-    if packing == 'full' and rate > FULL_MAX_RATE:
+def packing_fits(packing, rate, link_mbps, piece=None):
+    """Whether a stream at `rate` under `packing` fits the link, the packers and the unit's senders."""
+    if packing == 'full' and rate > FULL_MAX_RATE or packing in REDUCED and rate > REDUCED_MAX_RATE:
         return False
-    return wire_rate(packing, rate) <= link_mbps * 1e6 * LINK_FILL
+    if piece and datagram_rate(packing, rate, piece) > SENDER_MAX_DATAGRAMS:
+        return False
+    return wire_rate(packing, rate, piece) <= link_mbps * 1e6 * LINK_FILL
 
 
-def packing_for(rate, link_mbps=DEFAULT_LINK_MBPS):
+def packing_for(rate, link_mbps=DEFAULT_LINK_MBPS, piece=None):
     """The packing of a stream at `rate` on a link of `link_mbps`: raw where it fits, else every
-    chunk packed (the most room on the link), else every other chunk."""
-    for packing in ('raw', 'full', 'half'):
-        if packing_fits(packing, rate, link_mbps):
+    chunk packed (the most room on the link, lossless), else every other chunk, else reduced to the
+    most bits that fit."""
+    for packing in AUTOMATIC:
+        if packing_fits(packing, rate, link_mbps, piece):
             return packing
-    need = min(wire_rate(p, rate) for p in PACKINGS if p != 'full' or rate <= FULL_MAX_RATE)
-    raise ControlError(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link, which carries '
-                       f'{link_mbps / 1e3:g} (at most {LINK_FILL:.1%} of it)')
+    if piece and not any(datagram_rate(p, rate, piece) <= SENDER_MAX_DATAGRAMS for p in AUTOMATIC):
+        raise Refused(f'{rate / 1e6:g} Msps in datagrams of {piece} bytes (export.piece) is more than the '
+                      f'unit sends: {datagram_rate(AUTOMATIC[-1], rate, piece) / 1e3:.0f} thousand a second '
+                      f'even at {AUTOMATIC[-1]} bits per sample, of {SENDER_MAX_DATAGRAMS / 1e3:g}')
+    if rate > REDUCED_MAX_RATE:
+        need = wire_rate('half', rate, piece)
+        raise Refused(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link, which carries '
+                      f'{link_mbps / 1e3:g} (at most {LINK_FILL:.1%} of it); the unit reduces the bits '
+                      f'per sample only up to {REDUCED_MAX_RATE / 1e6:g} Msps')
+    need = wire_rate(AUTOMATIC[-1], rate, piece)
+    raise Refused(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link even at '
+                  f'{AUTOMATIC[-1]} bits per sample, and the link carries {link_mbps / 1e3:g} '
+                  f'(at most {LINK_FILL:.1%} of it)')
 
 
 def filter_for(cfg):
@@ -195,11 +218,18 @@ class Controller:
     # --- operations ---
 
     def run(self, busy, operation, *args):
-        """Run one operation with the busy flag set and errors recorded in the state."""
+        """Run one operation with the busy flag set and errors recorded in the state. A request
+        that is refused (Refused: the receiver stays as it was) is logged, not recorded: the
+        state's error is what is wrong with the receiver, and it keeps the one it had."""
+        before = self.error
         self.busy, self.error = busy, None
         self._changed()
         try:
             return operation(*args)
+        except Refused as exc:
+            self.error = before
+            self._log('error', str(exc))
+            raise
         except Exception as exc:
             self.error = str(exc)
             self._log('error', self.error)
@@ -277,7 +307,7 @@ class Controller:
 
     def _require_loaded(self):
         if not self.loaded:
-            raise ControlError('the radio is not loaded')
+            raise Refused('the radio is not loaded')
 
     def _link(self):
         return self.link_mbps or DEFAULT_LINK_MBPS
@@ -287,10 +317,13 @@ class Controller:
         configuration's) where the packers can do it, else the one the rate and the link give."""
         manual = manual or self.config.export.packing
         if not manual:
-            return packing_for(rate, self._link())
+            return packing_for(rate, self._link(), self.config.export.piece)
         if manual == 'full' and rate > FULL_MAX_RATE:
-            raise ControlError(f'packing full is set by hand, and the radio packs every chunk only up to '
-                               f'{FULL_MAX_RATE / 1e6:g} Msps, not {rate / 1e6:g}')
+            raise Refused(f'packing full is set by hand, and the radio packs every chunk only up to '
+                          f'{FULL_MAX_RATE / 1e6:g} Msps, not {rate / 1e6:g}')
+        if manual in REDUCED and rate > REDUCED_MAX_RATE:
+            raise Refused(f'packing {manual} is set by hand, and the unit reduces the bits per sample only '
+                          f'up to {REDUCED_MAX_RATE / 1e6:g} Msps, not {rate / 1e6:g}')
         return manual
 
     def _tune(self, hz):
@@ -484,7 +517,8 @@ class Controller:
             # moved
             if b != self.band:
                 # a stream chosen automatically keeps a packing that still fits; one set by hand is that one
-                if running and (running == needed or not manual and packing_fits(running, cfg.sample_rate, self._link())):
+                if running and (running == needed or not manual and running not in REDUCED
+                                and packing_fits(running, cfg.sample_rate, self._link(), self.config.export.piece)):
                     self._switch_mid_stream(b)
                 else:
                     if running:
@@ -529,12 +563,13 @@ class Controller:
             self._load()
         export = self.config.export
         dst_mac = export.dst_mac or local_mac_for(export.dst_ip)
-        speed = self.stream.check_interface(export.interface)
+        speed, mtu = self.stream.check_interface(export.interface)
         self.link_mbps = min((v for v in (speed, export.link_mbps) if v), default=None)
         manual = packing or export.packing
         packing = self._packing_at(self.bands[self.band].sample_rate, manual)
+        self.stream.check_mtu(export.interface, mtu, packing, export.piece)
         self.stream.install_own(self._wm(), packing)
-        self.stream.launch(export, dst_mac)
+        self.stream.launch(export, dst_mac, packing, mtu)
         self.packing, self.packing_manual = packing, manual
         self._save()
         try:
@@ -579,6 +614,14 @@ class Controller:
         result = self._finish_stream()
         level = 'info' if result.ok else 'warn'
         self._log(level, f'stream {result.text}: {result.chunks} chunks in {result.seconds} s')
+        sent = (result.reader or {}).get('send') or {}
+        if sent.get('senders'):
+            # the unit's own senders (a reduced packing, or small datagrams): what they could not carry
+            short = sent.get('lapped', 0) or sent.get('errors', 0)
+            self._log('warn' if short else 'info',
+                      f'the unit sent {sent.get("slices", 0)} slices in {sent.get("datagrams", 0)} datagrams; '
+                      f'{sent.get("lapped", 0)} skipped (the senders fell behind), {sent.get("errors", 0)} send '
+                      f'errors, {sent.get("busy", 0)} waits for the link')
         return result
 
     def _finish_stream(self):

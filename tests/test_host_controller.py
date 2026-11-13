@@ -203,23 +203,73 @@ class Streaming(ControllerTest):
         self.assertFalse(self.dev.streaming or self.dev.route_armed)
 
     def test_packing_by_link(self):
-        """Raw where it fits, else every chunk packed up to 160 Msps, else every other chunk."""
+        """Raw where it fits, else every chunk packed up to 160 Msps, else every other chunk, else
+        reduced to the most bits per sample that fit."""
         for mbps, rate, packing in ((10000, 160_000_000, 'raw'), (10000, 320_000_000, 'half'),
                                     (5000, 80_000_000, 'raw'), (5000, 160_000_000, 'full'),
-                                    (2500, 40_000_000, 'raw'), (2500, 80_000_000, 'full')):
+                                    (2500, 40_000_000, 'raw'), (2500, 80_000_000, 'full'),
+                                    (2500, 160_000_000, '14'), (1000, 80_000_000, '8'), (1000, 40_000_000, '16')):
             self.assertEqual(packing_for(rate, mbps), packing, (mbps, rate))
-        for mbps, rate in ((5000, 320_000_000), (2500, 160_000_000), (1000, 40_000_000)):
+        # 320 Msps is beyond what the unit's SoC can read to reduce: only the radio's packings carry it
+        for mbps, rate in ((5000, 320_000_000), (2500, 320_000_000), (1000, 160_000_000), (100, 40_000_000)):
             with self.assertRaises(ControlError):
                 packing_for(rate, mbps)
         self.assertFalse(packing_fits('full', 320_000_000, 10000), 'the packers carry every chunk to 160 Msps')
+        self.assertFalse(packing_fits('14', 320_000_000, 10000), 'the SoC reduces up to 160 Msps')
+        # small datagrams: more of the link, and no more of them than the senders manage
+        self.assertEqual(packing_for(80_000_000, 5000, 1456), 'raw')
+        self.assertEqual(packing_for(80_000_000, 2500, 1456), 'full')
+        self.assertEqual(packing_for(160_000_000, 5000, 1456), '16', '160 Msps packed would be 391k datagrams/s')
+        with self.assertRaisesRegex(ControlError, 'more than the unit sends'):
+            packing_for(320_000_000, 10000, 1456)
 
     def test_a_rate_the_link_cannot_carry_is_refused(self):
         self.loaded(1)
         self.dev.link_mbps = 5000
-        with self.assertRaisesRegex(ControlError, r'320 Msps needs 9\.70 Gbit/s on the link, which carries 5'):
+        with self.assertRaisesRegex(ControlError, r'320 Msps needs 9\.70 Gbit/s on the link, which carries 5 .*'
+                                                  r'reduces the bits per sample only up to 160 Msps'):
             self.ctl.start()
+        with self.assertRaisesRegex(ControlError, 'packing 14 is set by hand.*only up to 160 Msps, not 320'):
+            self.ctl.start('14')
+        self.assertIsNone(self.ctl.state()['error'], 'a refused request is not an error of the receiver')
         self.assertEqual(self.dev.radio_commands, [])
         self.assertFalse(self.dev.streaming)
+        self.ctl.configure(1, sample_rate=160_000_000)
+        self.dev.link_mbps = 1000
+        with self.assertRaisesRegex(ControlError, r'160 Msps needs 1\.17 Gbit/s on the link even at 7 bits per '
+                                                  r'sample, and the link carries 1 '):
+            self.ctl.start()
+
+    def test_a_reduced_packing_where_no_lossless_one_fits(self):
+        """160 Msps on 2.5 Gbit/s: the radio streams raw and the unit's senders reduce it to 14 bits."""
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=160_000_000)
+        self.dev.radio_commands.clear()
+        self.dev.link_mbps = 2500
+        self.ctl.start()
+        self.assertEqual(self.dev.radio_commands, [('stream', (0,))])
+        self.assertFalse(self.dev.wa_up)
+        self.assertEqual(self.ctl.state()['stream']['packing'], '14')
+        text = ' '.join(self.dev.pump_argv)
+        self.assertIn('--send 10.77.0.1 10.77.0.10 7700 --ports 8 --senders 2 --format 14 --datagram 9188 --cpu 3', text)
+        self.assertNotIn('--export', text)
+        # a rate a lossless packing carries: restarted with that one
+        self.ctl.configure(1, sample_rate=80_000_000)
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'full')
+        self.assertIn('--export eth1', ' '.join(self.dev.pump_argv))
+        self.ctl.stop()
+        self.assertFalse(self.dev.streaming or self.dev.route_armed)
+
+    def test_small_datagrams(self):
+        """export.piece: every packing leaves through the senders, in pieces a small MTU carries."""
+        self.loaded(0, narrow0=True)
+        self.dev.mtu = 1500
+        self.ctl.config = replace(self.config, export=replace(self.config.export, piece=1456))
+        self.ctl.start()
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'raw')
+        text = ' '.join(self.dev.pump_argv)
+        self.assertIn('--send 10.77.0.1 10.77.0.10 7700 --ports 8 --senders 2 --piece 1456 --cpu 3', text)
+        self.assertNotIn('--format', text)
 
     def test_link_cap_from_the_configuration(self):
         """export.link_mbps below the port's speed is the link (an adapter that carries less)."""
@@ -282,7 +332,7 @@ class Streaming(ControllerTest):
     def test_mid_stream_change_the_link_cannot_carry(self):
         """Refused before the stream is touched: it keeps running as it was."""
         self.loaded(0, narrow0=True)
-        self.dev.link_mbps = 5000
+        self.dev.link_mbps = 1500
         self.ctl.start()
         for change in (lambda: self.ctl.configure(1), lambda: self.ctl.configure(0, sample_rate=320_000_000)):
             with self.assertRaises(ControlError):

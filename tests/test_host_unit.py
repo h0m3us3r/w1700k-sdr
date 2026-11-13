@@ -88,6 +88,14 @@ class Configuration(unittest.TestCase):
             with self.assertRaises(config.ConfigError):
                 config.parse({'export': {'packing': bad}})
 
+    def test_piece(self):
+        """export.piece: a slice's bytes per datagram; absent or null: whole slices."""
+        self.assertIsNone(config.parse({}).export.piece)
+        self.assertEqual(config.parse({'export': {'piece': 1456}}).export.piece, 1456)
+        for bad in (0, 255, 8193, True, '1456'):
+            with self.assertRaises(config.ConfigError):
+                config.parse({'export': {'piece': bad}})
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -29,13 +29,25 @@ GO_ADDR, GO_MAGIC, STOP_MAGIC = 0x0090F008, 0x474F474F, 0x504F5453
 STREAM_SECONDS = 604800           # the pump's own limit (7 days); a stream normally ends by stop
 IDLE_MS = 300                     # the pump ends once data has stopped arriving this long
 DRAIN_MS = 3000
-MIN_MTU = 8236                    # one 8 KiB slice per datagram plus its headers
+IP_UDP = 28                       # IPv4 and UDP headers, within the MTU
+HEADERS = IP_UDP + 16             # and the export header: a datagram's bytes beyond its slice
+MIN_MTU = 8192 + HEADERS          # one 8 KiB slice per datagram
 # A datagram on the wire beyond its slice: the export header (16), UDP (8), IPv4 (20), Ethernet (14),
 # FCS (4), preamble (8) and the inter-frame gap (12).
 WIRE_OVERHEAD = 82
 PACKED_CHUNK = 7168               # a chunk packed to 28 bits per sample pair (iq_format.h)
 # The share of chunks each packing schedule packs (firmware/stream/blob.py PACKINGS).
 PACKED_SHARE = {'raw': 0.0, 'half': 0.5, 'full': 1.0}
+# The reduced formats (include/hw/mt7996/iq_reduce.h): bits per I/Q pair, and a slice's bytes. The
+# firmware streams raw; the unit's SoC requantises each slice with one scale (mt7996-stream --send).
+# That reads every sample through the SoC's memory bus, which carries 1.0 GB/s of it beside the
+# capture (measured: one core 0.60, two 1.0, three 0.93): 160 Msps (0.64 GB/s), not 320 (1.28).
+REDUCED_MAX_RATE = 160_000_000
+SENDER_MAX_DATAGRAMS = 250_000    # a second: the senders' reach through the network stack (234k measured)
+SENDERS = 2                       # two sender threads read more between them than three (the bus again)
+REDUCED = {'16': 16, '14': 14, '8': 8, '7': 7}
+REDUCED_CHUNK = {'16': 4096, '14': 3584, '8': 2048, '7': 1792}
+PIECE_RANGE = (256, 8192)         # mt7996-stream --piece
 EXPORT_CPU, PUMP_CPU = 2, 3       # the export worker and the pump each busy-poll one CPU
 
 OUT_FILE = '/tmp/w1700k-stream.json'
@@ -58,12 +70,43 @@ class StreamError(RuntimeError):
     pass
 
 
-def wire_rate(packing, sample_rate):
-    """Bits/s on the link of a stream at `sample_rate` under a packing schedule: one datagram per
-    chunk of 2048 samples, packed or raw."""
-    share = PACKED_SHARE[packing]
-    per_chunk = share * (PACKED_CHUNK + WIRE_OVERHEAD) + (1 - share) * (CHUNK + WIRE_OVERHEAD)
+def firmware_packing(packing):
+    """The packing schedule the radio runs under a stream's packing: a reduced one is made from raw."""
+    return 'raw' if packing in REDUCED else packing
+
+
+def uses_sender(packing, piece=None):
+    """Whether the stream leaves through mt7996-stream's own senders (reduced, or in pieces) rather
+    than the driver's zero-copy export."""
+    return packing in REDUCED or bool(piece)
+
+
+def wire_rate(packing, sample_rate, piece=None):
+    """Bits/s on the link of a stream at `sample_rate` under a packing: each chunk of 2048 samples,
+    raw, packed or reduced, as one datagram, or as datagrams of at most `piece` bytes of it."""
+    def on_wire(chunk):
+        return chunk + (-(-chunk // piece) if piece else 1) * WIRE_OVERHEAD
+    if packing in REDUCED:
+        per_chunk = on_wire(REDUCED_CHUNK[packing])
+    else:
+        share = PACKED_SHARE[packing]
+        per_chunk = share * on_wire(PACKED_CHUNK) + (1 - share) * on_wire(CHUNK)
     return sample_rate * 4 / CHUNK * per_chunk * 8
+
+
+def datagram_rate(packing, sample_rate, piece):
+    """Datagrams a second of a stream sent in pieces."""
+    chunks = (REDUCED_CHUNK[packing],) if packing in REDUCED else \
+        {'raw': (CHUNK,), 'full': (PACKED_CHUNK,), 'half': (CHUNK, PACKED_CHUNK)}[packing]
+    return sample_rate * 4 / CHUNK * sum(-(-chunk // piece) for chunk in chunks) / len(chunks)
+
+
+def mtu_needed(packing, piece=None):
+    """The MTU the unit's port needs for a stream's datagrams."""
+    if not uses_sender(packing, piece):
+        return MIN_MTU                 # the driver's export checks for a whole raw slice
+    chunk = REDUCED_CHUNK[packing] if packing in REDUCED else PACKED_CHUNK if packing == 'full' else CHUNK
+    return (min(piece, chunk) if piece else chunk) + HEADERS
 
 
 @dataclass(frozen=True)
@@ -101,14 +144,26 @@ def parse_result(page, reader=None):
     return Result(status, res['chunks'], round(res['cycles'] / CORE_HZ, 3), status == 3, reader)
 
 
-def stream_argv(tool, export, dst_mac):
-    """The pump."""
-    return [tool, DEVICE, '--seconds', str(STREAM_SECONDS), '--idle-ms', str(IDLE_MS),
+def stream_argv(tool, export, dst_mac, packing='raw', mtu=None):
+    """The pump, and what carries the slices to the host: the driver's zero-copy export, or the
+    pump's own senders for a reduced packing or small datagrams. With the port's `mtu` known, a
+    datagram of the senders carries as many whole slices as fit it."""
+    argv = [tool, DEVICE, '--seconds', str(STREAM_SECONDS), '--idle-ms', str(IDLE_MS),
             '--stop', f'{GO_ADDR:#010x}', f'{STOP_MAGIC:#010x}', '--threads', '0',
-            '--go', f'{GO_ADDR:#010x}', f'{GO_MAGIC:#010x}'] + [
-            '--export', export.interface, export.src_ip, export.dst_ip, dst_mac, str(export.port),
-            '--ports', str(export.ports), '--drain-ms', str(DRAIN_MS),
-            '--export-cpu', str(EXPORT_CPU), '--cpu', str(PUMP_CPU)]
+            '--go', f'{GO_ADDR:#010x}', f'{GO_MAGIC:#010x}']
+    if not uses_sender(packing, export.piece):
+        return argv + ['--export', export.interface, export.src_ip, export.dst_ip, dst_mac, str(export.port),
+                       '--ports', str(export.ports), '--drain-ms', str(DRAIN_MS),
+                       '--export-cpu', str(EXPORT_CPU), '--cpu', str(PUMP_CPU)]
+    argv += ['--send', export.src_ip, export.dst_ip, str(export.port), '--ports', str(export.ports),
+             '--senders', str(SENDERS)]
+    if packing in REDUCED:
+        argv += ['--format', str(REDUCED[packing])]
+    if export.piece:
+        argv += ['--piece', str(export.piece)]
+    elif mtu:
+        argv += ['--datagram', str(mtu - IP_UDP)]
+    return argv + ['--cpu', str(PUMP_CPU)]
 
 
 class Stream:
@@ -119,7 +174,7 @@ class Stream:
         """Our own firmware: one STREAM command; our WM arms the route and ICAP0, starts the WA for
         packing, and runs the producer it carries, which waits for the pump's go word. The command
         is acknowledged when the stream has ended (collect_own)."""
-        w.radio_post('stream', wm_mod.RADIO_PACKING[packing])
+        w.radio_post('stream', wm_mod.RADIO_PACKING[firmware_packing(packing)])
 
     def collect_own(self, w, packing):
         """After the pump ended on our own WM: its STREAM command acknowledged (after the producer's
@@ -131,29 +186,35 @@ class Stream:
         w.radio_wait(w.status()['radio_req'], 'stream', timeout=PRODUCER_RETURN_SECONDS)
         page = struct.pack(f'<{RESULT_WORDS}I', *w.session.ctl(read=(DONE_AT, RESULT_WORDS))[0])
         result = parse_result(page, reader)
-        if packing != 'raw' and result.status > 0 and not wa_exited(page):
+        if firmware_packing(packing) != 'raw' and result.status > 0 and not wa_exited(page):
             raise StreamError('the WA did not leave the packer; reload the firmware')
         return result
 
     def check_interface(self, interface):
-        """The export sends one 8 KiB slice per datagram straight to the NIC: it needs the link up
-        and a jumbo MTU (9216 provisioned). Returns the link's negotiated speed in Mbit/s, None
-        where the port does not report one."""
+        """The unit's export port: it must exist and be up. Returns the link's negotiated speed in
+        Mbit/s (None where the port does not report one) and its MTU."""
         name = shlex.quote(interface)
         path = f'/sys/class/net/{name}'
         text = self.unit.run(f'cat {path}/mtu {path}/operstate {path}/speed 2>/dev/null').stdout
         fields = text.decode(errors='replace').split()
         if len(fields) < 2 or not fields[0].isdigit():
             raise StreamError(f'the unit has no interface {interface}')
-        if int(fields[0]) < MIN_MTU:
-            raise StreamError(f'{interface} MTU is {fields[0]}; the export needs at least {MIN_MTU} (9216)')
         if fields[1] == 'down':
             raise StreamError(f'{interface} is down')
-        return int(fields[2]) if len(fields) > 2 and fields[2].isdigit() and int(fields[2]) > 0 else None
+        speed = int(fields[2]) if len(fields) > 2 and fields[2].isdigit() and int(fields[2]) > 0 else None
+        return speed, int(fields[0])
 
-    def launch(self, export, dst_mac):
+    def check_mtu(self, interface, mtu, packing, piece=None):
+        """A datagram carries a whole slice (8 KiB raw: a jumbo MTU, 9216 provisioned) unless
+        export.piece splits them."""
+        need = mtu_needed(packing, piece)
+        if mtu < need:
+            raise StreamError(f'{interface} MTU is {mtu}; packing {packing} needs at least {need}'
+                              + ('' if piece else ' (9216 provisioned), or export.piece for small datagrams'))
+
+    def launch(self, export, dst_mac, packing='raw', mtu=None):
         """Start mt7996-stream detached from this ssh session; it runs until stop()."""
-        stream = shlex.join(stream_argv(self.unit.tool('mt7996-stream'), export, dst_mac))
+        stream = shlex.join(stream_argv(self.unit.tool('mt7996-stream'), export, dst_mac, packing, mtu))
         job = f'{stream} > {OUT_FILE} 2>&1; echo done > {DONE_FILE}'
         self.unit.check(f'rm -f {OUT_FILE} {DONE_FILE}; setsid sh -c {shlex.quote(job)} < /dev/null > /dev/null 2>&1 &')
 

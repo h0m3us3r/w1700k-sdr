@@ -6,7 +6,7 @@
     w1700k band B [--rate 40|80|160|320|640/2] [--lo FREQ]
                                     capture band B (at another sample rate, Msps, or LO); 640/2:
                                     band 2 captured at 640 Msps, every other sample streamed
-    w1700k start [--packing P]      stream 14-bit IQ, raw where the link carries it, else packed
+    w1700k start [--packing P]      stream IQ: 14-bit raw where the link carries it, else packed, else fewer bits
                                     to 28 bits (lossless): every chunk, or every other at 320 Msps
     w1700k stop
     w1700k status [--rf]            receiver state (--rf: read the active band's RF registers)

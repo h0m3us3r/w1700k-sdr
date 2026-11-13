@@ -30,7 +30,8 @@ Build the firmware first (`make -C firmware`); the host reads `firmware/build/fi
 | `export.dst_mac` | MAC of the local interface holding `dst_ip` | |
 | `export.port`, `export.ports` | `7700`, `8` | UDP destination port; source ports cycle over `ports` |
 | `export.link_mbps` | the unit port's negotiated speed | what a stream may put on the link, Mbit/s, where that is less (a USB adapter that carries less than its Ethernet side links at) |
-| `export.packing` | automatic | `raw`, `half` or `full`: every stream's packing set by hand, where the automatic choice is wrong for a link |
+| `export.packing` | automatic | `raw`, `half`, `full`, or `16`, `14`, `8`, `7` (bits per I/Q pair): every stream's packing set by hand, where the automatic choice is wrong for a link |
+| `export.piece` | whole slices | bytes of a slice per datagram, 256..8192, for a path without jumbo frames (`1456` fits a 1500-byte MTU) |
 
 All ssh traffic shares one ControlMaster connection (socket in `$XDG_RUNTIME_DIR`).
 
@@ -84,14 +85,27 @@ analog filter. Defaults, all set by every load:
   from the LO fold in at -2..-32 dB; the state reports it as `capture_rate` 640000000. The other
   bands have no 640 Msps datapath.
 - **Packing** follows the rate and the link (the unit port's negotiated speed, read at each start,
-  or `export.link_mbps` if lower); it is lossless, so it is not a setting. `raw`: 14-bit IQ as
+  or `export.link_mbps` if lower); lossless where the link allows. `raw`: 14-bit IQ as
   captured, where it fits (160 Msps on 10 GbE, 80 on 5 Gbit/s, 40 on 2.5). `full`: every chunk
   packed to 28 bits (8 samples in 7 words) by the WM and the WA, 7/8 of the bytes, up to 160 Msps
   (160 on 5 Gbit/s, 80 on 2.5). `half`: every other chunk packed, which is all the two packers
-  carry at 320 Msps (10 GbE). A stream may take 97.5 % of the link; a rate that no packing fits
-  is refused with the rate the link would need. Set by hand (`export.packing`, `start --packing`,
-  `serve --packing`), the packing is used whatever the link, and only `full` above 160 Msps is
-  refused; the state reports it as `stream.packing_manual`.
+  carry at 320 Msps (10 GbE). Where none of those fits, the unit's SoC requantises each chunk to
+  fewer bits with a scale of its own and sends it itself (`mt7996-stream --send`): `16`, `14`, `8`
+  or `7` bits per I/Q pair (8, 7 or 4 bits, or 11 levels, per component), the most that fit. That
+  is not lossless: the quantisation noise lies about 53, 47, 28 and 25 dB below each chunk's
+  peak. It carries 160 Msps on 2.5 Gbit/s (`14`), 80 Msps on 1 Gbit/s (`8`) and 40 Msps on
+  1 Gbit/s (`16`), and stops at 160 Msps: reducing means reading every sample through the SoC's
+  memory bus, which carries 1.0 GB/s beside the capture, and 320 Msps is 1.28 (measured: one core
+  reads 0.60 GB/s, two 1.0, three 0.93; the zero-copy export of the lossless packings reads
+  nothing). So 320 Msps needs 10 GbE. A stream may take 97.5 % of the link; a rate that no
+  packing fits is refused with the rate the link would need. Set by hand (`export.packing`,
+  `start --packing`, `serve --packing`), the packing is used whatever the link; only `full` and
+  the reduced ones above 160 Msps are refused; the state reports it as `stream.packing_manual`.
+- **Small datagrams** (`export.piece`): each chunk leaves as datagrams of at most that many of
+  its bytes, through the unit's senders, whatever the packing: for a host interface or a path
+  that carries no jumbo frames. Each datagram costs 82 bytes of the link and CPU on both ends;
+  the senders manage about 250 thousand a second (80 Msps raw or 160 Msps at `16` in 1456-byte
+  pieces), and the packing choice counts that in.
 - **Filter** 20..320 MHz. It follows the sample rate by default (as wide as the rate, 320 MHz at
   640/2): it is the receiver's only anti-alias filter, and whatever it passes 320 MHz from the LO
   folds onto the band (18..20 dB down at 320 MHz, 32 at 160, 45 at 80, 65 at 40, 77 at 20, measured
