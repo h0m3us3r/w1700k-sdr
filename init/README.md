@@ -164,7 +164,10 @@ a boot that finds the update still unconfirmed puts the previous root back, and
 does not try that image again. So does any later reboot of a new root that was
 never confirmed; a run that was interrupted before confirming is finished by
 running the same command again. `ssh root@UNIT system-update status` shows what
-runs, what is staged and what the loader made of it. (`verify-storage` on the
+runs, what is staged and what the loader made of it, and `system-update cancel`
+there forgets a staged root: before the reboot nothing is written at all, and
+after a new root was put back it clears the note of that. The whole run takes
+about a minute. (`verify-storage` on the
 unit holds that nothing has written flash since the boot: the tool runs it
 before confirming, and confirming, which removes the staged files, is itself
 such a write, so run by hand afterwards it objects until the next boot.)
