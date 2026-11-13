@@ -29,6 +29,8 @@ Build the firmware first (`make -C firmware`); the host reads `firmware/build/fi
 | `export.interface`, `src_ip`, `dst_ip` | `eth1`, `10.77.0.1`, `10.77.0.10` | 10 GbE path |
 | `export.dst_mac` | MAC of the local interface holding `dst_ip` | |
 | `export.port`, `export.ports` | `7700`, `8` | UDP destination port; source ports cycle over `ports` |
+| `export.link_mbps` | the unit port's negotiated speed | what a stream may put on the link, Mbit/s, where that is less (a USB adapter that carries less than its Ethernet side links at) |
+| `export.packing` | automatic | `raw`, `half` or `full`: every stream's packing set by hand, where the automatic choice is wrong for a link |
 
 All ssh traffic shares one ControlMaster connection (socket in `$XDG_RUNTIME_DIR`).
 
@@ -46,7 +48,7 @@ is written to the unit's flash or eFuses.
 |---|---|
 | `load [--band B]` | load our firmware, bring the radio up from cold, every band at its LO and sample rate; B captured (about 2 s) |
 | `band B [--rate RATE] [--lo FREQ]` | capture band B; another rate (40, 80, 160, 320 Msps, or `640/2` on band 2) or LO |
-| `start` | start streaming (packing follows the rate, see below) |
+| `start [--packing P]` | start streaming (packing follows the rate and the link, see below; `--packing raw\|half\|full` sets this stream's by hand) |
 | `stop` | stop streaming |
 | `status [--rf]` | the state below; `--rf` reads the active band's synthesizer, filter and gain |
 | `tune FREQ` | LO of the active band, any Hz it locks at (`5250M`, `2.442G`, `2441.000123M`) |
@@ -80,10 +82,22 @@ analog filter. Defaults, all set by every load:
   where the SNR stays that of mid-band). **640/2** (band 2 only): the 320 MHz class, captured at
   640 Msps, every other sample streamed: 320 Msps flat to about +-155 MHz, but signals 160..320 MHz
   from the LO fold in at -2..-32 dB; the state reports it as `capture_rate` 640000000. The other
-  bands have no 640 Msps datapath. Raw 14-bit IQ fits one 10 GbE
-  link up to 160 Msps; above that the stream is packed `half` (WM and WA pack half the chunks to
-  28 bits, 8 samples in 7 words, lossless). The packing follows the rate; it is not a setting.
-- **Filter** 20..320 MHz at any sample rate, 320 by default, kept across LO and rate changes.
+  bands have no 640 Msps datapath.
+- **Packing** follows the rate and the link (the unit port's negotiated speed, read at each start,
+  or `export.link_mbps` if lower); it is lossless, so it is not a setting. `raw`: 14-bit IQ as
+  captured, where it fits (160 Msps on 10 GbE, 80 on 5 Gbit/s, 40 on 2.5). `full`: every chunk
+  packed to 28 bits (8 samples in 7 words) by the WM and the WA, 7/8 of the bytes, up to 160 Msps
+  (160 on 5 Gbit/s, 80 on 2.5). `half`: every other chunk packed, which is all the two packers
+  carry at 320 Msps (10 GbE). A stream may take 97.5 % of the link; a rate that no packing fits
+  is refused with the rate the link would need. Set by hand (`export.packing`, `start --packing`,
+  `serve --packing`), the packing is used whatever the link, and only `full` above 160 Msps is
+  refused; the state reports it as `stream.packing_manual`.
+- **Filter** 20..320 MHz. It follows the sample rate by default (as wide as the rate, 320 MHz at
+  640/2): it is the receiver's only anti-alias filter, and whatever it passes 320 MHz from the LO
+  folds onto the band (18..20 dB down at 320 MHz, 32 at 160, 45 at 80, 65 at 40, 77 at 20, measured
+  at 160 Msps on band 0). A filter set by hand (`filter MHZ`) stops them following, on every band,
+  and is kept across LO and rate changes until `filter auto`; the state reports
+  `rf.filter_follows_rate`.
   On band 0 the MT7976 has no 320 MHz filter code: 320 is its 160 MHz code widened (about -3 dB at
   +-100 MHz at 320 Msps, `include/hw/adie/mt7976.h`).
 
@@ -106,8 +120,9 @@ analog filter. Defaults, all set by every load:
 - `band`/`configure` to another band switches the capture source (ICAPCR8) with an RF command,
   also mid-stream; a new LO is a TUNE, also mid-stream. A new sample rate stops a running stream,
   runs RATE and CAPTURE (no synthesizer retune: the LO, gain and filter stay) and restarts it,
-  packed as the new rate needs. A raw stream switched to a 320 Msps band restarts packed; a
-  packed one keeps running.
+  packed as the new rate needs. A stream switched to a band whose rate its packing does not carry
+  on the link restarts with the packing that does (raw to a 320 Msps band: half); otherwise it
+  keeps running. A change the link cannot carry at all is refused and the stream stays as it was.
 - After a load, a stream start and a band switch, every band's synthesizer lock is read
   (`radio.synth_locked`). A firmware reload does not reset the RF dies: a band whose
   synthesizer stays unlocked needs a power cycle of the unit, and is reported as an error.
@@ -131,7 +146,8 @@ immediately; other requests run one at a time in order.
 | `{"id":5,"op":"stop"}` | |
 | `{"id":6,"op":"tune","hz":5300000000}` | the active band's LO, any Hz in its span |
 | `{"id":7,"op":"gain","agc":true}` / `{"id":7,"op":"gain","lna":2,"lpf":9}` | |
-| `{"id":8,"op":"filter","mhz":80}` | |
+| `{"id":8,"op":"filter","mhz":80}` | the active band's filter by hand; the filters stop following the sample rate |
+| `{"id":9,"op":"filter_follow","on":true}` | every band's filter follows its sample rate (the default), or stays as it is |
 
 Events: `{"event":"state","state":STATE}` on every change, `{"event":"progress","text":...,
 "fraction":0.4}` during a load, `{"event":"log","level":"info|warn|error","text":...}`; a
@@ -142,7 +158,8 @@ stream that ends on its own (overrun, lost source) is reported as an error in ST
  "radio": {"loaded": true, "band": 1, "rf_band": "5g", "lo_hz": 5250000000, "sample_rate": 320000000,
            "capture_rate": 320000000,
            "bands_ready": [0, 1, 2], "synth_locked": [true, true, true]},
- "stream": {"running": true, "packing": "half", "sample_rate": 320000000, "center_hz": 5250000000},
+ "stream": {"running": true, "packing": "half", "packing_manual": false, "link_mbps": 10000,
+            "sample_rate": 320000000, "center_hz": 5250000000},
  "rf": {"lo_hz": 5250000000, "agc": true, "lna": null, "lpf": null, "filter_mhz": 320,
         "lo_range_hz": [4647562500, 7508048460]},
  "error": null}

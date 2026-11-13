@@ -18,9 +18,17 @@ Rules the hardware imposes:
   main loop without a stream.
 - The LO is one TUNE, also mid-stream. A new sample rate on the band being streamed stops the stream,
   runs RATE and restarts it; switching to another band is one ICAPCR8 write mid-stream.
-- A stream's packing follows its sample rate (packing_for): raw 14-bit IQ up to 160 Msps, half
-  above, where raw exceeds one 10 GbE link. Half is lossless (8 samples in 7 words), so it is not a
-  setting; a band switch keeps a running half stream as it is, since half carries any rate.
+- A stream's packing follows its sample rate and the link (packing_for): raw 14-bit IQ where it
+  fits the unit port's speed, else every chunk packed to 28 bits (full, up to 160 Msps: all the
+  radio's two packers carry), else every other chunk (half: 320 Msps on 10 GbE). Packing is
+  lossless (8 samples in 7 words); a band switch keeps a running stream as it is where its packing
+  carries the new rate. A rate no packing fits on the link is refused. Where that choice is wrong
+  for a link, export.packing (or `start --packing`, `serve --packing`) sets the packing by hand:
+  the link is then not consulted, only what the packers can do.
+- The analog filter is the receiver's only anti-alias filter: the converter samples at 320 MHz, and
+  what the filter passes 320 MHz from the LO folds onto the band (18..20 dB down with the 320 MHz
+  filter, 32 at 160, 45 at 80: include/hw/adie/mt7976.h). So each band's filter follows its sample
+  rate (filter_for) unless one is set by hand, which holds until it is told to follow again.
 """
 import json
 import queue
@@ -33,14 +41,17 @@ from .config import local_mac_for
 from dataclasses import replace
 
 from .radio import DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image
-from .stream import GO_ADDR, Result, Stream, StreamError
+from .stream import GO_ADDR, PACKED_SHARE, Result, Stream, StreamError, wire_rate
 from .unit import Unit
 
 STATE_FILE = '/tmp/w1700k-state.json'
 BANDS = (0, 1, 2)
 DEFAULT_BAND = 1
-PACKINGS = ('raw', 'half')
-RAW_MAX_RATE = 160_000_000        # raw 14-bit IQ above this exceeds one 10 GbE link: packed half
+PACKINGS = config.PACKINGS
+assert PACKINGS == tuple(PACKED_SHARE)
+FULL_MAX_RATE = 160_000_000       # the WM and the WA pack every chunk up to this rate, half of them above
+DEFAULT_LINK_MBPS = 10_000        # a port that reports no speed: the unit's 10 GbE
+LINK_FILL = 0.975                 # the share of the link a stream may take (320 Msps half is 97.0 % of 10 GbE)
 START_TIMEOUT = 10.0
 COMMAND_TIMEOUT = 60.0
 
@@ -54,17 +65,34 @@ LOCK_NEAR_HZ = 20_000_000               # the edges lie this close to TUNE's rea
 LOCK_MARGIN_HZ = 1_000_000              # the span kept inside the edges found (they wander ~0.1 MHz)
 
 
-def packing_for(rate):
-    return 'half' if rate > RAW_MAX_RATE else 'raw'
+def packing_fits(packing, rate, link_mbps):
+    """Whether a stream at `rate` under `packing` fits the link and the packers."""
+    if packing == 'full' and rate > FULL_MAX_RATE:
+        return False
+    return wire_rate(packing, rate) <= link_mbps * 1e6 * LINK_FILL
 
 
-def packing_allows(packing, rate):
-    return packing == 'half' or rate <= RAW_MAX_RATE
+def packing_for(rate, link_mbps=DEFAULT_LINK_MBPS):
+    """The packing of a stream at `rate` on a link of `link_mbps`: raw where it fits, else every
+    chunk packed (the most room on the link), else every other chunk."""
+    for packing in ('raw', 'full', 'half'):
+        if packing_fits(packing, rate, link_mbps):
+            return packing
+    need = min(wire_rate(p, rate) for p in PACKINGS if p != 'full' or rate <= FULL_MAX_RATE)
+    raise ControlError(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link, which carries '
+                       f'{link_mbps / 1e3:g} (at most {LINK_FILL:.1%} of it)')
+
+
+def filter_for(cfg):
+    """The analog filter that follows a band's sample rate: as wide as the rate (the widest the
+    roll-off correction applies to, and no wider: the filter is what keeps aliases out), 320 MHz at
+    640/2."""
+    return min(DEFAULT_FILTER_MHZ, cfg.sample_rate // 1_000_000)
 
 
 def default_rf(cfg, filter_mhz=DEFAULT_FILTER_MHZ):
-    """A band's RF state after its SETUP. The analog filter is its own setting, independent of the
-    sample rate: it is kept across LO and sample-rate changes."""
+    """A band's RF state after its SETUP. The analog filter is its own setting: it follows the
+    sample rate, or is the one set by hand, kept across LO and sample-rate changes."""
     return {'lo_hz': cfg.lo_hz, 'agc': True, 'lna': None, 'lpf': None, 'filter_mhz': filter_mhz}
 
 
@@ -82,7 +110,10 @@ class Controller:
         self.bands_ready = []
         self.band = DEFAULT_BAND
         self.packing = None               # the running stream's packing; None: no stream
-        self.rf = {b: default_rf(cfg) for b, cfg in self.bands.items()}
+        self.link_mbps = None             # the export link's capacity, read at a stream start; None: not yet
+        self.packing_manual = None        # the running stream's packing as set by hand; None: chosen automatically
+        self.filter_follows_rate = True   # each band's analog filter is filter_for() its sample rate
+        self.rf = {b: default_rf(cfg, filter_for(cfg)) for b, cfg in self.bands.items()}
         self.synth_locked = [None] * len(BANDS)
         self.lo_lock = {}                 # band -> (lowest, highest) LO its synthesizer locks at, found at load
         self.busy = None
@@ -100,8 +131,10 @@ class Controller:
                       'bands_ready': sorted(self.bands_ready),
                       'synth_locked': list(self.synth_locked)},
             'stream': {'running': self.packing is not None, 'packing': self.packing,
+                       'packing_manual': self.packing_manual is not None, 'link_mbps': self.link_mbps,
                        'sample_rate': cfg.sample_rate, 'center_hz': rfs['lo_hz']},
-            'rf': dict(rfs, lo_range_hz=list(self.lo_lock.get(self.band, LO_RANGE[self.band]))),
+            'rf': dict(rfs, lo_range_hz=list(self.lo_lock.get(self.band, LO_RANGE[self.band])),
+                       filter_follows_rate=self.filter_follows_rate),
             'error': self.error,
         }
 
@@ -119,7 +152,8 @@ class Controller:
         record = {'boot_id': self.boot_id, 'loaded': self.loaded, 'band': self.band,
                   'lo_lock': {str(b): list(v) for b, v in self.lo_lock.items()},
                   'bands': {str(b): c.as_dict() for b, c in self.bands.items()},
-                  'bands_ready': self.bands_ready, 'packing': self.packing,
+                  'bands_ready': self.bands_ready, 'packing': self.packing, 'link_mbps': self.link_mbps,
+                  'packing_manual': self.packing_manual, 'filter_follows_rate': self.filter_follows_rate,
                   'rf': {str(b): v for b, v in self.rf.items()}, 'synth_locked': self.synth_locked}
         self.unit.push(json.dumps(record).encode(), STATE_FILE)
 
@@ -147,6 +181,11 @@ class Controller:
         self.bands, self.band = bands, record['band']
         self.loaded, self.bands_ready = bool(record['loaded']), list(record['bands_ready'])
         self.packing = record['packing']
+        link = record.get('link_mbps')
+        self.link_mbps = link if isinstance(link, int) and not isinstance(link, bool) and link > 0 else None
+        manual = record.get('packing_manual')
+        self.packing_manual = manual if manual in PACKINGS and self.packing else None
+        self.filter_follows_rate = bool(record.get('filter_follows_rate', True))
         self.rf = rfs
         self.lo_lock = {int(b): tuple(v) for b, v in record.get('lo_lock', {}).items()}
         locks = record.get('synth_locked', [None] * len(BANDS))
@@ -188,8 +227,11 @@ class Controller:
         self._check_lock_range(band, cfg.lo_hz)
         return self.run('configuring', self._configure, cfg)
 
-    def start(self):
-        return self.run('starting', self._start)
+    def start(self, packing=None):
+        """Start streaming; `packing` sets it by hand, as export.packing does for every stream."""
+        if packing is not None and packing not in PACKINGS:
+            raise ValueError(f'packing: one of {", ".join(PACKINGS)}')
+        return self.run('starting', self._start, packing)
 
     def stop(self):
         return self.run('stopping', self._stop)
@@ -201,7 +243,12 @@ class Controller:
         return self.run(None, self._gain, agc, lna, lpf)
 
     def filter(self, mhz):
+        """The active band's analog filter, set by hand: filters no longer follow the sample rate."""
         return self.run(None, self._filter, mhz)
+
+    def filter_follow(self, on=True):
+        """Whether every band's analog filter follows its sample rate; turned on, they are set to it."""
+        return self.run(None, self._filter_follow, bool(on))
 
     def trim(self, code):
         self._require_loaded()
@@ -231,6 +278,20 @@ class Controller:
     def _require_loaded(self):
         if not self.loaded:
             raise ControlError('the radio is not loaded')
+
+    def _link(self):
+        return self.link_mbps or DEFAULT_LINK_MBPS
+
+    def _packing_at(self, rate, manual=None):
+        """The packing of a stream at `rate`: the one set by hand (this stream's, else the
+        configuration's) where the packers can do it, else the one the rate and the link give."""
+        manual = manual or self.config.export.packing
+        if not manual:
+            return packing_for(rate, self._link())
+        if manual == 'full' and rate > FULL_MAX_RATE:
+            raise ControlError(f'packing full is set by hand, and the radio packs every chunk only up to '
+                               f'{FULL_MAX_RATE / 1e6:g} Msps, not {rate / 1e6:g}')
+        return manual
 
     def _tune(self, hz):
         self._require_loaded()
@@ -315,7 +376,22 @@ class Controller:
             raise ValueError(f'filter: one of {", ".join(map(str, rf.FILTER_CODE))} MHz')
         rf.set_filter(self._session(), self.band, mhz)
         self.rf[self.band]['filter_mhz'] = mhz
+        self.filter_follows_rate = False
         self._save()
+
+    def _filter_follow(self, on):
+        self.filter_follows_rate = on
+        if on and self.loaded:
+            for b in BANDS:
+                self._follow_filter(b)
+        self._save()
+
+    def _follow_filter(self, b):
+        """Band b's filter at its sample rate, if filters follow."""
+        want = filter_for(self.bands[b])
+        if self.filter_follows_rate and self.rf[b]['filter_mhz'] != want:
+            rf.set_filter(self._session(), b, want)
+            self.rf[b]['filter_mhz'] = want
 
     def _command(self, op, *args, timeout=COMMAND_TIMEOUT):
         """One radio command on our WM; raises ControlError with the firmware's reason."""
@@ -328,6 +404,8 @@ class Controller:
         return res
 
     def _filter_of(self, band):
+        if self.filter_follows_rate:
+            return filter_for(self.bands[band])
         return self.rf.get(band, {}).get('filter_mhz', DEFAULT_FILTER_MHZ)
 
     def _set_band(self, cfg):
@@ -397,12 +475,16 @@ class Controller:
             self._load()
             return
         old = self.bands[b]
+        manual = self.packing_manual
+        if running:
+            needed = self._packing_at(cfg.sample_rate, manual)      # refused before anything changes
         if cfg.rate_code == old.rate_code and b in self.bands_ready:
             # the band's rate unchanged: switch the capture (mid-stream when the running packing
             # carries that rate, else restarted with the packing it needs), then the LO alone if it
             # moved
             if b != self.band:
-                if running and packing_allows(running, cfg.sample_rate):
+                # a stream chosen automatically keeps a packing that still fits; one set by hand is that one
+                if running and (running == needed or not manual and packing_fits(running, cfg.sample_rate, self._link())):
                     self._switch_mid_stream(b)
                 else:
                     if running:
@@ -411,7 +493,7 @@ class Controller:
                     self.band = b
                     self._save()
                     if running:
-                        self._start()
+                        self._start(manual)
             if cfg.lo_hz != old.lo_hz:
                 self._tune_band(b, cfg.lo_hz)
             return
@@ -424,13 +506,14 @@ class Controller:
             self._save()
         self._set_rate(replace(cfg, lo_hz=old.lo_hz))
         self.bands[b] = replace(old, sample_rate=cfg.sample_rate, capture_rate=cfg.capture_rate)
+        self._follow_filter(b)
         self.bands_ready.append(b)
         self._command('select', b)
         self._save()
         if cfg.lo_hz != old.lo_hz:
             self._tune_band(b, cfg.lo_hz)
         if running:
-            self._start()
+            self._start(manual)
 
     def _switch_mid_stream(self, band):
         before, after = rf.select_band(self._session(), band)
@@ -439,18 +522,20 @@ class Controller:
         self._log('info', f'capturing band {band} from ICAP0 write pointer {before:#x}..{after:#x}')
         self._check_locks()
 
-    def _start(self):
+    def _start(self, packing=None):
         if self.packing:
             return
-        packing = packing_for(self.bands[self.band].sample_rate)
         if not self.loaded:
             self._load()
         export = self.config.export
         dst_mac = export.dst_mac or local_mac_for(export.dst_ip)
-        self.stream.check_interface(export.interface)
+        speed = self.stream.check_interface(export.interface)
+        self.link_mbps = min((v for v in (speed, export.link_mbps) if v), default=None)
+        manual = packing or export.packing
+        packing = self._packing_at(self.bands[self.band].sample_rate, manual)
         self.stream.install_own(self._wm(), packing)
         self.stream.launch(export, dst_mac)
-        self.packing = packing
+        self.packing, self.packing_manual = packing, manual
         self._save()
         try:
             self._wait_producer()
@@ -483,7 +568,7 @@ class Controller:
             self._log('error', f'stream start failed: {result.text}')
         except StreamError as exc:
             self._log('error', str(exc))
-            self.packing = None
+            self.packing = self.packing_manual = None
             self._save()
 
     def _stop(self):
@@ -503,7 +588,7 @@ class Controller:
         except (StreamError, wm.WmError) as exc:
             self._log('warn', f'stream clean-up: {exc}')
             result = Result(0, 0, 0.0, False, None)
-        self.packing = None
+        self.packing = self.packing_manual = None
         self._save()
         return result
 
@@ -542,7 +627,7 @@ def handle(controller, request):
                              _require(request, 'lo_hz', (int, float), True),
                              _require(request, 'capture_rate', int, True))
     elif op == 'start':
-        controller.start()
+        controller.start(_require(request, 'packing', str, optional=True))
     elif op == 'stop':
         controller.stop()
     elif op == 'tune':
@@ -551,6 +636,8 @@ def handle(controller, request):
         controller.gain(bool(request.get('agc')), _require(request, 'lna', int, True), _require(request, 'lpf', int, True))
     elif op == 'filter':
         controller.filter(_require(request, 'mhz', int))
+    elif op == 'filter_follow':
+        controller.filter_follow(_require(request, 'on', bool))
     else:
         raise ValueError(f'unknown op {op!r}')
     return {}

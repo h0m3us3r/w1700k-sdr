@@ -5,11 +5,13 @@ import io
 import json
 import threading
 import unittest
+from dataclasses import replace
 
 import host_fake
 from host_fake import RADIO_ERR_HW, RADIO_ERR_ORDER
 from w1700k import radio, rf, stream
-from w1700k.controller import LOCK_MARGIN_HZ, LOCK_RESOLUTION_HZ, ControlError, Controller, handle, serve
+from w1700k.controller import (LOCK_MARGIN_HZ, LOCK_RESOLUTION_HZ, ControlError, Controller, handle, packing_fits,
+                               packing_for, serve)
 
 def setup(band, hz, bw):
     """SETUP's arguments: band, the LO's low and high words, the bandwidth class."""
@@ -78,7 +80,8 @@ class Load(ControllerTest):
         self.assertTrue(state['radio']['loaded'])
         self.assertEqual(state['radio']['bands_ready'], [0, 1, 2])
         self.assertEqual(state['radio']['synth_locked'], [True, True, True])
-        self.assertEqual(state['stream'], {'running': False, 'packing': None, 'sample_rate': 320_000_000,
+        self.assertEqual(state['stream'], {'running': False, 'packing': None, 'packing_manual': False,
+                                           'link_mbps': None, 'sample_rate': 320_000_000,
                                            'center_hz': 5_250_000_000})
         progress = [e['fraction'] for e in self.events if e.get('event') == 'progress']
         self.assertEqual((progress[0], progress[-1]), (0.0, 1.0))
@@ -185,6 +188,109 @@ class Streaming(ControllerTest):
         self.ctl.start()                                    # already running so: nothing
         self.assertEqual(self.commands(), ['stream'])
 
+    def test_a_slower_link_packs_every_chunk(self):
+        """160 Msps does not fit a 5 Gbit/s link raw: every chunk goes out packed (full), which
+        the WA packs half of; the port's speed is read at the start."""
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=160_000_000)
+        self.dev.radio_commands.clear()
+        self.dev.link_mbps = 5000
+        self.ctl.start()
+        self.assertEqual(self.dev.radio_commands, [('stream', (2,))])
+        self.assertTrue(self.dev.wa_up)
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'full')
+        self.ctl.stop()
+        self.assertFalse(self.dev.streaming or self.dev.route_armed)
+
+    def test_packing_by_link(self):
+        """Raw where it fits, else every chunk packed up to 160 Msps, else every other chunk."""
+        for mbps, rate, packing in ((10000, 160_000_000, 'raw'), (10000, 320_000_000, 'half'),
+                                    (5000, 80_000_000, 'raw'), (5000, 160_000_000, 'full'),
+                                    (2500, 40_000_000, 'raw'), (2500, 80_000_000, 'full')):
+            self.assertEqual(packing_for(rate, mbps), packing, (mbps, rate))
+        for mbps, rate in ((5000, 320_000_000), (2500, 160_000_000), (1000, 40_000_000)):
+            with self.assertRaises(ControlError):
+                packing_for(rate, mbps)
+        self.assertFalse(packing_fits('full', 320_000_000, 10000), 'the packers carry every chunk to 160 Msps')
+
+    def test_a_rate_the_link_cannot_carry_is_refused(self):
+        self.loaded(1)
+        self.dev.link_mbps = 5000
+        with self.assertRaisesRegex(ControlError, r'320 Msps needs 9\.70 Gbit/s on the link, which carries 5'):
+            self.ctl.start()
+        self.assertEqual(self.dev.radio_commands, [])
+        self.assertFalse(self.dev.streaming)
+
+    def test_link_cap_from_the_configuration(self):
+        """export.link_mbps below the port's speed is the link (an adapter that carries less)."""
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=160_000_000)
+        self.ctl.config = replace(self.config, export=replace(self.config.export, link_mbps=5000))
+        self.ctl.start()
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'full')
+
+    def test_a_port_without_a_speed_counts_as_10g(self):
+        self.loaded(1)
+        self.dev.link_mbps = None
+        self.ctl.start()
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'half')
+
+    def test_packing_override(self):
+        self.loaded(0, narrow0=True)
+        self.ctl.start('full')
+        self.assertEqual(self.dev.radio_commands, [('stream', (2,))])
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'full')
+        with self.assertRaises(ValueError):
+            self.ctl.start('lzma')
+
+    def test_packing_set_by_hand_in_the_configuration(self):
+        """export.packing is every stream's packing, whatever the link: the state says it was set
+        by hand, and a band switch keeps the stream running where the packers carry the rate."""
+        self.ctl.config = replace(self.config, export=replace(self.config.export, packing='half'))
+        self.loaded(0, narrow0=True)
+        self.dev.link_mbps = 1000                       # not consulted
+        self.ctl.start()
+        stream_state = self.ctl.state()['stream']
+        self.assertEqual((stream_state['packing'], stream_state['packing_manual'], stream_state['link_mbps']),
+                         ('half', True, 1000))
+        self.ctl.configure(1)                           # 320 Msps: still half, switched mid-stream
+        self.assertEqual(self.dev.radio_commands, [('stream', (1,))])
+        self.assertEqual(self.ctl.state()['radio']['band'], 1)
+        self.ctl.stop()
+        self.assertFalse(self.ctl.state()['stream']['packing_manual'])
+
+    def test_packing_set_by_hand_stays_across_a_restart(self):
+        """`start --packing` holds for that stream, also where a new rate restarts it."""
+        self.loaded(0, narrow0=True)
+        self.ctl.start('half')
+        self.ctl.configure(0, sample_rate=80_000_000)
+        self.assertEqual([c for c in self.dev.radio_commands if c[0] == 'stream'], [('stream', (1,)), ('stream', (1,))])
+        self.assertEqual((self.ctl.state()['stream']['packing'], self.ctl.state()['stream']['packing_manual']),
+                         ('half', True))
+        self.ctl.stop()
+        self.ctl.start()                                # the next stream is chosen automatically again
+        self.assertEqual((self.ctl.state()['stream']['packing'], self.ctl.state()['stream']['packing_manual']),
+                         ('raw', False))
+
+    def test_full_by_hand_beyond_the_packers_is_refused(self):
+        self.ctl.config = replace(self.config, export=replace(self.config.export, packing='full'))
+        self.loaded(1)                                  # 320 Msps
+        with self.assertRaisesRegex(ControlError, 'only up to 160 Msps'):
+            self.ctl.start()
+        self.assertEqual(self.dev.radio_commands, [])
+
+    def test_mid_stream_change_the_link_cannot_carry(self):
+        """Refused before the stream is touched: it keeps running as it was."""
+        self.loaded(0, narrow0=True)
+        self.dev.link_mbps = 5000
+        self.ctl.start()
+        for change in (lambda: self.ctl.configure(1), lambda: self.ctl.configure(0, sample_rate=320_000_000)):
+            with self.assertRaises(ControlError):
+                change()
+            self.assertEqual(self.dev.radio_commands, [('stream', (0,))])
+            self.assertTrue(self.dev.streaming)
+            self.assertEqual((self.ctl.state()['radio']['band'], self.ctl.state()['stream']['packing']), (0, 'raw'))
+
     def test_start_loads_when_needed(self):
         self.ctl.start()
         self.assertEqual(self.unit.module_replacements, 1)
@@ -261,6 +367,52 @@ class RfControl(ControllerTest):
         self.assertEqual(self.dev.rf_ops[-1], (rf.RF_GAIN, 1, rf.RF_GAIN_AGC, 0))
         self.assertEqual((self.ctl.state()['rf']['agc'], self.ctl.state()['rf']['lna']), (True, None))
         self.assertEqual(self.dev.radio_commands, [], 'RF control is no radio command')
+
+    def test_the_filter_follows_the_sample_rate(self):
+        """Each band's analog filter is as wide as its sample rate, at load and at a new rate: it
+        is the anti-alias filter, and the width the roll-off correction applies to."""
+        self.ctl.bands[0] = radio.BandConfig(0, 2_442_000_000, 40_000_000).validate()
+        self.ctl.load(0)
+        filters = {o[1]: o[2] for o in self.dev.rf_ops if o[0] == rf.RF_FILTER}
+        self.assertEqual(filters, {0: 40, 1: 320, 2: 320})
+        self.assertEqual((self.ctl.state()['rf']['filter_mhz'], self.ctl.state()['rf']['filter_follows_rate']), (40, True))
+        self.dev.rf_ops.clear()
+        self.ctl.configure(0, sample_rate=160_000_000)
+        self.assertEqual([o for o in self.dev.rf_ops if o[0] == rf.RF_FILTER], [(rf.RF_FILTER, 0, 160, 0)])
+        self.assertEqual(self.ctl.state()['rf']['filter_mhz'], 160)
+        self.dev.rf_ops.clear()
+        self.ctl.configure(2, sample_rate=320_000_000, capture_rate=640_000_000)     # 640/2: the widest
+        self.assertEqual([o for o in self.dev.rf_ops if o[0] == rf.RF_FILTER], [], 'already 320 MHz')
+        self.assertEqual(self.ctl.state()['rf']['filter_mhz'], 320)
+
+    def test_a_filter_set_by_hand_holds_until_told_to_follow(self):
+        self.ctl.bands[0] = radio.BandConfig(0, 2_442_000_000, 160_000_000).validate()
+        self.ctl.load(0)
+        self.ctl.filter(80)
+        self.assertEqual((self.ctl.state()['rf']['filter_mhz'], self.ctl.state()['rf']['filter_follows_rate']), (80, False))
+        self.dev.rf_ops.clear()
+        self.ctl.configure(0, sample_rate=40_000_000)
+        self.assertEqual([o for o in self.dev.rf_ops if o[0] == rf.RF_FILTER], [], 'kept across a new rate')
+        self.assertEqual(self.ctl.state()['rf']['filter_mhz'], 80)
+        self.ctl.filter_follow(True)                         # every band back to its rate
+        self.assertEqual([o for o in self.dev.rf_ops if o[0] == rf.RF_FILTER], [(rf.RF_FILTER, 0, 40, 0)])
+        self.assertEqual((self.ctl.state()['rf']['filter_mhz'], self.ctl.state()['rf']['filter_follows_rate']), (40, True))
+        self.ctl.filter_follow(False)                        # nothing moves: the filters stay as they are
+        self.assertEqual(len([o for o in self.dev.rf_ops if o[0] == rf.RF_FILTER]), 1)
+        self.assertFalse(self.ctl.state()['rf']['filter_follows_rate'])
+        # a controller that attaches later sees the choice
+        other = Controller(self.config, unit=self.unit)
+        other.attach()
+        self.assertFalse(other.state()['rf']['filter_follows_rate'])
+        other.close()
+
+    def test_filter_follow_request(self):
+        self.loaded(1)
+        self.ctl.filter(80)
+        handle(self.ctl, {'id': 1, 'op': 'filter_follow', 'on': True})
+        self.assertEqual((self.ctl.state()['rf']['filter_mhz'], self.ctl.state()['rf']['filter_follows_rate']), (320, True))
+        with self.assertRaises(ValueError):
+            handle(self.ctl, {'id': 2, 'op': 'filter_follow', 'on': 'yes'})
 
     def test_while_streaming(self):
         self.loaded(0)

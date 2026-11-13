@@ -6,11 +6,14 @@
      "eeprom": "~/.config/w1700k/eeprom.bin",
      "firmware_dir": "<repo>/firmware/build",
      "export": {"interface": "eth1", "src_ip": "10.77.0.1", "dst_ip": "10.77.0.10",
-                "dst_mac": null, "port": 7700, "ports": 8}}
+                "dst_mac": null, "port": 7700, "ports": 8, "link_mbps": null, "packing": null}}
 
 unit.bin_dir and unit.module point at the installed clients and driver (production rootfs);
 after `w1700k push` set them to /tmp/w1700k and /tmp/w1700k/w1700k_sdr.ko. export.dst_mac null
-means the MAC of the local interface that holds dst_ip.
+means the MAC of the local interface that holds dst_ip. export.link_mbps caps what a stream may
+put on the link, in Mbit/s, below the unit port's negotiated speed (a USB adapter that carries less
+than its Ethernet side links at); null: the negotiated speed. export.packing ("raw", "half" or
+"full") sets every stream's packing by hand; null: chosen from the sample rate and the link.
 """
 import ipaddress
 import json
@@ -23,6 +26,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PATH = Path('~/.config/w1700k/config.json')
 ENV_PATH = 'W1700K_CONFIG'
+
+
+PACKINGS = ('raw', 'half', 'full')   # firmware/stream/blob.py; stream.PACKED_SHARE has each one's share
 
 
 class ConfigError(ValueError):
@@ -47,6 +53,8 @@ class ExportConfig:
     dst_mac: str | None = None
     port: int = 7700
     ports: int = 8
+    link_mbps: int | None = None      # None: the unit port's negotiated speed
+    packing: str | None = None        # None: chosen from the sample rate and the link
 
 
 @dataclass(frozen=True)
@@ -105,6 +113,11 @@ def _validate(config):
         raise ConfigError('export.dst_mac: expected xx:xx:xx:xx:xx:xx')
     if not 1 <= export.port <= 65535 - export.ports or not 1 <= export.ports <= 256:
         raise ConfigError('export.port/ports out of range')
+    if export.link_mbps is not None and (isinstance(export.link_mbps, bool) or not isinstance(export.link_mbps, int)
+                                         or export.link_mbps < 1):
+        raise ConfigError('export.link_mbps: expected Mbit/s, a positive integer')
+    if export.packing is not None and export.packing not in PACKINGS:
+        raise ConfigError(f'export.packing: one of {", ".join(PACKINGS)}, or null for automatic')
     if not config.unit.bin_dir.startswith('/') or not config.unit.module.startswith('/'):
         raise ConfigError('unit.bin_dir and unit.module must be absolute unit paths')
 
