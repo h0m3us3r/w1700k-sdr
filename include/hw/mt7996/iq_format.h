@@ -177,7 +177,13 @@
 /* Wire budget: 8192 payload bytes per 8274 on the wire, so one 10G link    */
 /* carries at most 1.238 GB/s against 1.28 GB/s raw at 320 Msps.            */
 /* ------------------------------------------------------------------------ */
+/* A slice reduced on the SoC (iq_reduce.h) comes under "SDR2": the same      */
+/* header with seq in bits [47:0] of the last field, the format (bits per I/Q */
+/* pair) in [55:48] and the scale code in [63:56]. Datagrams of the unit's    */
+/* own senders may hold several whole slices, each behind its header; a       */
+/* record shorter than the rest of its slice is a piece and ends its datagram.*/
 #define MT7996_IQ_EXPORT_MAGIC		0x31524453u	/* "SDR1", le32 */
+#define MT7996_IQ_EXPORT_MAGIC_REDUCED	0x32524453u	/* "SDR2", le32 */
 #define MT7996_IQ_EXPORT_HDR_BYTES	16u
 #define MT7996_IQ_EXPORT_OFS_MAGIC	0u	/* le32 */
 #define MT7996_IQ_EXPORT_OFS_OFFSET	4u	/* le16: offset of this piece in the slice */
