@@ -23,8 +23,10 @@ Everything is polled; the driver requests no interrupt. It disables PCIe ASPM
 Files: `pci.c` (device, ioctls, mmap), `pump.c` (stream pump), `export.c`
 (UDP export), `fwdl.c` (download executor), `fwdl_wire.c` (download command
 wire format), `fwdl-image.c` (container parsing), `dma-ring.c` (rings),
-`wfdma.c` (WFDMA control), `mmio.c` (BAR translation), `ownership.c`. The
-clients are `probe.c`, `download.c`, `stream.c` and `ctl.c`, with
+`wfdma.c` (WFDMA control), `mmio.c` (BAR translation), `ownership.c`, `led.c`
+(the status LED's four emitters). The
+clients are `probe.c`, `download.c`, `stream.c`, `ctl.c` and `ledd.c`
+(`w1700k-led`, with its vocabulary in `ledd.h`), with
 `client.h`. The ABI is `include/uapi/w1700k_sdr.h`.
 
 ## Build
@@ -71,6 +73,7 @@ device, also during a stream:
 | `READ_MEM` | diagnostics: up to 4096 bytes through the BAR translation, only inside the host CSR page `0x000e0000-0x000e0fff` (LPCR `0xe0010`, FW_STATE `0xe00f0`), ROM `0x00800000-0x0080ffff` or patch SRAM `0x00900000-0x0090ffff` |
 | `STREAM_RX` | the stream pump, on the calling thread (below) |
 | `CTL` | up to 64 word writes then 64 word reads in `0x0090b000-0x0090fffc`; performed by the pump between sweeps while a stream runs |
+| `LED` | the front status LED's four emitters (red, green, blue, white), each 0..255; the SoC's waveform generators dim the pins at 250 Hz (`led.c`). Announced by `W1700K_SDR_CAP_LED`. It is the board's, not the radio's: it works whatever a stream or a reset is doing, and the LED keeps its levels when the module is replaced |
 
 ## Clients
 
@@ -106,6 +109,14 @@ mt7996-ctl DEVICE --serve
   {"at":"ctl","ok":bool,"errno":"...","result":N,"via_pump":0|1,"writes":N,
    "read_address":"0x...","read":["0x...",...]}
   --serve takes one request per stdin line and answers each with one line.
+
+w1700k-led DEVICE [--state FILE] [--done FILE] [--iface IF] [--brightness B]
+w1700k-led DEVICE --demo [SECONDS] | --show H S B | --status
+  The front status LED, started at boot (rcS) and left running: it shows what
+  the unit is doing (docs/led.md has the legend; ledd.h the vocabulary and the
+  colour maths, all in hue, saturation and brightness). It opens the device
+  only for each change of the LED, so the module can be replaced under it.
+  --status prints one {"at":"led",...} line: what it sees, and the look for it.
 ```
 
 ## Bring-up

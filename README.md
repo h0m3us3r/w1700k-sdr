@@ -75,6 +75,28 @@ The 5 Gbit/s row and the small datagrams are measured on a unit (no slice
 lost); the 2.5 and 1 Gbit/s rows follow from the same arithmetic and have not
 been run on such a link. Details: [`host/w1700k/README.md`](host/w1700k/README.md).
 
+## The front LED
+
+The unit's status LED tells you what the receiver is doing without a screen
+(details in [docs/led.md](docs/led.md)).
+
+| What you see | What it means |
+| --- | --- |
+| Rainbow, once round, out of the dark | Starting: booted, the LED is ours from here |
+| Yellow, breathing | No link on the stream port |
+| White, low and steady | Powered and linked; radio not loaded |
+| Green, steady | Ready: radio loaded and tuned, not streaming |
+| Cyan / blue / violet / magenta | Streaming at 40 / 80 / 160 / 320 Msps |
+| … solid | lossless: every sample bit for bit |
+| … breathing | samples reduced to fewer bits to fit the link |
+| … slow blink | started, but nothing is leaving the port |
+| Yellow, blinking | Look: the captured band's synthesizer is out of lock |
+| Red, blinking | Stop: the stream ended by itself |
+| A short lift towards white | The host just changed something |
+
+White then steady red is the loader and the kernel before our software runs;
+red that never changes means the unit did not finish booting.
+
 ## Screenshots
 
 ![The web UI at 2.4 GHz](docs/images/ui-2g4.png)
@@ -97,7 +119,7 @@ between them, in 1.22 kHz bins.*
 | Path | |
 | --- | --- |
 | [`platform/`](platform/README.md) | What runs on the SoC: our U-Boot, Linux 6.18 with board patches, a read-only BusyBox root |
-| [`kernel/w1700k_sdr/`](kernel/w1700k_sdr/README.md) | The MT7996 driver (firmware download, the DMA ring, the 10 GbE export, the firmware's command mailbox) and its unit-side clients |
+| [`kernel/w1700k_sdr/`](kernel/w1700k_sdr/README.md) | The MT7996 driver (firmware download, the DMA ring, the 10 GbE export, the firmware's command mailbox, the status LED) and its unit-side clients |
 | [`firmware/`](firmware/README.md) | Our MT7996 firmware: the ROM patch, the WM (radio bring-up and band set-up, streams, RF control) and the WA (packer) |
 | [`host/w1700k/`](host/w1700k/README.md) | Host control: firmware load, streaming, RF control as firmware commands; `w1700k serve` for the web UI |
 | [`host/stream/`](host/stream/README.md) | `w1700k-stream`, the host's one receiver of the export: the IQ stream in shared memory for every consumer, and the roll-off correction |
@@ -105,7 +127,7 @@ between them, in 1.22 kHz bins.*
 | [`host/recv/`](host/recv/README.md) | `sdr-recv`, the stream recorder |
 | [`init/`](init/README.md) | Installation from stock, updates, recovery, return to stock |
 | [`include/hw/`](include/hw/README.md) | Register reference: every known MT7996, A-die and AN7581 register, as C headers |
-| [`docs/`](docs/) | [Architecture](docs/architecture.md), [roadmap](docs/roadmap.md) |
+| [`docs/`](docs/) | [Architecture](docs/architecture.md), [the front LED](docs/led.md), [roadmap](docs/roadmap.md) |
 
 ## Getting started
 

@@ -32,7 +32,7 @@ OVERLAY = BUILD / 'rootfs-overlay'
 DEFCONFIG = BUILDROOT_OUT / 'w1700k_defconfig'
 MODULE = ROOT / 'kernel/w1700k_sdr/build/w1700k_sdr.ko'
 CLIENT_DIR = ROOT / 'kernel/w1700k_sdr/build'
-CLIENTS = ('mt7996-probe', 'mt7996-download', 'mt7996-stream', 'mt7996-ctl')
+CLIENTS = ('mt7996-probe', 'mt7996-download', 'mt7996-stream', 'mt7996-ctl', 'w1700k-led')
 LICENSE = ROOT / 'kernel/w1700k_sdr/LICENSE.mt76'
 # Host tools that the kernel and U-Boot builds take from Buildroot.
 HOST_PACKAGES = ('host-bison', 'host-flex')

@@ -21,6 +21,7 @@
 /* Bits 4 and 5 (BRINGUP_WRITE, MCU_CMD) were retired with ABI 5. */
 #define W1700K_SDR_CAP_STREAM_RX (1U << 6)
 #define W1700K_SDR_CAP_CTL (1U << 7)
+#define W1700K_SDR_CAP_LED (1U << 8)
 
 /* Static identity, served without touching the device. */
 struct w1700k_sdr_info {
@@ -256,4 +257,16 @@ struct w1700k_sdr_ctl {
 	__u32 reserved[2];
 };
 #define W1700K_SDR_CTL _IOWR('Q', 0x20, struct w1700k_sdr_ctl)
+
+/*
+ * LED (W1700K_SDR_CAP_LED): the front status LED's four emitters, each 0 (dark)
+ * to 255, dimmed by the SoC's waveform generators at 250 Hz. It belongs to the
+ * board, not to the MT7996: the call works whatever the radio and a stream are
+ * doing, and the LED keeps its levels when the module is replaced. What the
+ * LED says is w1700k-led's business (kernel/w1700k_sdr/ledd.h).
+ */
+struct w1700k_sdr_led {
+	__u8 red, green, blue, white;
+};
+#define W1700K_SDR_LED _IOW('Q', 0x21, struct w1700k_sdr_led)
 #endif

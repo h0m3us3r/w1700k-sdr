@@ -39,7 +39,7 @@ from .radio import RATE_CODE
 from .rf import FILTER_CODE
 from .unit import Unit
 
-CLIENTS = ('mt7996-probe', 'mt7996-download', 'mt7996-stream', 'mt7996-ctl')
+CLIENTS = ('mt7996-probe', 'mt7996-download', 'mt7996-stream', 'mt7996-ctl', 'w1700k-led')
 MODULE = 'w1700k_sdr.ko'
 DEV_DIR = '/tmp/w1700k'
 # --rate: '40'..'320' (captured at the sample rate) and '640/2' (radio.RATE_CODE)

@@ -134,7 +134,9 @@
 /* MDIO pins (mux "mdio" = GPIO 1/2); GPIO 2 is also configured output-high. */
 #define W1700K_GPIO_MDIO_MDC            1u
 #define W1700K_GPIO_MDIO_MDIO           2u
-/* Front LEDs, all active-low. */
+/* Front LEDs, all active-low. The four status emitters share one lens; each lights its colour
+ * when its pin is low, and all four dim under the SoC's waveform generators (GPIO flash mode,
+ * map entry 8 + (gpio & 7): kernel/w1700k_sdr/led.c) [measured by eye on a unit]. */
 #define W1700K_GPIO_LED_LAN3_GREEN      9u
 #define W1700K_GPIO_LED_LAN3_YELLOW     10u
 #define W1700K_GPIO_LED_STATUS_GREEN    17u

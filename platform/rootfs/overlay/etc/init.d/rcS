@@ -26,5 +26,7 @@ insmod /lib/modules/w1700k_sdr.ko || {
 	echo 'w1700k: radio driver did not load' >&2
 	status=W1700K_BOOT_DEGRADED
 }
+# The front LED says what the unit is doing from here on (it needs the driver).
+[ -c /dev/w1700k-sdr ] && /usr/sbin/w1700k-led /dev/w1700k-sdr < /dev/null > /dev/null 2>&1 &
 /etc/init.d/S50dropbear start || status=W1700K_BOOT_DEGRADED
 echo "$status"

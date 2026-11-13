@@ -165,7 +165,8 @@ class Radio:
     def replace_module(self, module):
         """A fresh driver. Any stream is stopped (its pump writes the stop word) and any control
         session closed, since both hold the device; RESET_MT quiesces DMA before the old module
-        may go; then insmod."""
+        may go; then insmod. The status LED's program (w1700k-led) opens the device only for the
+        instant of each change of the LED, so an rmmod that meets it is tried again."""
         download = self.unit.tool('mt7996-download')
         script = (f'set -e\n'
                   f'n=0\n'
@@ -175,7 +176,14 @@ class Radio:
                   f'done\n'
                   f'pids=$(pidof mt7996-ctl || true)\n'
                   f'if [ -n "$pids" ]; then kill $pids; sleep 1; fi\n'
-                  f'if [ -c {DEVICE} ]; then {download} {DEVICE} --reset >/dev/null; rmmod w1700k_sdr; fi\n'
+                  f'if [ -c {DEVICE} ]; then\n'
+                  f'  {download} {DEVICE} --reset >/dev/null\n'
+                  f'  n=0\n'
+                  f'  until rmmod w1700k_sdr 2>/dev/null; do\n'
+                  f'    [ $n -lt 20 ] || {{ rmmod w1700k_sdr; exit 1; }}\n'
+                  f'    sleep 0.1; n=$((n + 1))\n'
+                  f'  done\n'
+                  f'fi\n'
                   f'insmod {module}\n'
                   f'[ -c {DEVICE} ]\n')
         try:

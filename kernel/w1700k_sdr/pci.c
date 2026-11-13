@@ -37,6 +37,7 @@
 #include "export.h"
 #include "fwdl.h"
 #include "fwdl-image.h"
+#include "led.h"
 #include "mmio.h"
 #include "ownership.h"
 #include "pump.h"
@@ -841,6 +842,20 @@ report:
 	return copy_to_user(user, &req, sizeof(req)) ? -EFAULT : ret;
 }
 
+/* The status LED belongs to the board, not to an MT7996: one for the module, and usable
+ * whatever the radio is doing (no io_lock).
+ */
+static struct sdr_led sdr_led;
+
+static long sdr_do_led(void __user *user)
+{
+	struct w1700k_sdr_led req;
+
+	if (copy_from_user(&req, user, sizeof(req)))
+		return -EFAULT;
+	return sdr_led_set(&sdr_led, &req);
+}
+
 static bool sdr_privileged_ioctl(unsigned int cmd)
 {
 	switch (cmd) {
@@ -850,6 +865,7 @@ static bool sdr_privileged_ioctl(unsigned int cmd)
 	case W1700K_SDR_READ_MEM:
 	case W1700K_SDR_STREAM_RX:
 	case W1700K_SDR_CTL:
+	case W1700K_SDR_LED:
 		return true;
 	}
 	return false;
@@ -879,6 +895,8 @@ static long sdr_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return sdr_do_stream_rx(sdr, user);
 	case W1700K_SDR_CTL:
 		return sdr_do_ctl(sdr, user);
+	case W1700K_SDR_LED:
+		return sdr_do_led(user);
 	}
 	return -ENOTTY;
 }
@@ -974,7 +992,7 @@ static int sdr_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		.abi_version = W1700K_SDR_ABI_VERSION,
 		.capabilities = W1700K_SDR_CAP_HOST_OWN | W1700K_SDR_CAP_DOWNLOAD |
 				W1700K_SDR_CAP_RESET | W1700K_SDR_CAP_MEM |
-				W1700K_SDR_CAP_STREAM_RX | W1700K_SDR_CAP_CTL,
+				W1700K_SDR_CAP_STREAM_RX | W1700K_SDR_CAP_CTL | W1700K_SDR_CAP_LED,
 		.vendor = pdev->vendor, .device = pdev->device, .revision = pdev->revision,
 		.max_read = SDR_MMIO_MAX_READ, .bar0_size = sdr->io.bar_size,
 	};
@@ -1074,6 +1092,24 @@ static struct pci_driver sdr_driver = {
 	.probe = sdr_probe, .remove = sdr_remove,
 	.driver.pm = pm_sleep_ptr(&sdr_pm),
 };
-module_pci_driver(sdr_driver);
+static int __init sdr_init(void)
+{
+	int ret;
+
+	sdr_led_init(&sdr_led);		/* without it the receiver works all the same */
+	ret = pci_register_driver(&sdr_driver);
+	if (ret)
+		sdr_led_exit(&sdr_led);
+	return ret;
+}
+
+static void __exit sdr_exit(void)
+{
+	pci_unregister_driver(&sdr_driver);
+	sdr_led_exit(&sdr_led);
+}
+
+module_init(sdr_init);
+module_exit(sdr_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MediaTek MT7996 SDR receiver driver for the Gemtek W1700K");
