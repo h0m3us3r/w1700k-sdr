@@ -29,6 +29,10 @@ public:
     void put(uint64_t run, uint64_t index, const uint32_t *words);
     void put_packed(uint64_t run, uint64_t index, const uint32_t *packed);
     void put_reduced(uint64_t run, uint64_t index, unsigned format, unsigned scale, const uint8_t *reduced);
+    bool put_radio14(uint64_t run, uint64_t index, const uint8_t *chunk);
+    // After slot `index` was filed reduced: whether a radio chunk here or beside it was cut under
+    // a shift too small for what the unit measured in the slice next to it (its samples may wrap).
+    bool suspect(uint64_t run, uint64_t index) const;
     void put_event(uint64_t run, uint64_t index);  // a completion that is not samples
 
     // Readers. A slot's tag names the run and slice it holds; a reader checks it before and after
@@ -41,6 +45,10 @@ public:
 private:
     static constexpr uint64_t kEventBit = uint64_t(1) << 63;
     void claim(uint64_t index);
+    // What a reduced slot was cut under, for the check of a split stream's radio chunks against
+    // their neighbours: kRadio | shift, or the unit's scale code; kNone otherwise.
+    static constexpr uint16_t kNone = 0xffff, kRadio = 0x8000;
+    std::unique_ptr<std::atomic<uint16_t>[]> cut_;
     unsigned slices_;
     std::vector<uint32_t> words_;
     std::unique_ptr<std::atomic<uint64_t>[]> tags_;
@@ -56,7 +64,8 @@ public:
         uint64_t run = 0;                // current run, 1.. (0: none yet)
         uint64_t datagrams = 0, bytes = 0;
         uint64_t slices = 0, packed = 0; // sample slices filed, and those of them packed to 28 bits
-        uint64_t reduced = 0;            // and those reduced to fewer bits
+        uint64_t reduced = 0;            // and those reduced to fewer bits, by the unit's SoC or by the radio
+        uint64_t suspect = 0;            // radio chunks beside a slice louder than their shift holds
         uint64_t events = 0;             // completions that are not samples (firmware events)
         uint64_t pieces = 0;             // slices sent in pieces that did not all arrive, in order
         uint64_t bad = 0;                // wrong magic or length

@@ -282,19 +282,41 @@ static inline void iq_reduce_encode_neon(unsigned format, int m, const uint32_t 
 #endif
 
 /* One raw slice (2048 words) to `format` at out[0 .. iq_reduce_bytes(format));
- * `out` has IQ_REDUCE_SLACK bytes beyond that. Returns the scale code. */
-static inline unsigned iq_reduce_encode(unsigned format, const uint32_t *words, uint8_t *out)
+ * `out` has IQ_REDUCE_SLACK bytes beyond that. Returns the scale code, and at
+ * `peak` (when not NULL) the slice's largest magnitude. */
+static inline unsigned iq_reduce_encode_peak(unsigned format, const uint32_t *words, uint8_t *out,
+					     unsigned *peak)
 {
-	unsigned code;
+	unsigned code, top;
 
 #ifdef IQ_REDUCE_NEON
-	code = iq_reduce_scale(iq_reduce_peak_neon(words), iq_reduce_range(format));
+	top = iq_reduce_peak_neon(words);
+	code = iq_reduce_scale(top, iq_reduce_range(format));
 	iq_reduce_encode_neon(format, iq_reduce_m[code], words, out);
 #else
-	code = iq_reduce_scale(iq_reduce_peak_scalar(words), iq_reduce_range(format));
+	top = iq_reduce_peak_scalar(words);
+	code = iq_reduce_scale(top, iq_reduce_range(format));
 	iq_reduce_encode_scalar(format, iq_reduce_m[code], words, out);
 #endif
+	if (peak)
+		*peak = top;
 	return code;
+}
+
+static inline unsigned iq_reduce_encode(unsigned format, const uint32_t *words, uint8_t *out)
+{
+	return iq_reduce_encode_peak(format, words, out, NULL);
+}
+
+/* The shift for radio-reduced chunks (iq_radio14_*) beside slices whose largest
+ * magnitude is `peak`: the smallest that holds twice as much. */
+static inline unsigned iq_radio14_shift_for(unsigned peak)
+{
+	unsigned shift = 0, need = 2 * peak;
+
+	while (shift < 7 && need > (64u << shift) - 1)
+		shift++;
+	return shift;
 }
 
 /* The decoder's step under a scale code, in 1/1024ths. */
@@ -363,6 +385,79 @@ static inline void iq_reduce_decode(unsigned format, unsigned code, const uint8_
 		}
 		break;
 	}
+}
+
+/* ------------------------------------------------------------------------ */
+/* The radio-reduced chunk (iq_format.h MT7996_IQ_CHUNK_RADIO14_BYTES): what   */
+/* the MT7996's own cores make of half the chunks of a split stream            */
+/* (firmware/stream/reduce14.S). The encoder here is that kernel's model.      */
+/* ------------------------------------------------------------------------ */
+#define IQ_RADIO14_BYTES	3588u
+#define IQ_RADIO14_DATA_BYTES	3584u
+#define IQ_RADIO14_TRAILER	0x52443100u
+#define IQ_RADIO14_SHIFT_MAX	7u
+
+/* The largest magnitude a chunk under shift s holds without wrapping. */
+static inline unsigned iq_radio14_range(unsigned shift)
+{
+	return (64u << shift) - 1;
+}
+
+/* One raw slice (2048 words, spare bits clear) to out[0 .. IQ_RADIO14_BYTES). */
+static inline void iq_radio14_encode(unsigned shift, const uint32_t *words, uint8_t *out)
+{
+	uint32_t x[8], o, trailer = IQ_RADIO14_TRAILER | shift;
+	unsigned g, k;
+
+	for (g = 0; g < IQ_REDUCE_SAMPLES; g += 16, out += 28) {
+		for (k = 0; k < 8; k++)		/* two samples fold into one word */
+			x[k] = ((words[g + 2 * k] >> shift) & 0x007f007fu) |
+			       ((words[g + 2 * k + 1] >> shift) & 0x007f007fu) << 7;
+		for (k = 0; k < 7; k++) {	/* the eighth rides in the others' spare bits */
+			o = x[k] | ((x[7] << (14 - 2 * k)) & 0xc000c000u);
+			memcpy(out + 4 * k, &o, 4);	/* little-endian hosts */
+		}
+	}
+	memcpy(out, &trailer, 4);
+}
+
+/* A radio-reduced chunk back to 2048 sample words. Returns its shift, or -1
+ * where the trailer is not one (the completion is something else). */
+static inline int iq_radio14_decode(const uint8_t *in, uint32_t *words)
+{
+	uint32_t lut[128], trailer, o[7], x[8];
+	unsigned shift, g, k;
+
+	memcpy(&trailer, in + IQ_RADIO14_DATA_BYTES, 4);
+	shift = trailer & 0xffu;
+	if ((trailer & 0xffffff00u) != IQ_RADIO14_TRAILER || shift > IQ_RADIO14_SHIFT_MAX)
+		return -1;
+	for (k = 0; k < 128; k++)	/* the middle of the step, as a 14-bit field */
+		lut[k] = (uint32_t)(((int)(k ^ 64) - 64) * (int)(1u << shift) + (int)((1u << shift) >> 1)) & 0x3fffu;
+	for (g = 0; g < IQ_REDUCE_SAMPLES; g += 16, in += 28) {
+		memcpy(o, in, 28);
+		x[7] = 0;
+		for (k = 0; k < 7; k++) {
+			x[k] = o[k] & ~0xc000c000u;
+			x[7] |= (o[k] & 0xc000c000u) >> (14 - 2 * k);
+		}
+		for (k = 0; k < 8; k++) {
+			words[g + 2 * k] = lut[(x[k] >> 16) & 0x7f] << 16 | lut[x[k] & 0x7f];
+			words[g + 2 * k + 1] = lut[(x[k] >> 23) & 0x7f] << 16 | lut[(x[k] >> 7) & 0x7f];
+		}
+	}
+	return (int)shift;
+}
+
+/* The least a slice's largest magnitude can have been for the encoder to give
+ * it scale code `code` in `format`: the code before it did not fit. */
+static inline unsigned iq_reduce_peak_floor(unsigned format, unsigned code)
+{
+	const uint32_t limit = (2 * iq_reduce_range(format) + 1) * 4096u;
+
+	if (!code || code > IQ_REDUCE_SCALE_MAX)
+		return 0;
+	return (limit + iq_reduce_m[code - 1] - 1) / iq_reduce_m[code - 1];
 }
 
 #endif /* HW_MT7996_IQ_REDUCE_H */

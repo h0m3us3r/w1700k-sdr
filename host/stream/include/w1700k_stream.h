@@ -76,7 +76,9 @@ struct w1700k_stream_header {
 	uint64_t overruns;		/* of the lost: arrived, but overwritten in the service's receive
 					 * ring before it was published (the service fell behind) */
 	uint64_t reduced;		/* of the slices: sent with fewer bits than 14 per component */
-	uint64_t reserved2[11];
+	uint64_t suspect;		/* of a split stream's radio chunks: beside a slice louder than their
+					 * shift holds, so samples in them may have wrapped (counted, not dropped) */
+	uint64_t reserved2[10];
 
 	/* control: written by consumers, read by the service */
 	uint64_t restart_requests;	/* +1: the next completion starts a new run */

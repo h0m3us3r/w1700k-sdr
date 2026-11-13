@@ -103,7 +103,7 @@ class StreamServiceTest(unittest.TestCase):
         self.name = "/w1700k-test-%d-%d" % (os.getpid(), self.counter)
         self.port = free_udp_port()
         self.proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(self.port), "--name", self.name,
-                                      "--ring-mib", "16", "--workers", "2", "--rx-threads", "2"],
+                                      "--ring-mib", "16", "--receive-mib", "64", "--workers", "2", "--rx-threads", "2"],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         deadline = time.monotonic() + 10
         while True:
@@ -251,6 +251,45 @@ class StreamServiceTest(unittest.TestCase):
             want = iq_reduce_ref.restored(words[s], formats[s]) if s in formats else unpacked(words[s])
             self.assertEqual(self.shm.samples(s), want, "slot %d" % s)
         self.assertEqual((self.shm.get("reduced"), self.shm.get("lost"), self.shm.get("bad")), (7, 0, 1))
+
+    def test_radio_reduced_chunks_of_a_split_stream(self):
+        """Every other chunk reduced by the radio (3588 bytes under SDR1, its shift in the trailer),
+        the ones between by the unit's senders (SDR2): both come out as 14-bit samples. A completion
+        of that length without the trailer is an event, as any short one."""
+        words = {s: [word(round(900 * math.cos(0.21 * n + s)), round(900 * math.sin(0.05 * n * n))) for n in range(SLICE)]
+                 for s in range(40)}
+        shifts = {s: (4, 5, 7, 6)[s // 2 % 4] for s in range(0, 40, 2)}
+        quiet = [word(round(100 * math.cos(0.3 * n)), round(100 * math.sin(0.3 * n))) for n in range(SLICE)]
+        for s in range(1100):
+            if s == 38:
+                self.send(s, b"\x00" * iq_reduce_ref.RADIO14_BYTES)       # no trailer: an event
+            elif s < 40 and s % 2 == 0:
+                self.send(s, iq_reduce_ref.radio14_encode(words[s], shifts[s]))
+            elif s < 40:
+                self.send_reduced(s, words[s], 14)
+            elif s in (50, 60):                 # radio chunks under a small shift (range 255) ...
+                self.send(s, iq_reduce_ref.radio14_encode(quiet, 2))
+            elif s == 51:                       # ... one beside a slice of the unit's that peaks at 900
+                self.send_reduced(s, words[1], 14)
+            elif s == 59:                       # ... one beside a quiet slice
+                self.send_reduced(s, quiet, 14)
+            else:
+                self.send_words(s, noise_words(s))
+        run = self.wait_newest(1100)
+        self.assertEqual(self.shm.get("suspect"), 1, "the radio chunk beside the louder slice may have wrapped")
+        self.assertEqual(self.shm.samples(50), iq_reduce_ref.radio14_restored(quiet, 2))
+        for s in range(38):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            want = iq_reduce_ref.radio14_restored(words[s], shifts[s]) if s % 2 == 0 else iq_reduce_ref.restored(words[s], 14)
+            self.assertEqual(self.shm.samples(s), want, "slot %d" % s)
+        self.assertEqual(self.shm.tag(38), tag(run, 38) | TAG_EVENT)
+        self.assertEqual((self.shm.get("reduced"), self.shm.get("events"), self.shm.get("lost"), self.shm.get("bad")),
+                         (19 + 20 + 4, 1, 0, 0))
+        # in range (900 fits every shift used): within half a step of the samples sent
+        for s in (0, 2, 4, 6):
+            for (i, q), v in zip(self.shm.samples(s), words[s]):
+                self.assertLessEqual(abs(i - signed14(v >> 16 & 0x3FFF)), (1 << shifts[s]) // 2)
+                self.assertLessEqual(abs(q - signed14(v & 0x3FFF)), (1 << shifts[s]) // 2)
 
     def test_a_reduced_slice_of_the_wrong_length_is_refused(self):
         code, data = iq_reduce_ref.encode(noise_words(1), 14)

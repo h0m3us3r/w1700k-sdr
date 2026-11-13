@@ -139,6 +139,24 @@
 #define MT7996_IQ_CHUNK_BYTES		8192u
 #define MT7996_IQ_CHUNK_SAMPLES		2048u
 #define MT7996_IQ_CHUNK_PACKED_BYTES	7168u
+/* A radio-reduced chunk (the split schedule, 320 Msps on a link too slow for
+ * the lossless ones): 7 bits of each of I and Q under one shift s (0..7) for
+ * the chunk, q = (x >> s) & 0x7f: two's complement, rounded down, exact while
+ * -64 <= x >> s <= 63 and wrapped beyond (the host sets s from the levels it
+ * sees in the chunks between, with room to spare). Two samples fold into one
+ * word shaped like a sample word,
+ *   Q(2j) | Q(2j+1) << 7 in [13:0],  I(2j) | I(2j+1) << 7 in [29:16],
+ * and those 1024 words are packed 8 to 7 as below: 896 words. Then one
+ * trailer word, RADIO14_TRAILER | s. 3588 bytes: the length tells it from an
+ * event (shorter than 4096 too) together with the trailer.
+ * A sample is read back as (q << s) + ((1 << s) >> 1), the middle of its step.
+ * At 320 Msps, each packer on 5 of every 16 chunks, the kernel costs 11.5k
+ * cycles a chunk on the WM (78 % busy) and 12.8k on the WA (87 %).  [measured] */
+#define MT7996_IQ_CHUNK_RADIO14_BYTES	3588u
+#define MT7996_IQ_RADIO14_DATA_BYTES	3584u
+#define MT7996_IQ_RADIO14_TRAILER	0x52443100u	/* "RD1", then the shift in [2:0] */
+#define MT7996_IQ_RADIO14_TRAILER_MASK	0xffffff00u
+#define MT7996_IQ_RADIO14_SHIFT_MAX	7u
 #define MT7996_IQ_CHUNK_EVENT_MAX	4095u	/* longest non-sample completion */
 #define MT7996_IQ_CHUNKS_PER_MIB	128u	/* one 1 MiB ICAP lap */
 /* Length of a ring completion from its ctrl word (DDONE | LS0 | len << 16;

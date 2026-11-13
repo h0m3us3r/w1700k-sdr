@@ -44,6 +44,16 @@ difference but the quantisation noise (`reduced` counts them). A slice may also 
 (`export.piece`): datagrams with a rising `offset`, assembled here; a slice with a piece missing
 counts as lost, and `pieces` counts those.
 
+In a split stream (`w1700k` packing `split`, 320 Msps on 5 Gbit/s) the radio reduces most of
+the chunks itself: those come under "SDR1" as completions of 3588 bytes whose last word is
+`0x524431xx`, the low byte the shift their samples were cut under
+(`include/hw/mt7996/iq_format.h`); the chunks between come reduced by the unit under "SDR2".
+Both are scaled back to 14-bit samples and counted in `reduced`. The radio is told its shift
+from the levels the unit sees in the chunks between, so a level that more than doubles within
+a millisecond can wrap in the radio's chunks until the shift follows: `suspect` counts radio
+chunks next to a unit-reduced slice whose peak was beyond their shift's range. They are
+published all the same.
+
 The export sends one UDP datagram per completion of the unit's DMA ring: a 16-byte header
 (`u32` magic `0x31524453` "SDR1", `u16` offset, `u16` slice_bytes, `u64` seq) and one slice, 8192
 bytes raw (2048 samples, I in bits [29:16], Q in [13:0]) or 7168 bytes packed (of each 8 samples,
@@ -54,8 +64,10 @@ Completions are filed by `seq` into a reorder ring (256 MiB, 0.2 s at 320 Msps).
 first datagram after a second of silence, after a jump in `seq`, or after a consumer asks for one
 (`restart_requests`, which the spectrum server does when the receiver starts or stops). Slots are
 published in order: one whose completion has arrived, a firmware event, or a loss: a slot that is
-still missing 100 ms after 1024 newer completions arrived (a receive thread kept off its CPU on a
-busy host delivers late, not never), or at once when 8192 newer ones have. After 5 ms with nothing new, what has arrived is
+still missing 250 ms after 1024 newer completions arrived (a receive thread kept off its CPU on a
+busy host delivers late, not never, and the two paths of a split stream run tens of milliseconds
+apart at moments), or at once when half the reorder ring is newer (`--receive-mib`, default
+1 GiB: 0.42 s at 320 Msps). After 5 ms with nothing new, what has arrived is
 published; a loss at the very end of a stream stays unpublished until more arrives. Of the
 losses, `overruns` counts those that did arrive but were overwritten in the reorder ring before
 the service published them: the service fell behind (CPU contention), not the export.

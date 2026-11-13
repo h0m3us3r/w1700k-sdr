@@ -60,3 +60,40 @@ def step_of(words, fmt):
 
 def header_word(seq, fmt, code):
     return seq | fmt << 48 | code << 56
+
+
+# ---- the radio-reduced chunk (iq_format.h MT7996_IQ_CHUNK_RADIO14_BYTES) ----
+RADIO14_BYTES = 3588
+RADIO14_TRAILER = 0x52443100
+
+
+def pack28(words):
+    """The lossless 8-to-7 pack of sample-shaped words (spare bits clear)."""
+    out = []
+    for g in range(0, len(words), 8):
+        w = words[g:g + 8]
+        out.extend(w[k] | ((w[7] << (14 - 2 * k)) & 0xC000C000) for k in range(7))
+    return out
+
+
+def radio14_encode(words, shift):
+    """A raw slice as the radio's cores reduce it: 7 bits of I and Q under one shift, two samples
+    to a word, those words packed 8 to 7, then the trailer naming the shift."""
+    def cut(w):
+        return (((w >> 16 & 0x3FFF) >> shift) & 0x7F) << 16 | ((w & 0x3FFF) >> shift) & 0x7F
+    folds = [cut(words[j]) | cut(words[j + 1]) << 7 for j in range(0, len(words), 2)]
+    packed = pack28(folds) + [RADIO14_TRAILER | shift]
+    return b''.join(v.to_bytes(4, 'little') for v in packed)
+
+
+def radio14_restored(words, shift):
+    """The (I, Q) a receiver holds: the middle of each sample's step; wrapped where a sample was
+    outside the shift's range."""
+    def back(x):
+        q = (x >> shift) & 0x7F
+        return ((q ^ 64) - 64) * (1 << shift) + ((1 << shift) >> 1)
+    return [(back(signed14(w >> 16)), back(signed14(w))) for w in words]
+
+
+def radio14_fits(words, shift):
+    return all(-(64 << shift) <= v < (64 << shift) for w in words for v in (signed14(w >> 16), signed14(w)))

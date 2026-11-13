@@ -20,10 +20,12 @@ constexpr unsigned kChunk = 16;            // slots per job
 constexpr uint64_t kHorizon = 1024;        // a slot this far behind the newest completion received is overdue
 // An overdue slot is given this long to arrive before it counts as lost: on a busy host a receive
 // thread can be kept off its CPU for tens of milliseconds while the others run on, and what it
-// then delivers is late, not lost. A slot is given up at once when the newest completion is
-// kLateSlices ahead of it, well before its place in the receive ring is written again.
-constexpr uint64_t kLateNs = 100000000;
-constexpr uint64_t kLateSlices = 8192;
+// then delivers is late, not lost; and the two halves of a split stream leave the unit by different
+// paths (at 320 Msps on a 5 Gbit/s link each was seen 0.035 s behind at worst over five minutes,
+// and 0.14 s and 0.21 s while the unit's senders still shared their CPUs). A slot is given up at
+// once when the newest completion is half the receive ring ahead of it, before its place there is
+// written again.
+constexpr uint64_t kLateNs = 250000000;
 constexpr uint64_t kIdleNs = 5000000;      // nothing new for this long: publish what has arrived
 constexpr uint64_t kReportNs = 100000000;  // heartbeat and counters
 
@@ -159,6 +161,7 @@ void Publisher::report()
     store(&out_->slices, s.slices);
     store(&out_->packed, s.packed);
     store(&out_->reduced, s.reduced);
+    store(&out_->suspect, s.suspect);
     store(&out_->events, s.events);
     store(&out_->pieces, s.pieces);
     store(&out_->bad, s.bad);
@@ -181,7 +184,7 @@ void Publisher::report()
 
 // One thread walks the receive ring in order: a slot is resolved when its completion (samples or
 // an event) is in, or when it is given up as lost: kHorizon newer ones have been in for kLateNs
-// (one wait covers every slot that was overdue when it began), or kLateSlices newer ones are in.
+// (one wait covers every slot that was overdue when it began), or half the ring is newer.
 // Whole chunks of resolved
 // slots go to the workers, with one more resolved slot after them when the correction needs
 // samples beyond the chunk; an idle stream's tail goes as it is. Finished chunks are published in
@@ -237,7 +240,7 @@ void Publisher::schedule()
                 continue;
             }
             if (p.newest <= resolved + kHorizon) break;
-            if (p.newest > resolved + kLateSlices) {  // too far behind to wait for
+            if (p.newest > resolved + raw_.capacity_slices() / 2) {  // too far behind to wait for
                 ++resolved;
                 continue;
             }

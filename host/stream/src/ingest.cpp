@@ -19,7 +19,8 @@ namespace {
 // A reduced slice (iq_reduce.h) comes under "SDR2": the same fields, with the slice's format in
 // bits [55:48] of the last and its scale code in [63:56], above a 48-bit seq. A datagram holds one
 // such record, or several whole slices back to back; a record shorter than the rest of its slice
-// is a piece of it and ends the datagram.
+// is a piece of it and ends the datagram. A completion of 3588 bytes under "SDR1" whose last word
+// is the radio-reduced trailer is a chunk the radio reduced itself (a split stream).
 constexpr uint32_t kMagic = 0x31524453, kMagicReduced = 0x32524453;
 constexpr size_t kHeader = 16;
 constexpr unsigned kPartials = 4;                // slices a receiver assembles from pieces at once
@@ -50,16 +51,20 @@ std::mutex run_mutex;
 }  // namespace
 
 SampleRing::SampleRing(unsigned capacity_slices)
-    : slices_(capacity_slices), words_(size_t(capacity_slices) * kSliceSamples),
-      tags_(new std::atomic<uint64_t>[capacity_slices])
+    : cut_(new std::atomic<uint16_t>[capacity_slices]), slices_(capacity_slices),
+      words_(size_t(capacity_slices) * kSliceSamples), tags_(new std::atomic<uint64_t>[capacity_slices])
 {
     if (!capacity_slices || (capacity_slices & (capacity_slices - 1)))
         throw std::runtime_error("ring capacity must be a power of two");
-    for (unsigned i = 0; i < capacity_slices; ++i) tags_[i].store(0, std::memory_order_relaxed);
+    for (unsigned i = 0; i < capacity_slices; ++i) {
+        tags_[i].store(0, std::memory_order_relaxed);
+        cut_[i].store(kNone, std::memory_order_relaxed);
+    }
 }
 
 void SampleRing::claim(uint64_t index)
 {
+    cut_[index & (slices_ - 1)].store(kNone, std::memory_order_relaxed);
     tags_[index & (slices_ - 1)].store(0, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
 }
@@ -92,7 +97,35 @@ void SampleRing::put_reduced(uint64_t run, uint64_t index, unsigned format, unsi
 {
     claim(index);
     iq_reduce_decode(format, scale, reduced, &words_[(index & (slices_ - 1)) * kSliceSamples]);
+    cut_[index & (slices_ - 1)].store(format == 14 ? uint16_t(scale) : kNone, std::memory_order_relaxed);
     tags_[index & (slices_ - 1)].store(tag_of(run, index), std::memory_order_release);
+}
+
+// A radio chunk's range against the least its unit-reduced neighbour's peak can have been. Called
+// by whichever of the two is filed second; the one filed first found the other missing.
+bool SampleRing::suspect(uint64_t run, uint64_t index) const
+{
+    auto cut = [&](uint64_t i) -> uint16_t {
+        return tag(i) == tag_of(run, i) ? cut_[i & (slices_ - 1)].load(std::memory_order_relaxed) : kNone;
+    };
+    auto wraps = [](uint16_t radio, uint16_t unit) {
+        return radio != kNone && unit != kNone && (radio & kRadio) && !(unit & kRadio) &&
+               iq_reduce_peak_floor(14, unit) > iq_radio14_range(radio & 7);
+    };
+    const uint16_t here = cut(index), before = index ? cut(index - 1) : kNone, after = cut(index + 1);
+    if (here == kNone) return false;
+    return here & kRadio ? wraps(here, before) || wraps(here, after) : wraps(before, here) || wraps(after, here);
+}
+
+// A radio-reduced chunk (iq_reduce.h iq_radio14_*): false where its trailer says it is not one.
+bool SampleRing::put_radio14(uint64_t run, uint64_t index, const uint8_t *chunk)
+{
+    claim(index);
+    const int shift = iq_radio14_decode(chunk, &words_[(index & (slices_ - 1)) * kSliceSamples]);
+    if (shift < 0) return false;
+    cut_[index & (slices_ - 1)].store(uint16_t(kRadio | shift), std::memory_order_relaxed);
+    tags_[index & (slices_ - 1)].store(tag_of(run, index), std::memory_order_release);
+    return true;
 }
 
 void SampleRing::put_event(uint64_t run, uint64_t index)
@@ -116,7 +149,7 @@ struct Ingest::Worker {
     uint64_t partial_clock = 0, given_up = ~uint64_t(0);  // the last slice counted in `pieces`
     // Written by this worker only, read by stats().
     std::atomic<uint64_t> datagrams{0}, bytes{0}, slices{0}, packed{0}, events{0}, pieces{0}, bad{0}, late{0},
-        duplicates{0}, drops{0}, before{0}, spare{0}, stale{0}, stale_lines{0}, reduced{0};
+        duplicates{0}, drops{0}, before{0}, spare{0}, stale{0}, stale_lines{0}, reduced{0}, suspect{0};
 };
 
 Ingest::Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads)
@@ -303,13 +336,19 @@ size_t Ingest::record(Worker &w, const uint8_t *data, size_t n, uint64_t t)
         w.duplicates.fetch_add(1, std::memory_order_relaxed);
         return taken;
     }
-    if (event) {
+    if (event && slice_bytes == IQ_RADIO14_BYTES && ring_.put_radio14(run, index, payload)) {
+        // of a split stream: the half of the chunks the radio reduced itself
+        w.slices.fetch_add(1, std::memory_order_relaxed);
+        w.reduced.fetch_add(1, std::memory_order_relaxed);
+        if (ring_.suspect(run, index)) w.suspect.fetch_add(1, std::memory_order_relaxed);
+    } else if (event) {
         ring_.put_event(run, index);
         w.events.fetch_add(1, std::memory_order_relaxed);
     } else if (reduced) {
         ring_.put_reduced(run, index, format, scale, payload);
         w.slices.fetch_add(1, std::memory_order_relaxed);
         w.reduced.fetch_add(1, std::memory_order_relaxed);
+        if (ring_.suspect(run, index)) w.suspect.fetch_add(1, std::memory_order_relaxed);
     } else if (slice_bytes == kRawBytes) {
         const uint32_t *words = reinterpret_cast<const uint32_t *>(payload);  // 4-aligned in both buffers
         uint64_t spare = 0;
@@ -378,6 +417,7 @@ Ingest::Stats Ingest::stats() const
         s.stale_slices += w->stale.load(std::memory_order_relaxed);
         s.stale_lines += w->stale_lines.load(std::memory_order_relaxed);
         s.reduced += w->reduced.load(std::memory_order_relaxed);
+        s.suspect += w->suspect.load(std::memory_order_relaxed);
     }
     s.run = run_.load();
     s.newest = newest_.load();
