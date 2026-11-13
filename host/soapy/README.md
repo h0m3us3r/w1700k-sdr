@@ -81,11 +81,14 @@ Device arguments, beside `driver=w1700k`:
   on an 8-core Intel N350: 20 s at 320 Msps in either format with no gap and the reader at most
   45 ms behind, with nothing else reading; with the spectrum page running too the host itself
   lost 0.02 to 0.06 % of the slices (as it does without this module) and the reader was up to
-  0.36 s behind, with no gap of its own.
-- **Other controllers.** A controller session does not hear what another one changes: while a
-  SoapySDR program retunes the receiver, the spectrum page keeps showing the tuning it set
-  itself, and the other way round. The stream is the same for both; only what each believes
-  about it differs. One of them should do the tuning.
+  0.36 s behind: at the edge of the ring, and in one run of several it went over it and lost a
+  stretch of its own.
+- **Other controllers.** The spectrum page and a SoapySDR program can both drive the
+  receiver: a controller adopts what another changed within about two seconds
+  ([`../w1700k`](../w1700k/README.md)), so the page follows a retune made here, and
+  `getFrequency` and the rest report one made on the page. A sample rate changed elsewhere
+  restarts the stream under a reader, which carries on at the new rate once the controller
+  has reported it.
 
 ## Tests
 

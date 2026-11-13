@@ -288,6 +288,7 @@ private:
     mutable uint64_t state_serial_ = 0;
     mutable double span_[kBands][2];
     mutable std::atomic<double> rate_{0};
+    std::atomic<uint64_t> synced_ns_{0};   // when a reader last looked at the controller's state
     int manual_lna_ = 2, manual_lpf_ = 5;  // what a gain set by name starts from
     int active_ = 0;                       // streams reading
     bool started_here_ = false;            // the unit's stream was started by this device
@@ -485,6 +486,17 @@ int W1700K::readStream(SoapySDR::Stream *stream, void *const *buffers, const siz
     Rx *rx = reinterpret_cast<Rx *>(stream);
     if (!rx->active) return SOAPY_SDR_STREAM_ERROR;
     flags = 0;
+    // A program that only reads asks for nothing, and the sample rate may be changed from
+    // elsewhere (the page): look at what the controller has reported a few times a second,
+    // unless a setter is at work.
+    const uint64_t now = w1700k_stream_now_ns();
+    if (now - synced_ns_.load(std::memory_order_relaxed) > 250000000ull) {
+        synced_ns_.store(now, std::memory_order_relaxed);
+        if (mutex_.try_lock()) {
+            sync();
+            mutex_.unlock();
+        }
+    }
     const long n = rx->reader.read(rx->cf32 ? nullptr : static_cast<int16_t *>(buffers[0]),
                                    rx->cf32 ? static_cast<float *>(buffers[0]) : nullptr, count, timeout_us,
                                    rate_.load(std::memory_order_relaxed), time_ns);

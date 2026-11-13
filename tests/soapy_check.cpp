@@ -7,7 +7,7 @@
 //                             one setter; prints {"ok":true} or {"error":"..."}
 //   read:FORMAT:SAMPLES:FILE  one stream: prints {"reading":true} once it is active, reads SAMPLES
 //                             samples (FORMAT CS16 or CF32) into FILE (- for nowhere) or until 2 s
-//                             pass with none, and prints what came: samples, overflows, the
+//                             ($SOAPY_CHECK_IDLE) pass with none, and prints what came: samples, overflows, the
 //                             samples the overflows' times say were lost, reads whose time did
 //                             not follow from the one before, the first and last times
 #include <chrono>
@@ -84,6 +84,8 @@ void read(SoapySDR::Device *d, const std::string &format, long long want, const 
 
     long long samples = 0, overflows = 0, time_errors = 0, first = 0, last = 0, expected = 0, lost_ns = 0, other = 0;
     bool timed = false;
+    const char *idle = std::getenv("SOAPY_CHECK_IDLE");     // seconds without a sample that end the read
+    const double idle_s = idle ? std::atof(idle) : 2.0;
     const auto begun = std::chrono::steady_clock::now();
     auto last_data = begun;
     while (samples < want) {
@@ -94,7 +96,7 @@ void read(SoapySDR::Device *d, const std::string &format, long long want, const 
         const int n = d->readStream(stream, buffers, ask, flags, time_ns, 100000);
         const auto now = std::chrono::steady_clock::now();
         if (n == SOAPY_SDR_TIMEOUT) {
-            if (now - last_data > std::chrono::seconds(2)) break;
+            if (now - last_data > std::chrono::duration<double>(idle_s)) break;
             continue;
         }
         last_data = now;
