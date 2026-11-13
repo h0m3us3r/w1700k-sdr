@@ -193,7 +193,10 @@ DF, UDP checksum filled by the MAC:
 The interface needs scatter-gather and an MTU of at least `slice_bytes + 44`
 (8236 for 8 KiB slices). The device's TX queue is the only flow control; the
 export reports `-ENOBUFS` if it falls more than `slices - slots - 64`
-completions behind.
+completions behind. With `W1700K_SDR_EXPORT_SHORT` (beside the client's own
+senders, which carry on whatever the export does) it does not end there: it
+passes over what the device may be rewriting, resumes 256 completions behind the
+newest, and counts what it passed over in `export_unsent`.
 
 ### The client's own senders
 

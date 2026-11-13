@@ -40,6 +40,8 @@
 #define SDR_EXPORT_CLOSE_MS 2000
 /* Slices of margin behind the device's write position. */
 #define SDR_EXPORT_MARGIN 64
+/* A short-completions export that fell too far behind resumes this close to the newest. */
+#define SDR_EXPORT_RESUME 256
 
 /* Module-wide: the driver binds the one MT7996 primary interface. */
 static atomic_t sdr_export_queued = ATOMIC_INIT(0);
@@ -211,8 +213,19 @@ static int sdr_export_pump(struct sdr_export *x, u64 completed)
 
 	while (x->next < completed) {
 		lag = completed - x->next;
-		if (lag > x->safe)
-			return -ENOBUFS;
+		if (lag > x->safe) {
+			if (!(x->cfg.flags & W1700K_SDR_EXPORT_SHORT))
+				return -ENOBUFS;
+			/* Beside senders that carry on, giving up would cost the rest of
+			 * the stream its short completions (seen: one stall of 0.8 s, and
+			 * 62 % of every slice after it missing). Pass over what the device
+			 * may be rewriting, count it, and go on from the newest.
+			 */
+			x->skipped += lag - SDR_EXPORT_RESUME;
+			x->next = completed - SDR_EXPORT_RESUME;
+			x->max_lag = max_t(u32, x->max_lag, x->safe);
+			continue;
+		}
 		x->max_lag = max_t(u32, x->max_lag, lag);
 		len = HW_GET(WFDMA_DESC_CTRL_SD_LEN0, READ_ONCE(x->ctrl[x->next % x->slices]));
 		len = min(len, x->slice_bytes);
@@ -317,7 +330,7 @@ void sdr_export_finish(struct sdr_export *x, u64 end, struct w1700k_sdr_stream_r
 	out->export_result = result;
 	out->export_slices = x->sent;
 	out->export_busy = x->busy;
-	out->export_unsent = x->unsent;
+	out->export_unsent = x->unsent + x->skipped;
 	out->export_last_ns = x->last_ns;
 	out->export_max_lag = x->max_lag;
 	out->export_inflight_max = x->inflight_max;

@@ -632,9 +632,13 @@ class Controller:
                       f'{sent.get("lapped", 0)} skipped (the senders fell behind), {sent.get("errors", 0)} send '
                       f'errors, {sent.get("busy", 0)} waits for the link')
         exported = (result.reader or {}).get('export') or {}
-        if exported.get('result') or exported.get('unsent'):
+        if exported.get('result'):
             self._log('warn', f'the driver\'s export ended with {exported.get("result")}: '
                               f'{exported.get("unsent", 0)} completions were not sent')
+        elif exported.get('unsent'):
+            # beside the unit's senders it goes on after falling behind (W1700K_SDR_EXPORT_SHORT)
+            self._log('warn', f'the driver\'s export fell behind and passed over {exported.get("unsent")} '
+                              f'completions (at most {exported.get("max_lag", 0)} behind)')
         split = (result.reader or {}).get('split') or {}
         if split.get('on'):
             # the radio's own chunks: how wide the shift it was given ranged (7 holds full scale)

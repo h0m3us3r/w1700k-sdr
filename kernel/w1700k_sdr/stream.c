@@ -461,10 +461,34 @@ out:
 	return NULL;
 }
 
+/* How many CPUs the unit has. Not sysconf(): the C library the unit's programs
+ * are built with counts the CPUs the calling thread may run on, which is one
+ * for a thread pinned to its own (seen: the export thread and every network
+ * thread confined to CPU 0 by a count taken on a pinned thread, and a 320 Msps
+ * stream falling 0.8 s behind there).
+ */
+static long cpu_count(void)
+{
+	static long n;
+	int first, last = -1;
+	FILE *f;
+
+	if (n)
+		return n;
+	f = fopen("/sys/devices/system/cpu/possible", "r");
+	if (f) {
+		if (fscanf(f, "%d-%d", &first, &last) == 1)
+			last = first;
+		fclose(f);
+	}
+	n = last >= 0 ? last + 1 : sysconf(_SC_NPROCESSORS_CONF);
+	return n;
+}
+
 /* Every CPU but `cpu`; with `all`, every CPU. */
 static void cpus_but(cpu_set_t *set, uint32_t cpu, int all)
 {
-	long n = sysconf(_SC_NPROCESSORS_CONF), k;
+	long n = cpu_count(), k;
 
 	CPU_ZERO(set);
 	for (k = 0; k < n && k < CPU_SETSIZE; k++)
@@ -481,7 +505,7 @@ static void cpus_but(cpu_set_t *set, uint32_t cpu, int all)
  */
 static int sender_cpu(uint32_t pump, uint32_t index, uint32_t senders)
 {
-	long n = sysconf(_SC_NPROCESSORS_CONF), k, left = (long)index;
+	long n = cpu_count(), k, left = (long)index;
 
 	if (n < (long)senders + 2)
 		return -1;

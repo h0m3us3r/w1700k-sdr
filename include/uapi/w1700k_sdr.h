@@ -158,7 +158,9 @@ struct w1700k_sdr_stream_ring {
  * W1700K_SDR_EXPORT_SHORT: only completions shorter than a slice leave this
  * way (radio-reduced chunks, events); the full ones are for a reader of the
  * mapping to send (mt7996-stream --send). The export thread then sleeps when
- * it has nothing to send rather than poll, so it needs no CPU of its own.
+ * it has nothing to send rather than poll, so it needs no CPU of its own, and
+ * an export that falls too far behind passes over what it missed and goes on
+ * (export_unsent counts it) instead of ending with -ENOBUFS.
  */
 #define W1700K_SDR_EXPORT_SHORT 0x1U
 #define W1700K_SDR_EXPORT_FLAGS W1700K_SDR_EXPORT_SHORT
