@@ -86,8 +86,9 @@ the rate is not 640/2 (`receiver.flatten_available`, `flatten_active` in the sta
 
 The controller picks the stream's packing from the sample rate and the link's speed (raw where it
 fits, else every chunk or every other chunk packed to 28 bits, lossless either way, else reduced
-on the unit to 16, 14, 8 or 7 bits per sample: shown as for example `7-bit, reduced
-(14 b/sample)`, with what it costs in noise in the tooltip), unless it is
+on the unit to 16, 14, 8 or 7 bits per sample, or at 320 Msps to 14 by the radio and the unit
+together (`split`): shown as for example `7-bit, reduced (14 b/sample)`, with what it costs in
+noise in the tooltip), unless it is
 set by hand (`w1700k serve --packing`, or `export.packing` in its configuration). The header shows
 what the stream carries next to the sample rate and band, for example `14-bit, packed
 (28 b/sample)`, with `(manual)` when set by hand; the Stream panel shows the share of packed slices. While a configure,

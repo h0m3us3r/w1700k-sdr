@@ -43,13 +43,15 @@ class Packing:
     name: str
     wa: int                       # chunks of each period the WA packs
     wm: int                       # chunks of each period the WM packs
+    reduce: bool = False          # packed chunks are reduced to 14 bits (reduce14.S), not packed to 28
 
 
 PERIOD = 16
 RAW = Packing('raw', 0, 0)
 HALF = Packing('half', 4, 4)
 FULL = Packing('full', 8, 8)
-PACKINGS = (RAW, HALF, FULL)      # index = the RADIO_PACKING_* code
+SPLIT = Packing('split', 5, 5, True)
+PACKINGS = (RAW, HALF, FULL, SPLIT)   # index = the RADIO_PACKING_* code
 
 
 def schedule(packing, period=PERIOD):
@@ -75,7 +77,8 @@ def schedule_defines():
     rows = []
     for packing in PACKINGS:
         wa_mask, wm_mask, slots = schedule(packing)
-        rows.append(f"{{{wa_mask:#x}u,{wm_mask:#x}u,{packing.wa}u,{packing.wm}u,{{{','.join(map(str, slots))}}}}}")
+        rows.append(f"{{{wa_mask:#x}u,{wm_mask:#x}u,{packing.wa}u,{packing.wm}u,{int(packing.reduce)}u,"
+                    f"{{{','.join(map(str, slots))}}}}}")
     return dict(PERIOD=f'{PERIOD}u', SCHEDULES=','.join(rows))
 
 
@@ -118,4 +121,4 @@ def compile_blob(sources, defines, base, limit):
 
 
 def wa_packer():
-    return compile_blob(['wa_lead.S', 'packer.c', 'pack.S'], schedule_defines(), WA_CODE, WA_LIMIT)
+    return compile_blob(['wa_lead.S', 'packer.c', 'pack.S', 'reduce14.S'], schedule_defines(), WA_CODE, WA_LIMIT)

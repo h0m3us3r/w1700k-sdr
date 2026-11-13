@@ -37,16 +37,23 @@ MIN_MTU = 8192 + HEADERS          # one 8 KiB slice per datagram
 WIRE_OVERHEAD = 82
 PACKED_CHUNK = 7168               # a chunk packed to 28 bits per sample pair (iq_format.h)
 # The share of chunks each packing schedule packs (firmware/stream/blob.py PACKINGS).
-PACKED_SHARE = {'raw': 0.0, 'half': 0.5, 'full': 1.0}
+PACKED_SHARE = {'raw': 0.0, 'half': 0.5, 'full': 1.0, 'split': 0.625}
 # The reduced formats (include/hw/mt7996/iq_reduce.h): bits per I/Q pair, and a slice's bytes. The
 # firmware streams raw; the unit's SoC requantises each slice with one scale (mt7996-stream --send).
 # That reads every sample through the SoC's memory bus, which carries 1.0 GB/s of it beside the
 # capture (measured: one core 0.60, two 1.0, three 0.93): 160 Msps (0.64 GB/s), not 320 (1.28).
 REDUCED_MAX_RATE = 160_000_000
-# Datagrams a second the senders carry without loss: 117 thousand measured clean (40 Msps raw or
-# 80 Msps at 14 bits in 1456-byte pieces); at 235 thousand the unit's own transmit path lost
-# 0.1-0.2 % of them after the send calls had succeeded.
-SENDER_MAX_DATAGRAMS = 120_000
+# Datagrams a second the senders may be asked for. Every rate from 80 to 239 thousand was clean in
+# 20-second runs with the packets counted at the unit's port, and 200 and 239 thousand in
+# two-minute soaks (24 and 29 million datagrams). But five runs in a row at 235 thousand once lost
+# 0.1-0.2 % inside the unit, after its send calls had succeeded, and the cause was not found: the
+# limit stays below the only rate that has ever lost any.
+SENDER_MAX_DATAGRAMS = 200_000
+# The split packing: at 320 Msps the radio's own cores reduce every other chunk to 14 bits
+# (firmware/stream/reduce14.S, 3588 bytes, sent zero-copy by the driver's export) and the unit's
+# senders reduce the raw chunks between (the '14' format). Neither can do all of a 320 Msps stream.
+SPLIT = 'split'
+RADIO14_CHUNK = 3588
 SENDERS = 2                       # two sender threads read more between them than three (the bus again)
 REDUCED = {'16': 16, '14': 14, '8': 8, '7': 7}
 REDUCED_CHUNK = {'16': 4096, '14': 3584, '8': 2048, '7': 1792}
@@ -80,8 +87,8 @@ def firmware_packing(packing):
 
 def uses_sender(packing, piece=None):
     """Whether the stream leaves through mt7996-stream's own senders (reduced, or in pieces) rather
-    than the driver's zero-copy export."""
-    return packing in REDUCED or bool(piece)
+    than the driver's zero-copy export alone."""
+    return packing in REDUCED or packing == SPLIT or bool(piece)
 
 
 def wire_rate(packing, sample_rate, piece=None):
@@ -89,7 +96,10 @@ def wire_rate(packing, sample_rate, piece=None):
     raw, packed or reduced, as one datagram, or as datagrams of at most `piece` bytes of it."""
     def on_wire(chunk):
         return chunk + (-(-chunk // piece) if piece else 1) * WIRE_OVERHEAD
-    if packing in REDUCED:
+    if packing == SPLIT:               # the radio's chunks and the senders', a datagram each at most
+        share = PACKED_SHARE[SPLIT]
+        per_chunk = share * on_wire(RADIO14_CHUNK) + (1 - share) * on_wire(REDUCED_CHUNK['14'])
+    elif packing in REDUCED:
         per_chunk = on_wire(REDUCED_CHUNK[packing])
     else:
         share = PACKED_SHARE[packing]
@@ -106,7 +116,7 @@ def datagram_rate(packing, sample_rate, piece):
 
 def mtu_needed(packing, piece=None):
     """The MTU the unit's port needs for a stream's datagrams."""
-    if not uses_sender(packing, piece):
+    if not uses_sender(packing, piece) or packing == SPLIT:
         return MIN_MTU                 # the driver's export checks for a whole raw slice
     chunk = REDUCED_CHUNK[packing] if packing in REDUCED else PACKED_CHUNK if packing == 'full' else CHUNK
     return (min(piece, chunk) if piece else chunk) + HEADERS
@@ -154,12 +164,16 @@ def stream_argv(tool, export, dst_mac, packing='raw', mtu=None):
     argv = [tool, DEVICE, '--seconds', str(STREAM_SECONDS), '--idle-ms', str(IDLE_MS),
             '--stop', f'{GO_ADDR:#010x}', f'{STOP_MAGIC:#010x}', '--threads', '0',
             '--go', f'{GO_ADDR:#010x}', f'{GO_MAGIC:#010x}']
+    exported = ['--export', export.interface, export.src_ip, export.dst_ip, dst_mac, str(export.port),
+                '--ports', str(export.ports), '--drain-ms', str(DRAIN_MS)]
     if not uses_sender(packing, export.piece):
-        return argv + ['--export', export.interface, export.src_ip, export.dst_ip, dst_mac, str(export.port),
-                       '--ports', str(export.ports), '--drain-ms', str(DRAIN_MS),
-                       '--export-cpu', str(EXPORT_CPU), '--cpu', str(PUMP_CPU)]
+        return argv + exported + ['--export-cpu', str(EXPORT_CPU), '--cpu', str(PUMP_CPU)]
+    if packing == SPLIT:               # both: the export thread shares the senders' CPUs, unbound
+        argv += exported
     argv += ['--send', export.src_ip, export.dst_ip, str(export.port), '--ports', str(export.ports),
              '--senders', str(SENDERS)]
+    if packing == SPLIT:
+        argv += ['--format', '14', '--split']
     if packing in REDUCED:
         argv += ['--format', str(REDUCED[packing])]
     if export.piece:

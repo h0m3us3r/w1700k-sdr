@@ -29,6 +29,7 @@
 
 #define PIECE (CHUNK / PIECES)
 #define PIECE_PACKED (PIECE / MT7996_IQ_PACK_GROUP_IN * MT7996_IQ_PACK_GROUP_OUT)
+#define PIECE_REDUCED (PIECE / 16 * 7)
 
 static void rom_reclaim(void)
 {
@@ -61,6 +62,7 @@ static int start_wa(uint32_t packing, uint32_t wa_mask)
 	SH->published = 0;
 	SH->sent = 0;
 	SH->packing = packing;
+	SH->shift = MT7996_IQ_RADIO14_SHIFT_MAX;	/* until the first relay: the shift that cannot wrap */
 	R32(MT7996_MCU_WA_SWI_SLOT1) = WA_CODE;
 	R32(MT7996_MCU_SWDEF_WA_ACTION) = MT7996_MCU_SWDEF_WA_ACTION_SLOT1;
 	R32(MT7996_MCU_WA_SWI) = MT7996_MCU_WA_SWI_RAISE;
@@ -82,6 +84,8 @@ __attribute__((used)) void producer(uint32_t packing)
 	volatile struct res *r = RES;
 	uint32_t mstatus, mcache, status = 0, cpu = 0, desc = 0, slots = 0, g0, prev = 0, k = 0, m, wc;
 	uint32_t piece = 0, addr, len, t, pack_start = 0, max_lag = 0, pmax = 0, sent, inval_at = 0;
+	uint32_t shift = MT7996_IQ_RADIO14_SHIFT_MAX;
+	const uint32_t packed_len = s->reduce ? REDUCED : PACKED;
 	uint32_t held[WM_NBUF];	/* the chunk each WM buffer last held, until TX0 is past it */
 	uint64_t lap = 0, written = 0, chunks = 0, start = 0, lag;
 	uint64_t credit_waits = 0, wa_waits = 0, wm_waits = 0, wm_packs = 0, wm_cycles = 0;
@@ -162,7 +166,7 @@ __attribute__((used)) void producer(uint32_t packing)
 					wa_waits++;
 				}
 				addr = wa_buffer(s, k);
-				len = PACKED;
+				len = packed_len;
 				break;
 			case 1:
 				if ((int32_t)(m - k) <= 0) {
@@ -170,7 +174,7 @@ __attribute__((used)) void producer(uint32_t packing)
 					wm_waits++;
 				}
 				addr = wm_buffer(s, k);
-				len = PACKED;
+				len = packed_len;
 				break;
 			}
 			if (ready) {
@@ -185,8 +189,11 @@ __attribute__((used)) void producer(uint32_t packing)
 					R32(MT7996_MCU_DMA0_TX0_CIDX) = cpu;
 					k++;
 					chunks++;
-					if (wa_mask)
+					if (wa_mask) {
 						SH->published = k;
+						if (s->reduce)
+							SH->shift = host_shift();
+					}
 					continue;
 				}
 				credit_waits++;
@@ -213,11 +220,18 @@ __attribute__((used)) void producer(uint32_t packing)
 				if ((int32_t)(sent - held[packer_index(s, m, wm_n) % WM_NBUF]) <= 0)
 					continue;
 				pack_start = rdcycle();
+				shift = host_shift();		/* one shift for the whole chunk */
 			}
-			pack_words(ring_at(m) + piece * PIECE, wm_buffer(s, m) + piece * PIECE_PACKED, PIECE);
+			if (s->reduce)
+				reduce14_words(ring_at(m) + piece * PIECE, wm_buffer(s, m) + piece * PIECE_REDUCED,
+					       PIECE, shift);
+			else
+				pack_words(ring_at(m) + piece * PIECE, wm_buffer(s, m) + piece * PIECE_PACKED, PIECE);
 			if (++piece < PIECES)
 				continue;
 			piece = 0;
+			if (s->reduce)
+				reduced_trailer(wm_buffer(s, m), shift);
 			t = rdcycle() - pack_start;
 			wm_cycles += t;
 			if (t > pmax)

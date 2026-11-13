@@ -14,7 +14,7 @@ after `w1700k push` set them to /tmp/w1700k and /tmp/w1700k/w1700k_sdr.ko. expor
 means the MAC of the local interface that holds dst_ip. export.link_mbps caps what a stream may
 put on the link, in Mbit/s, below the unit port's negotiated speed (a USB adapter that carries less
 than its Ethernet side links at); null: the negotiated speed. export.packing ("raw", "half",
-"full", or "16", "14", "8", "7" bits per I/Q pair) sets every stream's packing by hand; null:
+"full", "split", or "16", "14", "8", "7" bits per I/Q pair) sets every stream's packing by hand; null:
 chosen from the sample rate and the link. export.piece sends each slice as datagrams of at most
 that many of its bytes (1456 fits a 1500-byte MTU) for a path without jumbo frames; null: one
 datagram per slice.
@@ -34,7 +34,8 @@ ENV_PATH = 'W1700K_CONFIG'
 
 # raw, half, full: the radio's lossless schedules (firmware/stream/blob.py; stream.PACKED_SHARE has
 # each one's share). 16, 14, 8, 7: bits per I/Q pair, requantised on the unit (stream.REDUCED).
-PACKINGS = ('raw', 'half', 'full', '16', '14', '8', '7')
+# split: 14 bits per pair at 320 Msps, half the chunks reduced by the radio and half by the unit.
+PACKINGS = ('raw', 'half', 'full', 'split', '16', '14', '8', '7')
 
 
 class ConfigError(ValueError):

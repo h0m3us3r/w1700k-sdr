@@ -99,6 +99,10 @@
 #define MT7996_PROBE_WM_GO                0x0090f008u
 #define   MT7996_PROBE_GO_MAGIC           0x474f474fu	/* "GOGO" */
 #define   MT7996_PROBE_STOP_MAGIC         0x504f5453u	/* "STOP" */
+/* The shift (bits [2:0], 0..7) the packers use for the chunks they reduce to
+ * 14 bits (iq_format.h, radio-reduced chunk); the host writes it while the
+ * stream runs, the producer relays it to the WA. */
+#define MT7996_PROBE_WM_SHIFT             0x0090f00cu
 #define MT7996_PROBE_WM_RES               0x0090f010u
 /*
  * HAZARD: a generic blob may use up to 500 result words from 0x0090f010,

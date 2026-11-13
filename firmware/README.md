@@ -102,7 +102,17 @@ later patches run. It loads on parts with unprovisioned security fuses.
 - `layout.h`: every fixed address and protocol word; `blob.py`: the compile/link recipe and the
   packing schedules, a table in both images that the STREAM command indexes (raw; half = WM 4 +
   WA 4 of every 16 chunks, for 320 Msps; full = WM 8 + WA 8, every chunk, up to 160 Msps, where
-  each packer is 62 % busy).
+  each packer is 62 % busy; split = WM 5 + WA 5 reduced to 14 bits, see below).
+- `reduce14.S`: the split schedule's kernel. A 320 Msps stream on a link too slow for half
+  (5 Gbit/s) must have every chunk at 14 bits per sample pair, and neither the radio's cores nor
+  the SoC can requantise all of it; so the packers reduce 10 of every 16 chunks here (7 bits of I
+  and of Q under one shift per chunk, two samples folded into a word and those packed 8 to 7:
+  3584 bytes and a trailer naming the shift, `include/hw/mt7996/iq_format.h`), and leave 6 raw
+  for the SoC. 87 instructions per 16 samples against the pack's 75; at 320 Msps the WM is 78 %
+  busy and the WA 87 %. The shift comes from the host (the mailbox word `MT7996_PROBE_WM_SHIFT`,
+  which the producer relays to the WA): the cores have no cycles left to measure a chunk's
+  level, and the SoC sees the level in the chunks between. `tests/test_firmware_kernels.py`
+  runs this code and `pack.S` from their machine code against the format's model.
 
 ## The WA (`wa/`)
 

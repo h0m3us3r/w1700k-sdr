@@ -153,7 +153,14 @@ struct w1700k_sdr_stream_ring {
  * IPv4 (DF), UDP, struct w1700k_sdr_export_header, then the slice's bytes.
  * The network device's queue is the only flow control; a slice the device
  * could already be rewriting ends the export with -ENOBUFS.
+ *
+ * W1700K_SDR_EXPORT_SHORT: only completions shorter than a slice leave this
+ * way (radio-reduced chunks, events); the full ones are for a reader of the
+ * mapping to send (mt7996-stream --send). The export thread then sleeps when
+ * it has nothing to send rather than poll, so it needs no CPU of its own.
  */
+#define W1700K_SDR_EXPORT_SHORT 0x1U
+#define W1700K_SDR_EXPORT_FLAGS W1700K_SDR_EXPORT_SHORT
 struct w1700k_sdr_stream_export {
 	__u32 ifindex;		/* 0 = no export */
 	__u32 src_ip, dst_ip;	/* IPv4, network byte order */
@@ -162,7 +169,7 @@ struct w1700k_sdr_stream_export {
 	__u16 src_ports;	/* source port cycles over this many (0 = 1) */
 	__u8 dst_mac[6];
 	__u16 cpu;		/* export thread CPU + 1; 0 = any */
-	__u16 reserved;
+	__u16 flags;		/* W1700K_SDR_EXPORT_* */
 	__u32 drain_ms;		/* after pumping, time allowed to send the rest */
 };
 

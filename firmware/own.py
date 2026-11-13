@@ -88,7 +88,7 @@ def wa_code():
 
 
 def producer():
-    return blob.compile_blob(['lead.S', 'producer.c', 'pack.S'], blob.schedule_defines(), PRODUCER_BASE,
+    return blob.compile_blob(['lead.S', 'producer.c', 'pack.S', 'reduce14.S'], blob.schedule_defines(), PRODUCER_BASE,
                              PRODUCER_BASE + PRODUCER_SIZE)
 
 

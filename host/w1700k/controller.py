@@ -25,8 +25,10 @@ Rules the hardware imposes:
   carries the new rate. Where none of those fits, the unit's SoC requantises each slice to fewer
   bits with a scale of its own (stream.REDUCED: 16, 14, 8 or 7 bits per I/Q pair, the deepest
   that fits: 160 Msps is 14 bits on 2.5 Gbit/s, 80 Msps is 8 on 1); that is not lossless, and the
-  SoC does it only up to 160 Msps (its memory bus cannot read a 320 Msps capture). A rate no
-  packing fits on the link is refused. Where that choice is wrong for a link, export.packing (or
+  SoC does it only up to 160 Msps (its memory bus cannot read a 320 Msps capture). At 320 Msps
+  the split packing shares the work: the radio's cores reduce every other chunk to 14 bits and
+  the SoC the ones between (4.6 Gbit/s: 5 Gbit/s carries it). A rate no packing fits on the
+  link is refused. Where that choice is wrong for a link, export.packing (or
   `start --packing`, `serve --packing`) sets the packing by hand: the link is then not consulted,
   only what the packers can do.
 - The analog filter is the receiver's only anti-alias filter: the converter samples at 320 MHz, and
@@ -45,8 +47,8 @@ from .config import local_mac_for
 from dataclasses import replace
 
 from .radio import DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image
-from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MAX_DATAGRAMS, Result, Stream,
-                     StreamError, datagram_rate, wire_rate)
+from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MAX_DATAGRAMS, SPLIT, Result,
+                     Stream, StreamError, datagram_rate, wire_rate)
 from .unit import Unit
 
 STATE_FILE = '/tmp/w1700k-state.json'
@@ -54,7 +56,9 @@ BANDS = (0, 1, 2)
 DEFAULT_BAND = 1
 PACKINGS = config.PACKINGS
 assert PACKINGS == tuple(PACKED_SHARE) + tuple(REDUCED)
-AUTOMATIC = ('raw', 'full', 'half') + tuple(REDUCED)   # the order tried: lossless first, then the deepest
+# The order tried: lossless first, then the deepest. split is 14 bits where the unit alone cannot
+# reduce (above REDUCED_MAX_RATE), the numbered ones where it can.
+AUTOMATIC = ('raw', 'full', 'half', SPLIT) + tuple(REDUCED)
 FULL_MAX_RATE = 160_000_000       # the WM and the WA pack every chunk up to this rate, half of them above
 DEFAULT_LINK_MBPS = 10_000        # a port that reports no speed: the unit's 10 GbE
 LINK_FILL = 0.975                 # the share of the link a stream may take (320 Msps half is 97.0 % of 10 GbE)
@@ -79,6 +83,8 @@ def packing_fits(packing, rate, link_mbps, piece=None):
     """Whether a stream at `rate` under `packing` fits the link, the packers and the unit's senders."""
     if packing == 'full' and rate > FULL_MAX_RATE or packing in REDUCED and rate > REDUCED_MAX_RATE:
         return False
+    if packing == SPLIT:               # whole slices only, and only where the unit cannot do it alone
+        return not piece and rate > REDUCED_MAX_RATE and wire_rate(packing, rate) <= link_mbps * 1e6 * LINK_FILL
     if piece and datagram_rate(packing, rate, piece) > SENDER_MAX_DATAGRAMS:
         return False
     return wire_rate(packing, rate, piece) <= link_mbps * 1e6 * LINK_FILL
@@ -91,15 +97,15 @@ def packing_for(rate, link_mbps=DEFAULT_LINK_MBPS, piece=None):
     for packing in AUTOMATIC:
         if packing_fits(packing, rate, link_mbps, piece):
             return packing
-    if piece and not any(datagram_rate(p, rate, piece) <= SENDER_MAX_DATAGRAMS for p in AUTOMATIC):
+    if piece and not any(datagram_rate(p, rate, piece) <= SENDER_MAX_DATAGRAMS for p in AUTOMATIC if p != SPLIT):
         raise Refused(f'{rate / 1e6:g} Msps in datagrams of {piece} bytes (export.piece) is more than the '
                       f'unit sends: {datagram_rate(AUTOMATIC[-1], rate, piece) / 1e3:.0f} thousand a second '
                       f'even at {AUTOMATIC[-1]} bits per sample, of {SENDER_MAX_DATAGRAMS / 1e3:g}')
     if rate > REDUCED_MAX_RATE:
-        need = wire_rate('half', rate, piece)
-        raise Refused(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link, which carries '
-                      f'{link_mbps / 1e3:g} (at most {LINK_FILL:.1%} of it); the unit reduces the bits '
-                      f'per sample only up to {REDUCED_MAX_RATE / 1e6:g} Msps')
+        need = wire_rate(SPLIT, rate)
+        raise Refused(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link even reduced to 14 bits '
+                      f'(split between the radio and the unit, which is all they manage at that rate), '
+                      f'and the link carries {link_mbps / 1e3:g} (at most {LINK_FILL:.1%} of it)')
     need = wire_rate(AUTOMATIC[-1], rate, piece)
     raise Refused(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link even at '
                   f'{AUTOMATIC[-1]} bits per sample, and the link carries {link_mbps / 1e3:g} '
@@ -324,6 +330,9 @@ class Controller:
         if manual in REDUCED and rate > REDUCED_MAX_RATE:
             raise Refused(f'packing {manual} is set by hand, and the unit reduces the bits per sample only '
                           f'up to {REDUCED_MAX_RATE / 1e6:g} Msps, not {rate / 1e6:g}')
+        if manual == SPLIT and (rate <= REDUCED_MAX_RATE or self.config.export.piece):
+            raise Refused(f'packing split is set by hand; it is for whole slices above '
+                          f'{REDUCED_MAX_RATE / 1e6:g} Msps, where the unit cannot reduce a stream alone')
         return manual
 
     def _tune(self, hz):
@@ -517,7 +526,7 @@ class Controller:
             # moved
             if b != self.band:
                 # a stream chosen automatically keeps a packing that still fits; one set by hand is that one
-                if running and (running == needed or not manual and running not in REDUCED
+                if running and (running == needed or not manual and running not in REDUCED and running != SPLIT
                                 and packing_fits(running, cfg.sample_rate, self._link(), self.config.export.piece)):
                     self._switch_mid_stream(b)
                 else:
@@ -622,6 +631,17 @@ class Controller:
                       f'the unit sent {sent.get("slices", 0)} slices in {sent.get("datagrams", 0)} datagrams; '
                       f'{sent.get("lapped", 0)} skipped (the senders fell behind), {sent.get("errors", 0)} send '
                       f'errors, {sent.get("busy", 0)} waits for the link')
+        exported = (result.reader or {}).get('export') or {}
+        if exported.get('result') or exported.get('unsent'):
+            self._log('warn', f'the driver\'s export ended with {exported.get("result")}: '
+                              f'{exported.get("unsent", 0)} completions were not sent')
+        split = (result.reader or {}).get('split') or {}
+        if split.get('on'):
+            # the radio's own chunks: how wide the shift it was given ranged (7 holds full scale)
+            self._log('warn' if split.get('shift_errors') else 'info',
+                      f'the radio reduced its chunks under shifts {split.get("shift_lowest")} to '
+                      f'{split.get("shift_highest")} ({split.get("shift_writes", 0)} changes, '
+                      f'{split.get("shift_errors", 0)} failed); the driver exported {exported.get("slices", 0)} of them')
         return result
 
     def _finish_stream(self):

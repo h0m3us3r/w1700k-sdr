@@ -111,6 +111,8 @@ class Link(unittest.TestCase):
         self.assertAlmostEqual(stream.wire_rate('8', 80_000_000) / 1e9, 0.665625, places=5)
         self.assertAlmostEqual(stream.wire_rate('14', 320_000_000, 1456) / 1e9, 4.7875, places=4)   # 3 pieces
         self.assertAlmostEqual(stream.wire_rate('raw', 40_000_000, 1456) / 1e9, 1.356875, places=5)  # 6 pieces
+        # split: 10 chunks of 16 from the radio (3588 bytes), 6 from the senders (3584), a datagram each
+        self.assertAlmostEqual(stream.wire_rate('split', 320_000_000) / 1e9, 4.585625, places=5)
 
     def test_mtu_needed(self):
         self.assertEqual(stream.mtu_needed('raw'), 8236)
@@ -119,6 +121,7 @@ class Link(unittest.TestCase):
         self.assertEqual(stream.mtu_needed('7'), 1792 + 44)
         self.assertEqual(stream.mtu_needed('raw', 1456), 1500)
         self.assertEqual(stream.mtu_needed('8', 4000), 2048 + 44)
+        self.assertEqual(stream.mtu_needed('split'), 8236, 'the driver\'s export runs too')
 
     def test_interface_speed(self):
         unit = host_fake.FakeUnit()

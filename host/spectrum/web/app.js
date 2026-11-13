@@ -1096,6 +1096,10 @@ const reduced = (bits, each, below) => ({
     detail: `I and Q requantised on the unit to ${each} each, every 2048 samples with their own scale: not ` +
         `lossless, the quantisation noise lies about ${below} dB below each block's peak.`});
 const PACKING = {
+    split: {label: '7-bit, reduced (14 b/sample)',
+            detail: 'I and Q requantised to 7 bits each, every other block of 2048 samples by the radio itself ' +
+                'under a shift that follows the signal, the ones between on the unit with their own scale: not ' +
+                'lossless, the quantisation noise lies about 41 to 47 dB below the blocks\' peaks.'},
     16: reduced(16, '8-bit', 53),
     14: reduced(14, '7-bit', 47),
     8: reduced(8, '4-bit', 28),

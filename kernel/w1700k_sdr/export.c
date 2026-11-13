@@ -73,7 +73,7 @@ int sdr_export_open(struct sdr_export *x, const struct w1700k_sdr_stream_export 
 	memset(x, 0, sizeof(*x));
 	if (!cfg->ifindex)
 		return 0;
-	if (cfg->reserved || !cfg->dst_ip || !cfg->dst_port ||
+	if ((cfg->flags & ~W1700K_SDR_EXPORT_FLAGS) || !cfg->dst_ip || !cfg->dst_port ||
 	    !is_valid_ether_addr(cfg->dst_mac) || !pages || !h->slices ||
 	    !h->slice_bytes || h->slice_bytes % PAGE_SIZE ||
 	    h->header_bytes % PAGE_SIZE ||
@@ -216,6 +216,10 @@ static int sdr_export_pump(struct sdr_export *x, u64 completed)
 		x->max_lag = max_t(u32, x->max_lag, lag);
 		len = HW_GET(WFDMA_DESC_CTRL_SD_LEN0, READ_ONCE(x->ctrl[x->next % x->slices]));
 		len = min(len, x->slice_bytes);
+		if ((x->cfg.flags & W1700K_SDR_EXPORT_SHORT) && len >= x->slice_bytes) {
+			x->next++;	/* a full slice: the mapping's reader sends it */
+			continue;
+		}
 		/* An empty completion still goes out, as a bare header: a
 		 * receiver then sees every sequence number and no false gap.
 		 */
@@ -247,12 +251,14 @@ static int sdr_export_pump(struct sdr_export *x, u64 completed)
 static int sdr_export_thread(void *arg)
 {
 	struct sdr_export *x = arg;
-	u64 end;
+	const bool polite = x->cfg.flags & W1700K_SDR_EXPORT_SHORT;
+	u64 end, sent;
 	int ret;
 
 	while (!kthread_should_stop()) {
 		/* Slices below `completed` have been synced for the CPU. */
 		end = smp_load_acquire(x->completed);
+		sent = x->sent;
 		ret = sdr_export_pump(x, end);
 		if (ret) {
 			x->result = ret;
@@ -261,7 +267,11 @@ static int sdr_export_thread(void *arg)
 		if (smp_load_acquire(&x->stopping) &&	/* drain_until is set first */
 		    (x->next >= end || ktime_get_ns() >= READ_ONCE(x->drain_until)))
 			break;
-		cond_resched();
+		/* Sharing its CPUs with the senders: wait for work rather than poll. */
+		if (polite && x->sent == sent)
+			usleep_range(20, 50);
+		else
+			cond_resched();
 	}
 	end = smp_load_acquire(x->completed);	/* as above */
 	x->unsent = end > x->next ? end - x->next : 0;

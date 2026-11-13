@@ -42,13 +42,16 @@ class Table(unittest.TestCase):
                 at = [i for i in range(blob.PERIOD) if mask >> i & 1]
                 self.assertEqual([slots[i] for i in at], list(range(len(at))), packing.name)
                 if at:
-                    gaps = {(b - a) % blob.PERIOD for a, b in zip(at, at[1:] + at[:1])}
-                    self.assertEqual(len(gaps), 1, f'{packing.name}: evenly spread')
+                    gaps = {(b - a) % blob.PERIOD or blob.PERIOD for a, b in zip(at, at[1:] + at[:1])}
+                    self.assertLessEqual(max(gaps) - min(gaps), 1, f'{packing.name}: spread as evenly as it goes')
         self.assertEqual(blob.schedule(blob.RAW)[:2], (0, 0))
         self.assertEqual(blob.schedule(blob.HALF)[:2], (0x4444, 0x1111), 'half is what it always was')
         wa_mask, wm_mask, _ = blob.schedule(blob.FULL)
         self.assertEqual(wa_mask | wm_mask, (1 << blob.PERIOD) - 1, 'full packs every chunk')
         self.assertEqual((wa_mask, wm_mask), (0xAAAA, 0x5555), 'the packers alternate')
+        wa_mask, wm_mask, _ = blob.schedule(blob.SPLIT)
+        self.assertEqual((wa_mask, wm_mask), (0x4912, 0x1249), 'split: 5 chunks of 16 each, 6 left raw for the SoC')
+        self.assertTrue(blob.SPLIT.reduce and not any(p.reduce for p in (blob.RAW, blob.HALF, blob.FULL)))
 
     def test_defines(self):
         defines = blob.schedule_defines()

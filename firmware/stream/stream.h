@@ -19,6 +19,8 @@
 #define R16(a) (*(volatile uint16_t *)(uintptr_t)(a))
 #define CHUNK MT7996_IQ_CHUNK_BYTES
 #define PACKED MT7996_IQ_CHUNK_PACKED_BYTES
+#define REDUCED MT7996_IQ_CHUNK_RADIO14_BYTES		/* a radio-reduced chunk: its data, then the trailer */
+#define REDUCED_DATA MT7996_IQ_RADIO14_DATA_BYTES
 
 /* The producer's results (RES_ADDR; host/w1700k/stream.py RES32 / RES64 mirror the order). */
 struct res {
@@ -41,6 +43,7 @@ struct shared {
 	uint32_t status;		/* WA: 1 stopped, 2 go never came, 3 the WM stalled, 4 no schedule */
 	uint32_t pack_max;
 	uint64_t packs, pack_cycles, waits;
+	uint32_t shift;			/* the WM's copy of the host's shift word, for the chunks the WA reduces */
 };
 #define SH ((volatile struct shared *)SHARED)
 
@@ -48,6 +51,7 @@ struct shared {
 struct sched {
 	uint32_t wa_mask, wm_mask;	/* the positions (bit k % PERIOD) the WA and the WM pack */
 	uint32_t wa_n, wm_n;		/* how many each */
+	uint32_t reduce;		/* 1: those chunks are reduced to 14 bits (REDUCED bytes), 0: packed to 28 */
 	uint8_t slot[PERIOD];		/* a packed position's index among its packer's */
 };
 
@@ -148,3 +152,16 @@ static inline void cache_wbinval_all(void)
 }
 
 void pack_words(uint32_t src, uint32_t dst, uint32_t bytes);
+void reduce14_words(uint32_t src, uint32_t dst, uint32_t bytes, uint32_t shift);
+
+/* The host's shift for reduced chunks (the mailbox word, 0..7). */
+static inline uint32_t host_shift(void)
+{
+	return R32(MT7996_PROBE_WM_SHIFT) & MT7996_IQ_RADIO14_SHIFT_MAX;
+}
+
+/* A reduced chunk's last word: it names the shift its samples were cut under. */
+static inline void reduced_trailer(uint32_t buffer, uint32_t shift)
+{
+	R32(buffer + REDUCED_DATA) = MT7996_IQ_RADIO14_TRAILER | shift;
+}

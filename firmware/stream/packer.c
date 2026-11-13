@@ -16,7 +16,7 @@ __attribute__((used)) void packer(void)
 	uint32_t held[WA_NBUF];	/* the chunk each buffer last held, until TX0 is past it */
 	uint64_t lap = 0, written, packs = 0, cycles = 0, waits = 0;
 	const struct sched *s;
-	uint32_t wa_mask, wa_n;
+	uint32_t wa_mask, wa_n, shift;
 
 	asm volatile("csrr %0, mstatus\n\tcsrci mstatus, %1" : "=r"(mstatus) : "n"(MT7996_MCU_MSTATUS_MIE));
 	asm volatile("csrr %0, %1" : "=r"(mcache) : "n"(MT7996_MCU_CSR_MCACHE_CTL));
@@ -65,7 +65,13 @@ __attribute__((used)) void packer(void)
 			inval_at = wc;
 		}
 		t0 = rdcycle();
-		pack_words(ring_at(c), wa_buffer(s, c), CHUNK);
+		if (s->reduce) {
+			shift = SH->shift & MT7996_IQ_RADIO14_SHIFT_MAX;
+			reduce14_words(ring_at(c), wa_buffer(s, c), CHUNK, shift);
+			reduced_trailer(wa_buffer(s, c), shift);
+		} else {
+			pack_words(ring_at(c), wa_buffer(s, c), CHUNK);
+		}
 		held[b] = c;
 		t = rdcycle() - t0;
 		cycles += t;

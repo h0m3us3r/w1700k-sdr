@@ -98,7 +98,7 @@ mt7996-stream DEVICE --seconds S [--idle-ms N] [--go ADDR VALUE]
               [--export IF SRC_IP DST_IP DST_MAC PORT] [--ports N]
               [--drain-ms N] [--export-cpu N] [--cpu N]
               [--send SRC_IP DST_IP PORT] [--format 16|14|8|7] [--piece BYTES]
-              [--datagram BYTES] [--senders N]
+              [--datagram BYTES] [--senders N] [--split]
   One {"at":"stream",...} line at the end (see stream.c for the fields).
 
 mt7996-ctl DEVICE [--timeout MS] [ADDR=VALUE ...] [--read ADDR COUNT]
@@ -210,13 +210,61 @@ one sender read 0.60 GB/s of slices, two 1.0 and three 0.93, so the senders
 carry 160 Msps (0.64 GB/s; all four formats, no slice lost, 20–45 % of each
 sender's core idle) and not 320 (1.28 GB/s); reading further ahead of the
 device than the slice in hand slowed the pump until the firmware overran.
-In pieces they send 117 thousand datagrams a second without loss; at 235
-thousand the port transmitted 0.1–0.2 % fewer than the send calls accepted.
+In pieces, every rate from 80 to 239 thousand datagrams a second was clean
+with the packets counted at the port (200 and 239 thousand for two minutes);
+five runs in a row at 235 thousand once had the port transmit 0.1–0.2 % fewer
+than the send calls accepted, for a reason not found.
 A batch is four slices: what a sender has reduced must still be in the
 512 KiB L2 the four cores share when the kernel copies it out (batches of 16
 cost the 160 Msps case 15–25 % of each sender's core). Senders the ring
 laps skip to the newest completions and count what they skipped (`"send"` in
-the result line: `slices`, `reduced`, `datagrams`, `lapped`, `errors`, `busy`).
+the result line: `slices`, `reduced`, `datagrams`, `lapped`, `errors`, `busy`,
+and `max_lag`, the furthest behind the device a sender took a completion).
+
+### Split streams
+
+At 320 Msps neither path carries a reduced stream alone, so `--split` runs
+both (`--export ... --send ... --format 14 --split`) on a stream whose radio
+reduces 10 of every 16 chunks itself (the firmware's split schedule):
+
+- The export is opened with `W1700K_SDR_EXPORT_SHORT` in its `flags` (the
+  field that was `reserved`): it sends only completions shorter than a slice,
+  zero-copy as ever, and skips the raw ones. Its thread then sleeps 20–50 us
+  when it has nothing to send instead of polling, so it needs no CPU of its
+  own; the client lets it run on every CPU but the pump's and gives it
+  priority (it must run when it wakes, or the radio's chunks trail the
+  others). A module without the flag refuses the stream with `EINVAL`.
+- The senders take only the raw slices and reduce them to format 14.
+- A third thread keeps the radio's shift (the mailbox word at `0x0090f00c`,
+  written through `W1700K_SDR_CTL`, which the pump serves between sweeps)
+  wide enough for twice the largest magnitude the senders saw in the last
+  second, rising within a millisecond and falling after a second
+  (`"split"` in the result line: the writes, and the lowest, highest and last
+  shift).
+
+Each sender has a CPU to itself where there are enough (4 CPUs: the pump on
+3, the senders on 1 and 2, the kernel's network threads on 0), and while a
+stream runs the senders and those network threads have priority over
+ordinary processes (nice -10; the pump and the export thread -20). It
+matters. Sharing their CPUs with the network threads, the senders lost them
+for 2–12 ms some 26 times a second each, and with little room to make that up
+they ran 10 ms and more behind 47 % of the time and up to 0.21 s; on their
+own CPUs 94 % of their work is taken within a millisecond. The export thread
+may run on the senders' CPUs too (short bursts, at priority): confined to the
+one CPU everything else shares it fell half a second behind when that CPU
+was busy and did not catch up. And at ordinary priority two busy loops on
+the unit cost a 320 Msps stream a fifth of its slices while they ran; with
+priority, none, the export 36 ms behind at worst.
+
+Measured at 320 Msps on a 5 Gbit/s link (4.6 Gbit/s on the wire, a USB
+adapter on the host) for five minutes: 47.7 million chunks, 29.8 million
+exported and 17.9 million reduced by the senders, none skipped, none lost at
+the host; the export at most 35 ms behind the device and the senders 32 ms,
+against the receiver's wait of 250 ms; the WM 77 % busy, the WA 87 %, the
+SoC's three other CPUs each about 70 %. (Ten minutes before the senders had
+their own CPUs: 94.4 million chunks, none lost, but up to 0.14 s and 0.21 s
+behind.) The radio taking 8 or 9 chunks of 16 instead of 10 leaves the
+senders more than they can reduce.
 
 ## Hazards
 
