@@ -97,6 +97,8 @@ mt7996-stream DEVICE --seconds S [--idle-ms N] [--go ADDR VALUE]
               [--data BYTES FILE] [--wrap] [--meta FILE] [--snap SLICES FILE]
               [--export IF SRC_IP DST_IP DST_MAC PORT] [--ports N]
               [--drain-ms N] [--export-cpu N] [--cpu N]
+              [--send SRC_IP DST_IP PORT] [--format 16|14|8|7] [--piece BYTES]
+              [--datagram BYTES] [--senders N]
   One {"at":"stream",...} line at the end (see stream.c for the fields).
 
 mt7996-ctl DEVICE [--timeout MS] [ADDR=VALUE ...] [--read ADDR COUNT]
@@ -181,6 +183,36 @@ The interface needs scatter-gather and an MTU of at least `slice_bytes + 44`
 (8236 for 8 KiB slices). The device's TX queue is the only flow control; the
 export reports `-ENOBUFS` if it falls more than `slices - slots - 64`
 completions behind.
+
+### The client's own senders
+
+`mt7996-stream --send` sends the slices itself, from threads that follow the
+mapped ring, through ordinary UDP sockets (the driver's export stays off). It
+is for what the zero-copy export cannot do:
+
+- `--format 16|14|8|7`: each raw slice requantised to that many bits per I/Q
+  pair with a scale of its own (`include/hw/mt7996/iq_reduce.h`, NEON), under
+  the magic `0x32524453` ("SDR2"): the same header, with `seq` in bits [47:0]
+  of its last field, the format in [55:48] and the scale code in [63:56]. A
+  slice is then 4096, 3584, 2048 or 1792 bytes. Events and packed slices leave
+  unchanged under "SDR1".
+- `--datagram BYTES`: a datagram carries as many whole slices as fit that much
+  UDP payload, each behind its own header (two 14-bit slices in a 9216-byte
+  MTU), which halves the cost of the network stack.
+- `--piece BYTES`: every slice as datagrams of at most that many of its bytes,
+  `offset` rising, for a path without jumbo frames.
+
+The senders take completions in turn, a few at a time (`--senders`, default
+2: two read more between them than three do). With `--cpu` the pump keeps its
+CPU: the senders and the network device's NAPI threads stay off it while the
+stream runs. Measured with the capture at 320 Msps, the SoC's memory bus lets
+one sender read 0.60 GB/s of slices, two 1.0 and three 0.93, so the senders
+carry 160 Msps (0.64 GB/s; all four formats, no slice lost, 20–45 % of each
+sender's core idle) and not 320 (1.28 GB/s); reading further ahead of the
+device than the slice in hand slowed the pump until the firmware overran.
+In pieces they send about 250 thousand datagrams a second. Senders the ring
+laps skip to the newest completions and count what they skipped (`"send"` in
+the result line: `slices`, `reduced`, `datagrams`, `lapped`, `errors`, `busy`).
 
 ## Hazards
 
