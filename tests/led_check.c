@@ -7,6 +7,10 @@
  *                                  the unit sees itself: "PATTERN H S B PERIOD DEPTH turn SECONDS"
  * led_check engine                 a change of look and an acknowledgement, sampled: one
  *                                  "T H S B" line per 50 ms from 0 to 5 s
+ * led_check heard T...             the host rewrites the state record at each time T: the
+ *                                  times a lift begins, on one line
+ * led_check rise                   the idle look's climb, left twice and come back to: one
+ *                                  "T H S B" line per 50 ms from 0 to 12 s
  * kernel/w1700k_sdr/ledd.h built for the host, for tests/test_led.py.
  */
 #include <stdio.h>
@@ -23,7 +27,7 @@ static struct hsb colour(char **argv)
 
 int main(int argc, char **argv)
 {
-	static const char *const patterns[] = { "steady", "breathe", "blink" };
+	static const char *const patterns[] = { "steady", "breathe", "blink", "rise" };
 	static char text[8192];
 
 	if (argc == 5 && !strcmp(argv[1], "levels")) {
@@ -67,6 +71,44 @@ int main(int argc, char **argv)
 				led_engine_show(&e, &blue, t);
 			if (k == 92)		/* 4.6 s: the host speaks */
 				e.ack = t;
+			c = led_engine_at(&e, t);
+			printf("%.2f %.3f %.4f %.4f\n", t, c.h, c.s, c.b);
+		}
+	} else if (argc >= 3 && !strcmp(argv[1], "heard")) {
+		struct led_engine e;
+		double last = -1;
+		int k;
+
+		led_engine_start(&e, 0);
+		for (k = 2; k < argc; k++) {
+			led_engine_heard(&e, atof(argv[k]));
+			if (e.ack != last)
+				printf("%s%.2f", last < 0 ? "" : " ", e.ack);
+			last = e.ack;
+		}
+		printf("\n");
+	} else if (argc == 2 && !strcmp(argv[1], "rise")) {
+		const struct led_status idle_state = { .link = 1 }, ready_state = { .link = 1, .loaded = 1 };
+		const struct led_look idle = led_look_for(&idle_state), green = led_look_for(&ready_state);
+		struct led_engine e;
+		struct hsb c;
+		int k;
+
+		led_engine_start(&e, -10);	/* long since: the greeting is over */
+		led_engine_show(&e, &green, -5);
+		for (k = 0; k <= 240; k++) {
+			double t = k * 0.05;
+
+			if (k == 0)		/* 0 s: idle, the climb begins */
+				led_engine_show(&e, &idle, t);
+			if (k == 40)		/* 2 s: left part of the way up */
+				led_engine_show(&e, &green, t);
+			if (k == 80)		/* 4 s: back, and on from there */
+				led_engine_show(&e, &idle, t);
+			if (k == 160)		/* 8 s: left long after it finished */
+				led_engine_show(&e, &green, t);
+			if (k == 200)		/* 10 s: back, from low again */
+				led_engine_show(&e, &idle, t);
 			c = led_engine_at(&e, t);
 			printf("%.2f %.3f %.4f %.4f\n", t, c.h, c.s, c.b);
 		}

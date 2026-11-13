@@ -82,6 +82,8 @@ enum led_pattern {
 	LED_STEADY,
 	LED_BREATHE,	/* the brightness sinks by `depth` of itself and returns, once a `period` */
 	LED_BLINK,	/* lit for `depth` of each `period`, dark for the rest */
+	LED_RISE,	/* the brightness climbs from 1 - `depth` of itself to all of it over one
+			 * `period`, once, and stays: t is then the time it has been climbing */
 };
 
 struct led_look {
@@ -104,6 +106,9 @@ static inline struct hsb led_look_at(const struct led_look *l, double t)
 		if (phase >= l->depth)
 			c.b = 0;
 		break;
+	case LED_RISE:
+		c.b *= 1.0f - l->depth * (1.0f - led_clamp(l->period > 0 ? (float)(t / l->period) : 1.0f));
+		break;
 	case LED_STEADY:
 		break;
 	}
@@ -123,7 +128,11 @@ static inline int led_look_same(const struct led_look *a, const struct led_look 
  *
  *   starting            the hue once round in LED_BOOT_SECONDS, brightening from dark
  *   no stream link      yellow, breathing deeply: waiting for the cable or the far end
- *   link, radio idle    white, low and steady: powered, reachable, nothing loaded
+ *   link, radio idle    white, brightening from low to full over LED_RISE_SECONDS and staying
+ *                       there, like a bar filling: powered, reachable, the radio not loaded (or
+ *                       being loaded). The next state takes over the moment it comes; a climb
+ *                       left unfinished goes on from where it was when the state returns, and one
+ *                       that had finished starts again from low
  *   radio ready         green, steady: loaded and tuned, not streaming
  *   streaming           a colour for the sample rate: cyan, blue and magenta for 40, 80 and
  *                       160 Msps, a third of the circle between each and none nearer than that
@@ -139,12 +148,15 @@ static inline int led_look_same(const struct led_look *a, const struct led_look 
  *
  * Green, yellow and red mean go, look and stop wherever they stand still or blink on their own;
  * a stream's fixed colours keep clear of them, and the rainbow only passes through. A change of state fades over LED_FADE_SECONDS; a new instruction from the host
- * (the state record rewritten) shows as a short lift towards white.
+ * (the state record rewritten, however many times within LED_ACK_QUIET) shows as one short
+ * lift towards white.
  */
 #define LED_BOOT_SECONDS	3.0
 #define LED_RAINBOW_SECONDS	6.0f
 #define LED_FADE_SECONDS	0.6
+#define LED_RISE_SECONDS	3.5f
 #define LED_ACK_SECONDS		0.25
+#define LED_ACK_QUIET		1.5	/* one lift for all the host writes within this long */
 
 struct led_status {
 	int link;	/* the stream port has carrier */
@@ -162,7 +174,7 @@ static inline struct led_look led_look_for(const struct led_status *s)
 	static const struct led_look fault = { LED_BLINK, { 0, 1, 1 }, 1.0f, 0.5f, 0 };
 	static const struct led_look no_link = { LED_BREATHE, { 50, 1, 0.9f }, 3.0f, 0.85f, 0 };
 	static const struct led_look warning = { LED_BLINK, { 50, 1, 0.9f }, 1.2f, 0.35f, 0 };
-	static const struct led_look idle = { LED_STEADY, { 0, 0, 0.35f }, 0, 0, 0 };
+	static const struct led_look idle = { LED_RISE, { 0, 0, 1.0f }, LED_RISE_SECONDS, 0.65f, 0 };
 	static const struct led_look ready = { LED_STEADY, { 120, 1, 0.7f }, 0, 0, 0 };
 	struct led_look stream = { LED_STEADY, { 180, 1, 0.9f }, 0, 0, 0 };
 
@@ -244,7 +256,15 @@ struct led_engine {
 	double changed;		/* when `to` was set */
 	double ack;		/* when the host last spoke; < 0: never */
 	double started;
+	double risen;		/* a LED_RISE look: how long `to` had climbed before `changed` */
+	double from_risen;	/* and how long `from` had when it was left */
 };
+
+/* A look's own time: a climb counts the seconds it has been climbing, the rest the clock. */
+static inline double led_engine_time(const struct led_look *look, double climbed, double t)
+{
+	return look->pattern == LED_RISE ? climbed : t;
+}
 
 static inline void led_engine_start(struct led_engine *e, double t)
 {
@@ -253,6 +273,16 @@ static inline void led_engine_start(struct led_engine *e, double t)
 	e->from = e->to = boot;
 	e->changed = e->started = t;
 	e->ack = -1;
+	e->risen = e->from_risen = 0;
+}
+
+/* The host has just rewritten the state record. One operation rewrites it several times (that
+ * it has begun, what it changed, that it is done): they are one instruction, and get one lift.
+ */
+static inline void led_engine_heard(struct led_engine *e, double t)
+{
+	if (e->ack < 0 || t - e->ack >= LED_ACK_QUIET)
+		e->ack = t;
 }
 
 static inline void led_engine_show(struct led_engine *e, const struct led_look *look, double t)
@@ -261,6 +291,12 @@ static inline void led_engine_show(struct led_engine *e, const struct led_look *
 		return;
 	/* mid-fade, the old target is the nearest thing to what is showing */
 	e->from = e->to;
+	if (e->from.pattern == LED_RISE) {
+		/* Left where it stands. Unfinished, it goes on from there the next time; finished,
+		 * the next one starts again from low. */
+		e->from_risen = e->risen + (t - e->changed);
+		e->risen = e->from_risen < e->from.period ? e->from_risen : 0;
+	}
 	e->to = *look;
 	e->changed = t;
 }
@@ -268,7 +304,9 @@ static inline void led_engine_show(struct led_engine *e, const struct led_look *
 static inline struct hsb led_engine_at(const struct led_engine *e, double t)
 {
 	float fade = led_clamp((float)((t - e->changed) / LED_FADE_SECONDS));
-	struct hsb c = hsb_blend(led_look_at(&e->from, t), led_look_at(&e->to, t), fade * fade * (3 - 2 * fade));
+	struct hsb c = hsb_blend(led_look_at(&e->from, led_engine_time(&e->from, e->from_risen, t)),
+				 led_look_at(&e->to, led_engine_time(&e->to, e->risen + (t - e->changed), t)),
+				 fade * fade * (3 - 2 * fade));
 	struct hsb lifted;
 	float up;
 

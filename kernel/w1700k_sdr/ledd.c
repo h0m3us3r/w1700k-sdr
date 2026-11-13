@@ -116,7 +116,7 @@ static int look(struct watch *w, struct led_status *s)
 
 static int report(struct watch *w)
 {
-	static const char *const patterns[] = { "steady", "breathing", "blinking" };
+	static const char *const patterns[] = { "steady", "breathing", "blinking", "rising" };
 	const struct timespec quarter = { .tv_nsec = 250000000L };
 	struct led_status s = { 0 };
 	struct led_look l;
@@ -156,7 +156,7 @@ static void run(struct led_engine *e, struct watch *w, float brightness, double 
 		if (w && t - looked >= LOOK_EVERY) {
 			looked = t;
 			if (look(w, &status))
-				e->ack = t;
+				led_engine_heard(e, t);
 			if (t - e->started >= LED_BOOT_SECONDS) {	/* after the greeting */
 				target = led_look_for(&status);
 				led_engine_show(e, &target, t);
@@ -182,7 +182,7 @@ static void demo(float brightness, double seconds)
 		struct led_status s;
 	} states[] = {
 		{ "no stream link (yellow, breathing)", { .link = 0 } },
-		{ "link up, radio idle (low white)", { .link = 1 } },
+		{ "link up, radio idle (white, brightening from low to full)", { .link = 1 } },
 		{ "radio ready (green)", { .link = 1, .loaded = 1 } },
 		{ "streaming 40 Msps, lossless (cyan, solid)", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 40 } },
 		{ "streaming 80 Msps, lossless (blue)", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 80 } },

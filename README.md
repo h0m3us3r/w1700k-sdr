@@ -84,7 +84,7 @@ The unit's status LED tells you what the receiver is doing without a screen
 | --- | --- | --- |
 | <img src="docs/images/led/start.svg" width="48" height="20" alt="every colour once, out of the dark"> | Rainbow, once round, out of the dark | Starting: booted, the LED is ours from here |
 | <img src="docs/images/led/no-link.svg" width="48" height="20" alt="yellow, breathing"> | Yellow, breathing | No link on the stream port |
-| <img src="docs/images/led/idle.svg" width="48" height="20" alt="white, low"> | White, low and steady | Powered and linked; radio not loaded |
+| <img src="docs/images/led/idle.svg" width="48" height="20" alt="white, brightening"> | White, brightening from low to full | Powered and linked; radio not loaded (or loading) |
 | <img src="docs/images/led/ready.svg" width="48" height="20" alt="green"> | Green, steady | Ready: radio loaded and tuned, not streaming |
 | <img src="docs/images/led/rates.svg" width="48" height="20" alt="cyan, blue, magenta"> | Cyan / blue / magenta | Streaming at 40 / 80 / 160 Msps |
 | <img src="docs/images/led/rainbow.svg" width="48" height="20" alt="every colour in turn"> | The rainbow, round every six seconds | Streaming at 320 Msps |
