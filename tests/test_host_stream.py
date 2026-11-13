@@ -76,6 +76,26 @@ class Pump(unittest.TestCase):
         self.assertNotIn('--pulse', argv, 'our WM runs the producer: no IRQ5 pulse')
 
 
+class Link(unittest.TestCase):
+    def test_wire_rate(self):
+        """One datagram per chunk: 8192 or 7168 bytes and 82 of headers, preamble and gap."""
+        self.assertAlmostEqual(stream.wire_rate('raw', 320_000_000) / 1e9, 10.3425, places=4)
+        self.assertAlmostEqual(stream.wire_rate('half', 320_000_000) / 1e9, 9.7025, places=4)
+        self.assertAlmostEqual(stream.wire_rate('full', 160_000_000) / 1e9, 4.53125, places=4)
+        self.assertEqual(stream.WIRE_OVERHEAD, 16 + 8 + 20 + 14 + 4 + 8 + 12)
+
+    def test_interface_speed(self):
+        unit = host_fake.FakeUnit()
+        s = stream.Stream(unit)
+        self.assertEqual(s.check_interface('eth1'), 10000)
+        unit.device.link_mbps = 5000
+        self.assertEqual(s.check_interface('eth1'), 5000)
+        unit.device.link_mbps = None
+        self.assertIsNone(s.check_interface('eth1'))
+        with self.assertRaises(stream.StreamError):
+            s.check_interface('eth9')
+
+
 class ResultPage(unittest.TestCase):
     def page(self, status, wa_status=0):
         values = [0] * (len(stream.RES32) + 2 * len(stream.RES64))

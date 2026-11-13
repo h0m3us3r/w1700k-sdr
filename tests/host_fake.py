@@ -94,6 +94,7 @@ class FakeDevice:
         self.dropped = set()              # addresses whose writes (host or W32 op) do not land
         self.calls = []                   # (fn, args) our WM was asked to call
         self.mtu = 9216
+        self.link_mbps = 10000            # eth1's negotiated speed; None: not reported
 
     @property
     def streaming(self):
@@ -249,12 +250,13 @@ class FakeDevice:
     # --- streams ---
 
     def _stream(self, packing):
-        """STREAM: the route and ICAP0 armed, the WA started for packing, the producer waiting for
-        the go word; None while it runs."""
-        if packing not in wm.RADIO_PACKING.values():
+        """STREAM: the WA started if the schedule has it pack, the route and ICAP0 armed, the
+        producer waiting for the go word; None while it runs."""
+        names = {code: name for name, code in wm.RADIO_PACKING.items()}
+        if packing not in names:
             return RADIO_ERR_ARG
-        self.stream_packing = 'raw' if packing == wm.RADIO_PACKING['raw'] else 'half'
-        if self.stream_packing == 'half':
+        self.stream_packing = names[packing]
+        if self.stream_packing != 'raw':
             self._start_wa()
         self.route_armed = True
         for i in range(4):
@@ -281,10 +283,10 @@ class FakeDevice:
         was, self.pump = self.pump, None
         self.mem[stream.GO_ADDR] = stream.STOP_MAGIC
         if was == 'streaming':
-            half = self.stream_packing == 'half'
-            exited = half and not self.wa_stuck
+            wa = self.stream_packing != 'raw'                      # the WA packs in half and full
+            exited = wa and not self.wa_stuck
             res32 = dict.fromkeys(stream.RES32, 0)
-            res32.update(status=status, wa_status=(1 | exited << 8) if half else 0)
+            res32.update(status=status, wa_status=(1 | exited << 8) if wa else 0)
             res64 = dict.fromkeys(stream.RES64, 0)
             res64.update(chunks=1000, cycles=720_000_000)
             words = [stream.DONE_MAGIC, status, 0, 0] + [res32[k] for k in stream.RES32]
@@ -292,7 +294,7 @@ class FakeDevice:
                 words += [res64[k] & 0xFFFFFFFF, res64[k] >> 32]
             for i, w in enumerate(words):
                 self.mem[stream.DONE_AT + 4 * i] = w
-            if not half or exited:
+            if not wa or exited:
                 self.route_armed = False
             self.stream_packing = None
             self._radio_ack(status)
@@ -543,7 +545,8 @@ class FakeUnit:
             return self._done(rc=0 if d.pump else 1)
         match = re.match(r'cat /sys/class/net/(\S+)/mtu ', command)
         if match:
-            return self._done(f'{d.mtu}\nup\n'.encode() if match.group(1) == 'eth1' else b'')
+            speed = '' if d.link_mbps is None else f'{d.link_mbps}\n'
+            return self._done(f'{d.mtu}\nup\n{speed}'.encode() if match.group(1) == 'eth1' else b'')
         if command.startswith('rm -f'):
             for path in command.split()[2:]:
                 self.files.pop(path, None)

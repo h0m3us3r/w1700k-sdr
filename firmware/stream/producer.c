@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-/* The WM's stream producer, entered by our WM's STREAM command, interrupts off for its whole run.
+/* The WM's stream producer, entered by our WM's STREAM command with the packing schedule's code
+ * (RADIO_PACKING_*, stream.h schedules), interrupts off for its whole run.
  *
  * 1. Wait for the host's go word, check MCU_DMA0 TX0 idle and the firmware's ring adapter in
  *    step, start the WA packer if the schedule has one, then reset ICAP0 and start it as a
@@ -28,7 +29,6 @@
 
 #define PIECE (CHUNK / PIECES)
 #define PIECE_PACKED (PIECE / MT7996_IQ_PACK_GROUP_IN * MT7996_IQ_PACK_GROUP_OUT)
-#define WA_RUN (WA_MASK != 0)
 
 static void rom_reclaim(void)
 {
@@ -46,7 +46,7 @@ static void rom_reclaim(void)
  * Afterwards the firmware's command path is dead until the next load, every time, so the host
  * reads the results through the BAR.
  */
-static int start_wa(void)
+static int start_wa(uint32_t packing, uint32_t wa_mask)
 {
 	uint32_t g0;
 
@@ -57,9 +57,10 @@ static int start_wa(void)
 	SH->go = 0;
 	SH->stop = 0;
 	SH->exited = 0;
-	SH->done = next_of(~0u, WA_MASK);
+	SH->done = next_of(~0u, wa_mask);
 	SH->published = 0;
 	SH->sent = 0;
+	SH->packing = packing;
 	R32(MT7996_MCU_WA_SWI_SLOT1) = WA_CODE;
 	R32(MT7996_MCU_SWDEF_WA_ACTION) = MT7996_MCU_SWDEF_WA_ACTION_SLOT1;
 	R32(MT7996_MCU_WA_SWI) = MT7996_MCU_WA_SWI_RAISE;
@@ -73,8 +74,11 @@ static int start_wa(void)
 	return SH->started ? 0 : 8;
 }
 
-__attribute__((used)) void producer(void)
+__attribute__((used)) void producer(uint32_t packing)
 {
+	/* The caller checked the code. The masks live in registers; the slot table is read per chunk. */
+	const struct sched *s = &schedules[packing];
+	const uint32_t wa_mask = s->wa_mask, wm_mask = s->wm_mask, wm_n = s->wm_n;
 	volatile struct res *r = RES;
 	uint32_t mstatus, mcache, status = 0, cpu = 0, desc = 0, slots = 0, g0, prev = 0, k = 0, m, wc;
 	uint32_t piece = 0, addr, len, t, pack_start = 0, max_lag = 0, pmax = 0, sent, inval_at = 0;
@@ -88,7 +92,7 @@ __attribute__((used)) void producer(void)
 	asm volatile("csrr %0, %1" : "=r"(mcache) : "n"(MT7996_MCU_CSR_MCACHE_CTL));
 	for (i = 0; i < (int)(sizeof(struct res) / 4); i++)
 		((volatile uint32_t *)r)[i] = 0;
-	if (WM_MASK) {
+	if (wm_mask) {
 		asm volatile("csrs %0, %1" : : "n"(MT7996_MCU_CSR_MCACHE_CTL), "r"(MT7996_MCU_MCACHE_CTL_STREAM));
 		cache_wbinval_all();
 	}
@@ -114,18 +118,18 @@ __attribute__((used)) void producer(void)
 	}
 	desc = R32(MT7996_MCU_DMA0_TX0_BASE);
 	slots = R32(MT7996_MCU_DMA0_TX0_ADAPTER + MT7996_MCU_ADAPTER_SLOTS);
-	if (WA_RUN && (status = start_wa()))
+	if (wa_mask && (status = start_wa(packing, wa_mask)))
 		goto finish;
 	R32(MT7996_ICAP_CR0(0)) = MT7996_ICAP_CR0_HELD;	/* reset (clears CR9/WRAP), then ring + EN + CAPTURE */
 	R32(MT7996_ICAP_CR0(0)) = MT7996_ICAP_CR0_RING_IDLE;
 	R32(MT7996_ICAP_CR0(0)) = MT7996_ICAP_CR0_RING_ARM;
 	R32(MT7996_ICAP_CR0(0)) = MT7996_ICAP_CR0_RING_TRIGGER;
 	r->first_cr9 = R32(MT7996_ICAP_CR9(0));
-	if (WA_RUN)
+	if (wa_mask)
 		SH->go = 1;
 
 	/* 2. k: the next chunk to publish; m: the first of the WM's next group to pack. */
-	m = WM_MASK ? next_of(~0u, WM_MASK) : 0;
+	m = wm_mask ? next_of(~0u, wm_mask) : 0;
 	for (i = 0; i < (int)WM_NBUF; i++)
 		held[i] = m - (1u << 30);	/* far below every chunk: free */
 	start = rdcycle64();
@@ -145,19 +149,19 @@ __attribute__((used)) void producer(void)
 		wc = (uint32_t)(written / CHUNK);
 		/* what TX0 has finished */
 		sent = k - (cpu - R32(MT7996_MCU_DMA0_TX0_DIDX)) % MT7996_MCU_DMA0_TX0_ENTRIES;
-		if (WA_MASK)
+		if (wa_mask)
 			SH->sent = sent;
 		if ((int32_t)(wc - k) > 0) {
 			addr = ring_at(k);
 			len = CHUNK;
 			ready = 1;
-			switch (role(k)) {
+			switch (role(s, k)) {
 			case 2:
 				if ((int32_t)(SH->done - k) <= 0) {
 					ready = 0;
 					wa_waits++;
 				}
-				addr = wa_buffer(k);
+				addr = wa_buffer(s, k);
 				len = PACKED;
 				break;
 			case 1:
@@ -165,7 +169,7 @@ __attribute__((used)) void producer(void)
 					ready = 0;
 					wm_waits++;
 				}
-				addr = wm_buffer(k);
+				addr = wm_buffer(s, k);
 				len = PACKED;
 				break;
 			}
@@ -181,7 +185,7 @@ __attribute__((used)) void producer(void)
 					R32(MT7996_MCU_DMA0_TX0_CIDX) = cpu;
 					k++;
 					chunks++;
-					if (WA_MASK)
+					if (wa_mask)
 						SH->published = k;
 					continue;
 				}
@@ -197,7 +201,7 @@ __attribute__((used)) void producer(void)
 		ctl.chunk = (uint32_t)chunks;
 		if ((uint32_t)lag < MT7996_PROBE_CTL_LAG_CHUNKS * CHUNK)
 			ctl_step(&ctl);
-		if (WM_MASK) {
+		if (wm_mask) {
 			if ((int32_t)(wc - inval_at) >= (int32_t)INVAL_EVERY) {
 				cache_wbinval_all();
 				inval_at = wc;
@@ -206,11 +210,11 @@ __attribute__((used)) void producer(void)
 			if ((int32_t)(wc - m) < 2)
 				continue;
 			if (!piece) {
-				if ((int32_t)(sent - held[packer_index(m, WM_N) % WM_NBUF]) <= 0)
+				if ((int32_t)(sent - held[packer_index(s, m, wm_n) % WM_NBUF]) <= 0)
 					continue;
 				pack_start = rdcycle();
 			}
-			pack_words(ring_at(m) + piece * PIECE, wm_buffer(m) + piece * PIECE_PACKED, PIECE);
+			pack_words(ring_at(m) + piece * PIECE, wm_buffer(s, m) + piece * PIECE_PACKED, PIECE);
 			if (++piece < PIECES)
 				continue;
 			piece = 0;
@@ -219,8 +223,8 @@ __attribute__((used)) void producer(void)
 			if (t > pmax)
 				pmax = t;
 			wm_packs++;
-			held[packer_index(m, WM_N) % WM_NBUF] = m;
-			m = next_of(m, WM_MASK);
+			held[packer_index(s, m, wm_n) % WM_NBUF] = m;
+			m = next_of(m, wm_mask);
 		}
 	}
 
@@ -244,7 +248,7 @@ __attribute__((used)) void producer(void)
 	r->tx_dma_end = R32(MT7996_MCU_DMA0_TX0_DIDX);
 	/* The WA leaves the packer before ICAP stops. Stopping ICAP first left the WA stalled on a pool
 	 * read inside pack_words for good in 2 of 9 stops; in this order 12 of 12 stopped cleanly. */
-	if (WA_RUN) {
+	if (wa_mask) {
 		SH->stop = 1;
 		g0 = rdcycle();
 		while (!SH->exited)
@@ -284,7 +288,7 @@ finish:
 	/* After a WA run the host's register window breaks once the firmware resumes, so the host
 	 * reads the results while we still hold the WM.
 	 */
-	if (WA_RUN)
+	if (wa_mask)
 		for (t = rdcycle(); rdcycle() - t < HOLD_CYCLES;)
 			;
 	asm volatile("csrw %0, %1" : : "n"(MT7996_MCU_CSR_MCACHE_CTL), "r"(mcache));

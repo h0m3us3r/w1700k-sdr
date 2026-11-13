@@ -152,7 +152,9 @@
  * (I bits). 8 words -> 7 (28-bit samples), 8192 -> 7168 bytes. The MCU
  * packers pack a fixed share of chunks (positions within a power-of-two
  * period of at most 32 chunks); half the chunks packed carries 320 Msps on
- * one 10 Gbit/s link at 97 % load.                                 [measured] */
+ * one 10 Gbit/s link at 97 % load. Every chunk packed runs to 160 Msps
+ * (4.52 Gbit/s on the wire): 11.4k cycles a chunk on either packer, each
+ * 62 % busy, the capture at most 4.6 chunks ahead.                 [measured] */
 #define MT7996_IQ_PACK_GROUP_IN		8u
 #define MT7996_IQ_PACK_GROUP_OUT	7u
 #define MT7996_IQ_PACK_WORD(w, w7, k) \

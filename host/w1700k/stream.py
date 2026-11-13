@@ -30,6 +30,12 @@ STREAM_SECONDS = 604800           # the pump's own limit (7 days); a stream norm
 IDLE_MS = 300                     # the pump ends once data has stopped arriving this long
 DRAIN_MS = 3000
 MIN_MTU = 8236                    # one 8 KiB slice per datagram plus its headers
+# A datagram on the wire beyond its slice: the export header (16), UDP (8), IPv4 (20), Ethernet (14),
+# FCS (4), preamble (8) and the inter-frame gap (12).
+WIRE_OVERHEAD = 82
+PACKED_CHUNK = 7168               # a chunk packed to 28 bits per sample pair (iq_format.h)
+# The share of chunks each packing schedule packs (firmware/stream/blob.py PACKINGS).
+PACKED_SHARE = {'raw': 0.0, 'half': 0.5, 'full': 1.0}
 EXPORT_CPU, PUMP_CPU = 2, 3       # the export worker and the pump each busy-poll one CPU
 
 OUT_FILE = '/tmp/w1700k-stream.json'
@@ -50,6 +56,14 @@ CHUNK = 8192
 
 class StreamError(RuntimeError):
     pass
+
+
+def wire_rate(packing, sample_rate):
+    """Bits/s on the link of a stream at `sample_rate` under a packing schedule: one datagram per
+    chunk of 2048 samples, packed or raw."""
+    share = PACKED_SHARE[packing]
+    per_chunk = share * (PACKED_CHUNK + WIRE_OVERHEAD) + (1 - share) * (CHUNK + WIRE_OVERHEAD)
+    return sample_rate * 4 / CHUNK * per_chunk * 8
 
 
 @dataclass(frozen=True)
@@ -123,16 +137,19 @@ class Stream:
 
     def check_interface(self, interface):
         """The export sends one 8 KiB slice per datagram straight to the NIC: it needs the link up
-        and a jumbo MTU (9216 provisioned)."""
+        and a jumbo MTU (9216 provisioned). Returns the link's negotiated speed in Mbit/s, None
+        where the port does not report one."""
         name = shlex.quote(interface)
-        text = self.unit.run(f'cat /sys/class/net/{name}/mtu /sys/class/net/{name}/operstate 2>/dev/null').stdout
+        path = f'/sys/class/net/{name}'
+        text = self.unit.run(f'cat {path}/mtu {path}/operstate {path}/speed 2>/dev/null').stdout
         fields = text.decode(errors='replace').split()
-        if len(fields) != 2 or not fields[0].isdigit():
+        if len(fields) < 2 or not fields[0].isdigit():
             raise StreamError(f'the unit has no interface {interface}')
         if int(fields[0]) < MIN_MTU:
             raise StreamError(f'{interface} MTU is {fields[0]}; the export needs at least {MIN_MTU} (9216)')
         if fields[1] == 'down':
             raise StreamError(f'{interface} is down')
+        return int(fields[2]) if len(fields) > 2 and fields[2].isdigit() and int(fields[2]) > 0 else None
 
     def launch(self, export, dst_mac):
         """Start mt7996-stream detached from this ssh session; it runs until stop()."""

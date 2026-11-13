@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: MIT */
-/* Shared by the WM producer and the WA packer. The packing schedule comes from -D: PERIOD (a power
- * of two, at most 32) chunks repeat one pattern; WA_MASK / WM_MASK mark the positions each packer
- * packs, WA_N / WM_N count them, and SLOTS gives each position's index among its packer's.
- * Everything else is in layout.h and the hw/ headers.
+/* Shared by the WM producer and the WA packer. A packing schedule repeats one pattern every
+ * PERIOD chunks: which positions the WA packs, which the WM packs, the rest going out raw. The
+ * schedules come from -D (stream/blob.py): PERIOD (a power of two, at most 32) and SCHEDULES, one
+ * struct sched per RADIO_PACKING_* code (radio/radio_cmd.h) in that order. A stream runs the one
+ * its STREAM command names: our WM passes the code to the producer, which leaves it in the shared
+ * block for the WA's packer. Everything else is in layout.h and the hw/ headers.
  */
 #include <stdint.h>
 
@@ -35,24 +37,32 @@ struct shared {
 	uint32_t done;			/* every WA chunk below this index is packed */
 	uint32_t published;		/* the WM's publish point */
 	uint32_t sent;			/* chunks below this index have left TX0 */
-	uint32_t pad;
-	uint32_t status;		/* WA: 1 stopped, 2 go never came, 3 the WM stalled */
+	uint32_t packing;		/* the stream's schedule (RADIO_PACKING_*), set before the WA is raised */
+	uint32_t status;		/* WA: 1 stopped, 2 go never came, 3 the WM stalled, 4 no schedule */
 	uint32_t pack_max;
 	uint64_t packs, pack_cycles, waits;
 };
 #define SH ((volatile struct shared *)SHARED)
 
-static const uint8_t slot[PERIOD] = { SLOTS };
+/* One packing schedule. */
+struct sched {
+	uint32_t wa_mask, wm_mask;	/* the positions (bit k % PERIOD) the WA and the WM pack */
+	uint32_t wa_n, wm_n;		/* how many each */
+	uint8_t slot[PERIOD];		/* a packed position's index among its packer's */
+};
+
+static const struct sched schedules[] = { SCHEDULES };
+#define SCHEDULE_COUNT	(sizeof(schedules) / sizeof(schedules[0]))
 static const uint32_t wm_bufs[WM_NBUF] = { WM_BUFS };
 
 /* Chunk k's job: 2 the WA packs it, 1 the WM does, 0 raw. Indices are modular (2^32 chunks
  * is 7.6 hours) and PERIOD divides 2^32, so the pattern and the buffers run on across the wrap.
  */
-static inline int role(uint32_t k)
+static inline int role(const struct sched *s, uint32_t k)
 {
 	uint32_t b = 1u << (k % PERIOD);
 
-	return WA_MASK & b ? 2 : WM_MASK & b ? 1 : 0;
+	return s->wa_mask & b ? 2 : s->wm_mask & b ? 1 : 0;
 }
 
 /* The next chunk after c in `mask`, which must not be empty. */
@@ -64,10 +74,10 @@ static inline uint32_t next_of(uint32_t c, uint32_t mask)
 	return c;
 }
 
-/* Chunk k's index among its packer's chunks. */
-static inline uint32_t packer_index(uint32_t k, uint32_t n)
+/* Chunk k's index among its packer's chunks, n of every PERIOD. */
+static inline uint32_t packer_index(const struct sched *s, uint32_t k, uint32_t n)
 {
-	return (k / PERIOD) * n + slot[k % PERIOD];
+	return (k / PERIOD) * n + s->slot[k % PERIOD];
 }
 
 /* Where a packed chunk goes: buffers in the packer's own local memory, written at local speed
@@ -75,14 +85,14 @@ static inline uint32_t packer_index(uint32_t k, uint32_t n)
  * cores' path into the pool is the limit: with both packers writing into it, both slowed by
  * half and the capture lapped the reader. A buffer is reused once TX0 has sent its chunk.
  */
-static inline uint32_t wm_buffer(uint32_t k)
+static inline uint32_t wm_buffer(const struct sched *s, uint32_t k)
 {
-	return wm_bufs[packer_index(k, WM_N) % WM_NBUF];
+	return wm_bufs[packer_index(s, k, s->wm_n) % WM_NBUF];
 }
 
-static inline uint32_t wa_buffer(uint32_t k)
+static inline uint32_t wa_buffer(const struct sched *s, uint32_t k)
 {
-	return WA_BUF + packer_index(k, WA_N) % WA_NBUF * PACKED;
+	return WA_BUF + packer_index(s, k, s->wa_n) % WA_NBUF * PACKED;
 }
 
 static inline uint32_t ring_at(uint32_t k)

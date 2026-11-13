@@ -74,20 +74,17 @@ class Images(unittest.TestCase):
         cls.images = {role: (name, data, flags) for role, name, data, flags in own.build()}
 
     def test_wm(self):
-        """The entry region in ULM1, the raw and half stream producers above it, then the radio code
-        in CRAM above the ROM's download buffers."""
+        """The entry region in ULM1, the stream producer above it (one image, every packing
+        schedule), then the radio code in CRAM above the ROM's download buffers."""
         name, data, flags = self.images['wm']
         self.assertEqual((name, flags), ('w1700k_wm.bin', ()))
-        (entry, feature, plain), *producers, (cram, cram_feature, cram_plain) = payloads(data)
+        (entry, feature, plain), (producer, producer_feature, code), (cram, cram_feature, cram_plain) = payloads(data)
         self.assertEqual((entry, feature), (own.WM_ENTRY, 0x21))
         self.assertEqual(struct.unpack_from('<I', plain)[0], CSRRCI_MSTATUS_MIE)
-        self.assertLessEqual(entry + len(plain), own.PRODUCER_BASE['raw'])
-        self.assertEqual([(a, f) for a, f, _ in producers],
-                         [(own.PRODUCER_BASE['raw'], 0x01), (own.PRODUCER_BASE['half'], 0x01)])
-        for address, _, code in producers:
-            self.assertLessEqual(len(code), own.PRODUCER_SIZE)
-        self.assertNotEqual(producers[0][2], producers[1][2], 'one producer per packing schedule')
-        self.assertLessEqual(own.PRODUCER_BASE['half'] + own.PRODUCER_SIZE, own.WM_LIMIT)
+        self.assertLessEqual(entry + len(plain), own.PRODUCER_BASE)
+        self.assertEqual((producer, producer_feature), (own.PRODUCER_BASE, 0x01))
+        self.assertLessEqual(len(code), own.PRODUCER_SIZE)
+        self.assertLessEqual(own.PRODUCER_BASE + own.PRODUCER_SIZE, own.WM_LIMIT)
         self.assertEqual((cram, cram_feature), (own.WM_CRAM, 0x01))
         self.assertLessEqual(cram + len(cram_plain), own.WM_CRAM_LIMIT)
 

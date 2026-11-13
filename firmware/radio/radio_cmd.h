@@ -21,10 +21,11 @@
  *   CAPTURE band bw                the band's capture path as MediaTek's capture prime leaves it
  *                                  (after its channel set; bw 0..4 as CHANSET)
  *   SELECT band                    ICAP listens to the band (no stream on another band running)
- *   STREAM packing                 a stream (RADIO_PACKING_*): the route and ICAP0 armed, the WA
- *                                  started for packing, then the producer until the host's stop
- *                                  word; ACK when it has ended (RES = the producer's status, the
- *                                  result page as before), the route released
+ *   STREAM packing                 a stream with a packing schedule (RADIO_PACKING_*): the WA
+ *                                  started if it packs, the route and ICAP0 armed, then the
+ *                                  producer until the host's stop word; ACK when it has ended
+ *                                  (RES = the producer's status, the result page as before), the
+ *                                  route released
  *   STEP step arg                  one bring-up step alone, for development (RADIO_STEP_*)
  */
 #ifndef RADIO_RADIO_CMD_H
@@ -43,8 +44,12 @@
 
 #define RADIO_SELFTEST_MAGIC	0x52414449u	/* 'RADI' */
 
-#define RADIO_PACKING_RAW	0u
-#define RADIO_PACKING_HALF	1u
+/* Packing schedules (stream/blob.py PACKINGS, in this order): which chunks go out packed to
+ * 28 bits per sample pair (lossless, 8 KiB -> 7 KiB). */
+#define RADIO_PACKING_RAW	0u	/* none: up to 160 Msps on one 10 GbE link */
+#define RADIO_PACKING_HALF	1u	/* every other chunk (WM 4 + WA 4 of 16): 320 Msps on 10 GbE */
+#define RADIO_PACKING_FULL	2u	/* every chunk (WM 8 + WA 8 of 16): up to 160 Msps, 7/8 of the bytes */
+#define RADIO_PACKINGS		3u
 #define RADIO_STREAM_NO_WA	0x100u		/* STREAM result bit: the WA did not start */
 
 #define RADIO_CHAN_BW		0x000000ffu	/* SETUP arg 3 fields */

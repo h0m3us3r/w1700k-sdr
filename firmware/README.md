@@ -87,8 +87,8 @@ later patches run. It loads on parts with unprovisioned security fuses.
 
 ## Streams (`stream/`)
 
-- `producer.c`, linked twice into the WM (raw at `0x00930000`, half-packed at `0x00932000`)
-  and entered by the STREAM command with interrupts off: waits for the pump's go word, runs
+- `producer.c`, linked into the WM at `0x00930000` and entered by the STREAM command with the
+  packing schedule's code and interrupts off: waits for the pump's go word, runs
   ICAP0 as a ring over the 1 MiB partition, follows its write pointer (CR9) and publishes each
   8 KiB chunk on MCU_DMA0 TX ring 0, which lands in the host's WFDMA RX ring 0. It runs until
   the stop word (same address as the go word) or an overrun, drains TX0 before stopping ICAP
@@ -100,7 +100,9 @@ later patches run. It loads on parts with unprovisioned security fuses.
 - `packer.c` and `pack.S`, linked into the WA at `0x1001a400`: 28-bit packing, 8 words to 7,
   so 320 Msps fits one 10 GbE link; the producer raises the WA through a soft-interrupt slot.
 - `layout.h`: every fixed address and protocol word; `blob.py`: the compile/link recipe and the
-  two packing schedules (raw; half = WM 4 + WA 4 of every 16 chunks).
+  packing schedules, a table in both images that the STREAM command indexes (raw; half = WM 4 +
+  WA 4 of every 16 chunks, for 320 Msps; full = WM 8 + WA 8, every chunk, up to 160 Msps, where
+  each packer is 62 % busy).
 
 ## The WA (`wa/`)
 

@@ -7,11 +7,17 @@ everything must land in .text (code, then read-only data); any data, bss or smal
 is refused, as is a call into a runtime library. ld.lld resolves every relocation at link time
 and llvm-objcopy extracts the raw .text.
 
-Two production configurations, by packing schedule over each PERIOD chunks:
-- raw: no packing; every 8 KiB chunk is published as captured (up to 160 Msps of 14-bit IQ).
+One producer and one packer serve every packing schedule; a stream's STREAM command names the
+one it runs (radio/radio_cmd.h RADIO_PACKING_*, in PACKINGS' order). Over each PERIOD chunks:
+- raw: no packing; every 8 KiB chunk is published as captured (up to 160 Msps of 14-bit IQ on
+  one 10 GbE link).
 - half: the WM packs 4 chunks and the WA 4 of every 16 to 28 bits (7168 bytes): 50% packed,
-  so 320 Msps fits one 10 GbE link. Raising the WA leaves the firmware command path dead until
-  the next firmware load.
+  so 320 Msps fits one 10 GbE link.
+- full: the WM packs 8 and the WA 8 of every 16, every chunk: 7/8 of the bytes, lossless, for
+  links slower than the samples (160 Msps in 4.5 Gbit/s). Each packer then packs as many chunks
+  a second as in half at twice the sample rate, so it carries up to 160 Msps: there, with both
+  reading the capture ring all the time, a chunk takes either 11.4k cycles and each is 62 % busy.
+Raising the WA (half, full) leaves the firmware command path dead until the next firmware load.
 """
 import shutil
 import struct
@@ -37,20 +43,23 @@ class Packing:
     name: str
     wa: int                       # chunks of each period the WA packs
     wm: int                       # chunks of each period the WM packs
-    period: int = 16
 
 
+PERIOD = 16
 RAW = Packing('raw', 0, 0)
 HALF = Packing('half', 4, 4)
-PACKINGS = (RAW, HALF)
+FULL = Packing('full', 8, 8)
+PACKINGS = (RAW, HALF, FULL)      # index = the RADIO_PACKING_* code
 
 
-def schedule(packing):
+def schedule(packing, period=PERIOD):
     """(WA mask, WM mask, slot table): each packer's positions spread evenly over the period."""
-    period, wa, wm = packing.period, packing.wa, packing.wm
+    wa, wm = packing.wa, packing.wm
     n = wa + wm
     if period & (period - 1) or not 1 <= period <= 32 or n > period:
         raise ValueError('period: a power of two up to 32, at least wa + wm')
+    if not n:
+        return 0, 0, [0] * period
     at = [i * period // n for i in range(n)]
     who = ['wa' if (j + 1) * wa // n > j * wa // n else 'wm' for j in range(n)]
     masks, slots, count = dict(wa=0, wm=0), [0] * period, dict(wa=0, wm=0)
@@ -61,10 +70,13 @@ def schedule(packing):
     return masks['wa'], masks['wm'], slots
 
 
-def _schedule_defines(packing):
-    wa_mask, wm_mask, slots = schedule(packing)
-    return dict(PERIOD=f'{packing.period}u', WA_MASK=f'{wa_mask:#x}u', WM_MASK=f'{wm_mask:#x}u',
-                WA_N=f'{packing.wa}u', WM_N=f'{packing.wm}u', SLOTS=','.join(map(str, slots)))
+def schedule_defines():
+    """-D PERIOD and SCHEDULES: stream.h's table, one struct sched initialiser per packing."""
+    rows = []
+    for packing in PACKINGS:
+        wa_mask, wm_mask, slots = schedule(packing)
+        rows.append(f"{{{wa_mask:#x}u,{wm_mask:#x}u,{packing.wa}u,{packing.wm}u,{{{','.join(map(str, slots))}}}}}")
+    return dict(PERIOD=f'{PERIOD}u', SCHEDULES=','.join(rows))
 
 
 def _alloc_sections(elf):
@@ -105,5 +117,5 @@ def compile_blob(sources, defines, base, limit):
     return code
 
 
-def wa_packer(packing):
-    return compile_blob(['wa_lead.S', 'packer.c', 'pack.S'], _schedule_defines(packing), WA_CODE, WA_LIMIT)
+def wa_packer():
+    return compile_blob(['wa_lead.S', 'packer.c', 'pack.S'], schedule_defines(), WA_CODE, WA_LIMIT)
