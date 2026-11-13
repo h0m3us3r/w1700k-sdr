@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 #
 #   make          build everything below, in dependency order
-#   make check    run the test suite
+#   make check    run the test suite; its report is tests/build/report.html
+#   make sweep    run every stream mode on a real unit, briefly, and add that to the report
 #
 # Unit images land in platform/build/images/, MT7996 firmware in firmware/build/,
 # host programs under host/. The first build downloads about 500 MB of sources and
@@ -12,7 +13,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: all toolchain linux sdr rootfs loader dumper restorer images firmware host check \
+.PHONY: all toolchain linux sdr rootfs loader dumper restorer images firmware host check sweep \
 	clean distclean
 
 all: images dumper restorer firmware host
@@ -65,9 +66,15 @@ host:
 		echo "host/soapy: SoapySDR headers not found, not built"; \
 	fi
 
+# Every test (none needs a unit), reported on the terminal as unittest does and as a page.
 check:
 	$(PYTHON) tools/check_hw_names.py
-	$(PYTHON) -m unittest discover -s tests
+	$(PYTHON) tools/test_report.py
+
+# What the tests cannot: each sample rate, packing and band on a unit that is reachable,
+# with w1700k-stream running on this host. About five minutes.
+sweep:
+	$(PYTHON) tools/unit_sweep.py
 
 # Remove build outputs but keep downloads and prepared sources.
 clean:

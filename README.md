@@ -130,6 +130,7 @@ between them, in 1.22 kHz bins.*
 | [`init/`](init/README.md) | Installation from stock, updates, recovery, return to stock |
 | [`include/hw/`](include/hw/README.md) | Register reference: every known MT7996, A-die and AN7581 register, as C headers |
 | [`docs/`](docs/) | [Architecture](docs/architecture.md), [the front LED](docs/led.md), [roadmap](docs/roadmap.md) |
+| `tests/`, `tools/` | The test suite and its report page (`tools/test_report.py`), the on-unit sweep of the stream modes (`tools/unit_sweep.py`) |
 
 ## Getting started
 
@@ -145,7 +146,7 @@ dump of it (`init/rawdump`) for the maintainers.
 
 ```sh
 make                                   # everything, from public sources (~10 min plus downloads)
-make check                             # the test suite
+make check                             # the test suite; its report: tests/build/report.html
 
 sudo init/host/link up IFACE           # 192.168.1.10/24 on the NIC cabled to lan3
 sudo init/host/tftp-forward enable IFACE
@@ -177,6 +178,29 @@ Buildroot prerequisites, clang, ld.lld, llvm-objcopy and llvm-readobj (RISC-V
 firmware), openssl (firmware container encryption), and
 `libfftw3-dev` and `zlib` for the stream service and the spectrum server. No vendor firmware is
 downloaded or needed.
+
+## Testing
+
+```sh
+make check        # every test; needs no unit
+make sweep        # every stream mode on a real unit, about five minutes
+```
+
+`make check` runs the suite as `python3 -m unittest discover -s tests` does and
+writes a page of what happened, `tests/build/report.html`: every test by module
+under what the module says it tests, failures with their tracebacks, skips with
+their reasons. The tests stand in for the hardware: simulated units for
+installation and updates, the radio's packing kernels run from their machine
+code in an emulator, the loader's update script run against a model of the
+flash, and the host programs fed over loopback.
+
+`make sweep` (`tools/unit_sweep.py`) does what they cannot. With a unit
+reachable and `w1700k-stream` running, it runs every band at every sample rate,
+every other packing the link carries, and the 640/2 capture, a few seconds
+each, and checks that the samples arrive at the rate set, that next to none are
+lost, that they are the kind the packing makes, that their level is plausible,
+that the synthesizer is in lock, and that the front LED shows the mode. Its
+results join the report page.
 
 ## Read before use
 
