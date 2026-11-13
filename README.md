@@ -86,8 +86,9 @@ The unit's status LED tells you what the receiver is doing without a screen
 | Yellow, breathing | No link on the stream port |
 | White, low and steady | Powered and linked; radio not loaded |
 | Green, steady | Ready: radio loaded and tuned, not streaming |
-| Cyan / blue / violet / magenta | Streaming at 40 / 80 / 160 / 320 Msps |
-| … solid | lossless: every sample bit for bit |
+| Cyan / blue / magenta | Streaming at 40 / 80 / 160 Msps |
+| The rainbow, round every six seconds | Streaming at 320 Msps |
+| … at a steady brightness | lossless: every sample bit for bit |
 | … breathing | samples reduced to fewer bits to fit the link |
 | … slow blink | started, but nothing is leaving the port |
 | Yellow, blinking | Look: the captured band's synthesizer is out of lock |

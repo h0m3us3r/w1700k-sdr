@@ -4,7 +4,7 @@
  * led_check blend H S B H S B T    the colour a fraction T from the first to the second: "H S B"
  * led_check look FILE LINK FLOWING ENDED
  *                                  the look for the state record in FILE (- for none) and what
- *                                  the unit sees itself: "PATTERN H S B PERIOD DEPTH"
+ *                                  the unit sees itself: "PATTERN H S B PERIOD DEPTH turn SECONDS"
  * led_check engine                 a change of look and an acknowledgement, sampled: one
  *                                  "T H S B" line per 50 ms from 0 to 5 s
  * kernel/w1700k_sdr/ledd.h built for the host, for tests/test_led.py.
@@ -23,7 +23,7 @@ static struct hsb colour(char **argv)
 
 int main(int argc, char **argv)
 {
-	static const char *const patterns[] = { "steady", "breathe", "blink", "rainbow" };
+	static const char *const patterns[] = { "steady", "breathe", "blink" };
 	static char text[8192];
 
 	if (argc == 5 && !strcmp(argv[1], "levels")) {
@@ -46,12 +46,13 @@ int main(int argc, char **argv)
 		led_parse_state(f ? text : NULL, &s);
 		s.ended = s.streaming && atoi(argv[5]);
 		look = led_look_for(&s);
-		printf("%s %.0f %.2f %.2f %.2f %.2f | loaded %d streaming %d reduced %d rate %d unlocked %d\n",
+		printf("%s %.0f %.2f %.2f %.2f %.2f turn %.0f | loaded %d streaming %d reduced %d rate %d unlocked %d\n",
 		       patterns[look.pattern], look.colour.h, look.colour.s, look.colour.b, look.period, look.depth,
+		       look.turn,
 		       s.loaded, s.streaming, s.reduced, s.rate_msps, s.unlocked);
 	} else if (argc == 2 && !strcmp(argv[1], "engine")) {
-		const struct led_look green = { LED_STEADY, { 120, 1, 0.7f }, 0, 0 };
-		const struct led_look blue = { LED_STEADY, { 225, 1, 0.9f }, 0, 0 };
+		const struct led_look green = { LED_STEADY, { 120, 1, 0.7f }, 0, 0, 0 };
+		const struct led_look blue = { LED_STEADY, { 225, 1, 0.9f }, 0, 0, 0 };
 		struct led_engine e;
 		struct hsb c;
 		int k;

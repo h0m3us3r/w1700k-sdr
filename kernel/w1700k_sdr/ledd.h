@@ -82,13 +82,13 @@ enum led_pattern {
 	LED_STEADY,
 	LED_BREATHE,	/* the brightness sinks by `depth` of itself and returns, once a `period` */
 	LED_BLINK,	/* lit for `depth` of each `period`, dark for the rest */
-	LED_RAINBOW,	/* the hue goes once round each `period` */
 };
 
 struct led_look {
-	enum led_pattern pattern;
+	enum led_pattern pattern;	/* what the brightness does */
 	struct hsb colour;
 	float period, depth;
+	float turn;	/* seconds for the hue to go once round the circle from `colour`; 0: it stays */
 };
 
 static inline struct hsb led_look_at(const struct led_look *l, double t)
@@ -104,19 +104,19 @@ static inline struct hsb led_look_at(const struct led_look *l, double t)
 		if (phase >= l->depth)
 			c.b = 0;
 		break;
-	case LED_RAINBOW:
-		c.h = fmodf(c.h + 360.0f * (float)phase, 360.0f);
-		break;
 	case LED_STEADY:
 		break;
 	}
+	if (l->turn > 0)
+		c.h = fmodf(c.h + 360.0f * (float)(fmod(t, l->turn) / l->turn), 360.0f);
 	return c;
 }
 
 static inline int led_look_same(const struct led_look *a, const struct led_look *b)
 {
 	return a->pattern == b->pattern && a->colour.h == b->colour.h && a->colour.s == b->colour.s &&
-	       a->colour.b == b->colour.b && a->period == b->period && a->depth == b->depth;
+	       a->colour.b == b->colour.b && a->period == b->period && a->depth == b->depth &&
+	       a->turn == b->turn;
 }
 
 /* ---- the vocabulary ----
@@ -125,19 +125,24 @@ static inline int led_look_same(const struct led_look *a, const struct led_look 
  *   no stream link      yellow, breathing deeply: waiting for the cable or the far end
  *   link, radio idle    white, low and steady: powered, reachable, nothing loaded
  *   radio ready         green, steady: loaded and tuned, not streaming
- *   streaming           a colour for the sample rate, cyan through blue and violet to magenta
- *                       as it widens (40, 80, 160, 320 Msps): solid when every sample is carried
- *                       bit for bit, breathing when they are reduced to fewer bits (a paler
- *                       shade for that was tried and could not be told from the pure one), and
- *                       blinking slowly, lit as long as dark, when nothing leaves the port
+ *   streaming           a colour for the sample rate: cyan, blue and magenta for 40, 80 and
+ *                       160 Msps, a third of the circle between each and none nearer than that
+ *                       to green or red; and at 320 Msps, everything the receiver has, every
+ *                       colour: the hue going round once in LED_RAINBOW_SECONDS (4, 6 and 8 s
+ *                       were tried on a unit; 6 was chosen). The brightness says the rest:
+ *                       solid when every sample is carried bit for bit, breathing when they are
+ *                       reduced to fewer bits (a paler shade for that was tried and could not be
+ *                       told from the pure one), and blinking slowly, lit as long as dark, when
+ *                       nothing leaves the port
  *   warning             yellow blinking: the radio is loaded but a synthesizer is out of lock
  *   fault               red blinking: the stream ended by itself (the unit's own record of it)
  *
- * Green, yellow and red mean go, look and stop wherever they appear; the stream's colours keep
- * clear of them. A change of state fades over LED_FADE_SECONDS; a new instruction from the host
+ * Green, yellow and red mean go, look and stop wherever they stand still or blink on their own;
+ * a stream's fixed colours keep clear of them, and the rainbow only passes through. A change of state fades over LED_FADE_SECONDS; a new instruction from the host
  * (the state record rewritten) shows as a short lift towards white.
  */
 #define LED_BOOT_SECONDS	3.0
+#define LED_RAINBOW_SECONDS	6.0f
 #define LED_FADE_SECONDS	0.6
 #define LED_ACK_SECONDS		0.25
 
@@ -154,12 +159,12 @@ struct led_status {
 
 static inline struct led_look led_look_for(const struct led_status *s)
 {
-	static const struct led_look fault = { LED_BLINK, { 0, 1, 1 }, 1.0f, 0.5f };
-	static const struct led_look no_link = { LED_BREATHE, { 50, 1, 0.9f }, 3.0f, 0.85f };
-	static const struct led_look warning = { LED_BLINK, { 50, 1, 0.9f }, 1.2f, 0.35f };
-	static const struct led_look idle = { LED_STEADY, { 0, 0, 0.35f }, 0, 0 };
-	static const struct led_look ready = { LED_STEADY, { 120, 1, 0.7f }, 0, 0 };
-	struct led_look stream = { LED_STEADY, { 185, 1, 0.9f }, 0, 0 };
+	static const struct led_look fault = { LED_BLINK, { 0, 1, 1 }, 1.0f, 0.5f, 0 };
+	static const struct led_look no_link = { LED_BREATHE, { 50, 1, 0.9f }, 3.0f, 0.85f, 0 };
+	static const struct led_look warning = { LED_BLINK, { 50, 1, 0.9f }, 1.2f, 0.35f, 0 };
+	static const struct led_look idle = { LED_STEADY, { 0, 0, 0.35f }, 0, 0, 0 };
+	static const struct led_look ready = { LED_STEADY, { 120, 1, 0.7f }, 0, 0, 0 };
+	struct led_look stream = { LED_STEADY, { 180, 1, 0.9f }, 0, 0, 0 };
 
 	if (s->streaming && s->ended)
 		return fault;
@@ -171,14 +176,21 @@ static inline struct led_look led_look_for(const struct led_status *s)
 		return idle;
 	if (!s->streaming)
 		return ready;
-	stream.colour.h = s->rate_msps >= 320 ? 300 : s->rate_msps >= 160 ? 265 : s->rate_msps >= 80 ? 225 : 185;
+	if (s->rate_msps >= 320) {
+		stream.colour.h = 0;
+		stream.turn = LED_RAINBOW_SECONDS;
+	} else {
+		stream.colour.h = s->rate_msps >= 160 ? 300 : s->rate_msps >= 80 ? 240 : 180;
+	}
 	if (!s->flowing) {
 		stream.pattern = LED_BLINK;
 		stream.period = 2.0f;
 		stream.depth = 0.5f;
 	} else if (s->reduced) {
 		stream.pattern = LED_BREATHE;
-		stream.period = 3.0f;
+		/* Under the rainbow a breath of half its turn would dim the same two colours every
+		 * time; at 2.5 s every colour has its turn at full brightness (30 s for all). */
+		stream.period = stream.turn > 0 ? 2.5f : 3.0f;
 		stream.depth = 0.65f;
 	}
 	return stream;
@@ -236,7 +248,7 @@ struct led_engine {
 
 static inline void led_engine_start(struct led_engine *e, double t)
 {
-	static const struct led_look boot = { LED_RAINBOW, { 0, 1, 1 }, (float)LED_BOOT_SECONDS, 0 };
+	static const struct led_look boot = { LED_STEADY, { 0, 1, 1 }, 0, 0, (float)LED_BOOT_SECONDS };
 
 	e->from = e->to = boot;
 	e->changed = e->started = t;

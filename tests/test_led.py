@@ -97,36 +97,46 @@ class Led(unittest.TestCase):
         return base
 
     def test_each_state_has_its_look(self):
-        self.assertEqual(self.look(None, link=0), 'breathe 50 1.00 0.90 3.00 0.85', 'no link: yellow breathing')
-        self.assertEqual(self.look(None), 'steady 0 0.00 0.35 0.00 0.00', 'link, nothing loaded: low white')
-        self.assertEqual(self.look(self.record(loaded=False)), 'steady 0 0.00 0.35 0.00 0.00')
-        self.assertEqual(self.look(self.record()), 'steady 120 1.00 0.70 0.00 0.00', 'ready: green')
-        self.assertEqual(self.look(self.record(synth_locked=[True, False, True])), 'blink 50 1.00 0.90 1.20 0.35',
-                         'the captured band out of lock: yellow blinking')
-        self.assertEqual(self.look(self.record(synth_locked=[False, True, False])), 'steady 120 1.00 0.70 0.00 0.00',
-                         'another band out of lock is not this stream\'s trouble')
-        self.assertEqual(self.look(self.record(), link=0), 'breathe 50 1.00 0.90 3.00 0.85', 'the link first')
+        self.assertEqual(self.look(None, link=0), 'breathe 50 1.00 0.90 3.00 0.85 turn 0', 'no link: yellow breathing')
+        self.assertEqual(self.look(None), 'steady 0 0.00 0.35 0.00 0.00 turn 0', 'link, nothing loaded: low white')
+        self.assertEqual(self.look(self.record(loaded=False)), 'steady 0 0.00 0.35 0.00 0.00 turn 0')
+        self.assertEqual(self.look(self.record()), 'steady 120 1.00 0.70 0.00 0.00 turn 0', 'ready: green')
+        self.assertEqual(self.look(self.record(synth_locked=[True, False, True])),
+                         'blink 50 1.00 0.90 1.20 0.35 turn 0', 'the captured band out of lock: yellow blinking')
+        self.assertEqual(self.look(self.record(synth_locked=[False, True, False])),
+                         'steady 120 1.00 0.70 0.00 0.00 turn 0', 'another band out of lock is not this stream\'s trouble')
+        self.assertEqual(self.look(self.record(), link=0), 'breathe 50 1.00 0.90 3.00 0.85 turn 0', 'the link first')
 
     def test_a_stream_shows_its_rate_and_whether_it_is_lossless(self):
-        hues = {40: 185, 80: 225, 160: 265, 320: 300}
+        hues = {40: 180, 80: 240, 160: 300}
         for rate, hue in hues.items():
             bands = {'1': {'lo_hz': 2, 'sample_rate': rate * 1_000_000}}
             for packing in ('raw', 'half', 'full'):
                 self.assertEqual(self.look(self.record(packing=packing, bands=bands), flowing=1),
-                                 'steady %d 1.00 0.90 0.00 0.00' % hue, '%d Msps %s: solid' % (rate, packing))
+                                 'steady %d 1.00 0.90 0.00 0.00 turn 0' % hue, '%d Msps %s: solid' % (rate, packing))
             for packing in ('split', '16', '14', '8', '7'):
                 self.assertEqual(self.look(self.record(packing=packing, bands=bands), flowing=1),
-                                 'breathe %d 1.00 0.90 3.00 0.65' % hue, '%d Msps %s: breathing' % (rate, packing))
-        self.assertEqual(len(set(hues.values())), 4)
-        for hue in hues.values():       # clear of go, look and stop
-            for meaning in (0, 50, 120, 360):
-                self.assertGreaterEqual(abs(hue - meaning), 55)
+                                 'breathe %d 1.00 0.90 3.00 0.65 turn 0' % hue, '%d Msps %s: breathing' % (rate, packing))
+        for hue in hues.values():       # a third of the circle apart, and as clear of go, look and stop
+            for meaning in (0, 120, 360):
+                self.assertGreaterEqual(abs(hue - meaning), 60)
+
+    def test_320_msps_is_the_rainbow(self):
+        """Every colour, once round in six seconds; solid, breathing and blinking keep their meanings."""
+        bands = {'1': {'lo_hz': 2, 'sample_rate': 320_000_000}}
+        self.assertEqual(self.look(self.record(packing='half', bands=bands), flowing=1),
+                         'steady 0 1.00 0.90 0.00 0.00 turn 6', 'lossless: the brightness holds')
+        self.assertEqual(self.look(self.record(packing='split', bands=bands), flowing=1),
+                         'breathe 0 1.00 0.90 2.50 0.65 turn 6', 'reduced: it breathes, out of step with the turn')
+        self.assertEqual(self.look(self.record(packing='split', bands=bands), flowing=0),
+                         'blink 0 1.00 0.90 2.00 0.50 turn 6', 'nothing leaving the port')
+        self.assertNotEqual(6.0 / 2.5, round(6.0 / 2.5), 'or the same colours would dim every time')
 
     def test_a_stream_that_stalls_or_ends(self):
         streaming = self.record(packing='full')
-        self.assertEqual(self.look(streaming, flowing=0), 'blink 265 1.00 0.90 2.00 0.50', 'nothing leaving the port')
-        self.assertEqual(self.look(streaming, flowing=1, ended=1), 'blink 0 1.00 1.00 1.00 0.50', 'ended by itself: red')
-        self.assertEqual(self.look(self.record(), ended=1), 'steady 120 1.00 0.70 0.00 0.00',
+        self.assertEqual(self.look(streaming, flowing=0), 'blink 300 1.00 0.90 2.00 0.50 turn 0', 'nothing leaving the port')
+        self.assertEqual(self.look(streaming, flowing=1, ended=1), 'blink 0 1.00 1.00 1.00 0.50 turn 0', 'ended by itself: red')
+        self.assertEqual(self.look(self.record(), ended=1), 'steady 120 1.00 0.70 0.00 0.00 turn 0',
                          'a done file left by a stream the host stopped means nothing')
 
     def test_the_record_the_controller_writes(self):

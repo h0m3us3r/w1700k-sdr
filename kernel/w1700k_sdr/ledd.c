@@ -116,7 +116,7 @@ static int look(struct watch *w, struct led_status *s)
 
 static int report(struct watch *w)
 {
-	static const char *const patterns[] = { "steady", "breathing", "blinking", "rainbow" };
+	static const char *const patterns[] = { "steady", "breathing", "blinking" };
 	const struct timespec quarter = { .tv_nsec = 250000000L };
 	struct led_status s = { 0 };
 	struct led_look l;
@@ -128,9 +128,9 @@ static int report(struct watch *w)
 	l = led_look_for(&s);
 	printf("{\"at\":\"led\",\"link\":%d,\"loaded\":%d,\"streaming\":%d,\"ended\":%d,\"unlocked\":%d"
 	       ",\"flowing\":%d,\"reduced\":%d,\"rate_msps\":%d,\"look\":\"%s\",\"hue\":%.0f"
-	       ",\"saturation\":%.2f,\"brightness\":%.2f}\n",
+	       ",\"saturation\":%.2f,\"brightness\":%.2f,\"rainbow_seconds\":%.0f}\n",
 	       s.link, s.loaded, s.streaming, s.ended, s.unlocked, s.flowing, s.reduced, s.rate_msps,
-	       patterns[l.pattern], l.colour.h, l.colour.s, l.colour.b);
+	       patterns[l.pattern], l.colour.h, l.colour.s, l.colour.b, l.turn);
 	return 0;
 }
 
@@ -184,13 +184,13 @@ static void demo(float brightness, double seconds)
 		{ "no stream link (yellow, breathing)", { .link = 0 } },
 		{ "link up, radio idle (low white)", { .link = 1 } },
 		{ "radio ready (green)", { .link = 1, .loaded = 1 } },
-		{ "streaming 40 Msps, lossless (solid)", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 40 } },
-		{ "streaming 80 Msps, lossless", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 80 } },
-		{ "streaming 160 Msps, lossless", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 160 } },
+		{ "streaming 40 Msps, lossless (cyan, solid)", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 40 } },
+		{ "streaming 80 Msps, lossless (blue)", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 80 } },
+		{ "streaming 160 Msps, lossless (magenta)", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 160 } },
 		{ "streaming 160 Msps, reduced bits (the same colour, breathing)",
 		  { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .reduced = 1, .rate_msps = 160 } },
-		{ "streaming 320 Msps, lossless", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 320 } },
-		{ "streaming 320 Msps, reduced bits (breathing)",
+		{ "streaming 320 Msps, lossless (the rainbow, steady brightness)", { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .rate_msps = 320 } },
+		{ "streaming 320 Msps, reduced bits (the rainbow, breathing)",
 		  { .link = 1, .loaded = 1, .streaming = 1, .flowing = 1, .reduced = 1, .rate_msps = 320 } },
 		{ "streaming but nothing leaving the port (slow blink)",
 		  { .link = 1, .loaded = 1, .streaming = 1, .rate_msps = 320 } },

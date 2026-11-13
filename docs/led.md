@@ -13,16 +13,19 @@ separately, driven by `w1700k-led` on the unit from the moment it has booted.
 | **Yellow, breathing slowly** | No link on the stream port: no cable, or nothing at the far end. |
 | **White, low and steady** | Powered and reachable, the stream port linked; the radio is not loaded. |
 | **Green, steady** | Ready: the radio is loaded and tuned, and not streaming. |
-| **Cyan**, **blue**, **violet** or **magenta** | Streaming at 40, 80, 160 or 320 Msps. |
-| … that colour **solid** | Every sample is carried bit for bit (raw or packed, lossless). |
-| … that colour **breathing** | The samples are reduced to fewer bits to fit the link. |
-| … that colour **blinking slowly**, lit as long as dark | A stream was started but nothing is leaving the port. |
+| **Cyan**, **blue** or **magenta** | Streaming at 40, 80 or 160 Msps. |
+| **The rainbow**, every colour in turn, once round in six seconds | Streaming at 320 Msps: everything the receiver has. |
+| … at a **steady** brightness | Every sample is carried bit for bit (raw or packed, lossless). |
+| … **breathing** | The samples are reduced to fewer bits to fit the link. |
+| … **blinking slowly**, lit as long as dark | A stream was started but nothing is leaving the port. |
 | **Yellow, blinking** | Look: the radio is loaded, but the synthesizer of the band being captured is out of lock. |
 | **Red, blinking** | Stop: the stream ended by itself. The host's next request clears it. |
 | A short lift towards white | The host has just changed something: the unit heard it. |
 
-Green, yellow and red mean go, look and stop wherever they appear; the colours of a stream keep
-clear of them. A change from one state to another fades over about half a second.
+Green, yellow and red mean go, look and stop wherever they stand still or blink on their own. The
+fixed colours of a stream keep clear of them (a third of the circle from each other, and as far
+from green and red); the rainbow only passes through them, always moving. A change from one
+state to another fades over about half a second.
 
 ## How it decides
 
@@ -41,7 +44,7 @@ Every quarter of a second `w1700k-led` looks at what the unit knows of itself:
 ## How it shows it
 
 Colours are hue, saturation and brightness (`kernel/w1700k_sdr/ledd.h`). Every look is a colour
-in time (steady, breathing, blinking, or the hue going round), and every fade and mix is done on
+in time (a brightness that is steady, breathing or blinking, and a hue that stays or goes round), and every fade and mix is done on
 those three numbers: the hue goes the shorter way round, and white and dark, which have no hue of
 their own, take the hue of what they fade to or from, so a fade never passes through a colour
 neither end has. Only the last step turns a colour into the four emitters' levels: the hue's mix
@@ -56,7 +59,11 @@ costs under 1 % of one core.
 
 | Stream | Hue |
 | --- | --- |
-| 40 Msps | 185° (cyan) |
-| 80 Msps | 225° (blue) |
-| 160 Msps | 265° (violet) |
-| 320 Msps (and 640/2) | 300° (magenta) |
+| 40 Msps | 180° (cyan) |
+| 80 Msps | 240° (blue) |
+| 160 Msps | 300° (magenta) |
+| 320 Msps (and 640/2) | all of them: once round the circle in 6 s |
+
+The rainbow's turn was chosen on a unit from 4, 6 and 8 seconds. When it breathes (a reduced
+320 Msps stream), a breath takes 2.5 s rather than the fixed colours' 3: half the turn would dim
+the same two colours every time, and at 2.5 s each colour has its turn at full brightness.
