@@ -6,23 +6,24 @@ separately, driven by `w1700k-led` on the unit from the moment it has booted.
 
 ## Legend
 
-| What you see | What it means |
-| --- | --- |
-| White for a moment, then steady red | The loader and the kernel, before our software runs. Steady red that never changes: the unit did not finish booting, or `w1700k-led` is not running. |
-| The colours of the rainbow once round, brightening out of the dark (3 s) | Starting: the unit has booted and the LED is ours from here on. |
-| **Yellow, breathing slowly** | No link on the stream port: no cable, or nothing at the far end. |
-| **White, low and steady** | Powered and reachable, the stream port linked; the radio is not loaded. |
-| **Green, steady** | Ready: the radio is loaded and tuned, and not streaming. |
-| **Cyan**, **blue** or **magenta** | Streaming at 40, 80 or 160 Msps. |
-| **The rainbow**, every colour in turn, once round in six seconds | Streaming at 320 Msps: everything the receiver has. |
-| … at a **steady** brightness | Every sample is carried bit for bit (raw or packed, lossless). |
-| … **breathing** | The samples are reduced to fewer bits to fit the link. |
-| … **blinking slowly**, lit as long as dark | A stream was started but nothing is leaving the port. |
-| **Yellow, blinking** | Look: the radio is loaded, but the synthesizer of the band being captured is out of lock. |
-| **Red, blinking** | Stop: the stream ended by itself. The host's next request clears it. |
-| A short lift towards white | The host has just changed something: the unit heard it. |
+| | What you see | What it means |
+| --- | --- | --- |
+| <img src="images/led/loader.svg" width="48" height="20" alt="white, then red"> | White for a moment, then steady red | The loader and the kernel, before our software runs. Steady red that never changes: the unit did not finish booting, or `w1700k-led` is not running. |
+| <img src="images/led/start.svg" width="48" height="20" alt="every colour once, out of the dark"> | The colours of the rainbow once round, brightening out of the dark (3 s) | Starting: the unit has booted and the LED is ours from here on. |
+| <img src="images/led/no-link.svg" width="48" height="20" alt="yellow, breathing"> | **Yellow, breathing slowly** | No link on the stream port: no cable, or nothing at the far end. |
+| <img src="images/led/idle.svg" width="48" height="20" alt="white, low"> | **White, low and steady** | Powered and reachable, the stream port linked; the radio is not loaded. |
+| <img src="images/led/ready.svg" width="48" height="20" alt="green"> | **Green, steady** | Ready: the radio is loaded and tuned, and not streaming. |
+| <img src="images/led/rates.svg" width="48" height="20" alt="cyan, blue, magenta"> | **Cyan**, **blue** or **magenta** | Streaming at 40, 80 or 160 Msps. |
+| <img src="images/led/rainbow.svg" width="48" height="20" alt="every colour in turn"> | **The rainbow**, every colour in turn, once round in six seconds | Streaming at 320 Msps: everything the receiver has. |
+| <img src="images/led/steady.svg" width="48" height="20" alt="steady"> | … at a **steady** brightness | Every sample is carried bit for bit (raw or packed, lossless). |
+| <img src="images/led/breathing.svg" width="48" height="20" alt="breathing"> | … **breathing** | The samples are reduced to fewer bits to fit the link. |
+| <img src="images/led/stalled.svg" width="48" height="20" alt="blinking slowly"> | … **blinking slowly**, lit as long as dark | A stream was started but nothing is leaving the port. |
+| <img src="images/led/warning.svg" width="48" height="20" alt="yellow, blinking"> | **Yellow, blinking** | Look: the radio is loaded, but the synthesizer of the band being captured is out of lock. |
+| <img src="images/led/fault.svg" width="48" height="20" alt="red, blinking"> | **Red, blinking** | Stop: the stream ended by itself. The host's next request clears it. |
+| <img src="images/led/heard.svg" width="48" height="20" alt="a short lift towards white"> | A short lift towards white | The host has just changed something: the unit heard it. |
 
-Green, yellow and red mean go, look and stop wherever they stand still or blink on their own. The
+The swatches move as the LED does: they breathe, blink and turn at its pace (the one for a stream's
+brightness is drawn in cyan, and stands for any of the stream colours). Green, yellow and red mean go, look and stop wherever they stand still or blink on their own. The
 fixed colours of a stream keep clear of them (a third of the circle from each other, and as far
 from green and red); the rainbow only passes through them, always moving. A change from one
 state to another fades over about half a second.

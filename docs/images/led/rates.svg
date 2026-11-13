@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="20" viewBox="0 0 48 20" role="img">
+<title>cyan, blue, magenta</title>
+<clipPath id="c"><rect width="48" height="20" rx="4"/></clipPath>
+<g clip-path="url(#c)">
+<rect width="48" height="20" fill="#1c1c1c"/>
+<rect x="0" width="16" height="20" fill="#00ffff"/>
+<rect x="16" width="16" height="20" fill="#0000ff"/>
+<rect x="32" width="16" height="20" fill="#ff00ff"/>
+</g>
+<rect x="0.5" y="0.5" width="47" height="19" rx="3.5" fill="none" stroke="#808080" stroke-opacity="0.6"/>
+</svg>

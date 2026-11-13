@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="20" viewBox="0 0 48 20" role="img">
+<title>yellow, breathing every three seconds</title>
+<clipPath id="c"><rect width="48" height="20" rx="4"/></clipPath>
+<g clip-path="url(#c)">
+<rect width="48" height="20" fill="#1c1c1c"/>
+<rect x="0" width="48" height="20" fill="#ffd500">
+<animate attributeName="opacity" values="1;0.15;1" dur="3s" calcMode="spline" keyTimes="0;0.5;1" keySplines="0.45 0 0.55 1;0.45 0 0.55 1" repeatCount="indefinite"/>
+</rect>
+</g>
+<rect x="0.5" y="0.5" width="47" height="19" rx="3.5" fill="none" stroke="#808080" stroke-opacity="0.6"/>
+</svg>

@@ -80,20 +80,20 @@ been run on such a link. Details: [`host/w1700k/README.md`](host/w1700k/README.m
 The unit's status LED tells you what the receiver is doing without a screen
 (details in [docs/led.md](docs/led.md)).
 
-| What you see | What it means |
-| --- | --- |
-| Rainbow, once round, out of the dark | Starting: booted, the LED is ours from here |
-| Yellow, breathing | No link on the stream port |
-| White, low and steady | Powered and linked; radio not loaded |
-| Green, steady | Ready: radio loaded and tuned, not streaming |
-| Cyan / blue / magenta | Streaming at 40 / 80 / 160 Msps |
-| The rainbow, round every six seconds | Streaming at 320 Msps |
-| … at a steady brightness | lossless: every sample bit for bit |
-| … breathing | samples reduced to fewer bits to fit the link |
-| … slow blink | started, but nothing is leaving the port |
-| Yellow, blinking | Look: the captured band's synthesizer is out of lock |
-| Red, blinking | Stop: the stream ended by itself |
-| A short lift towards white | The host just changed something |
+| | What you see | What it means |
+| --- | --- | --- |
+| <img src="docs/images/led/start.svg" width="48" height="20" alt="every colour once, out of the dark"> | Rainbow, once round, out of the dark | Starting: booted, the LED is ours from here |
+| <img src="docs/images/led/no-link.svg" width="48" height="20" alt="yellow, breathing"> | Yellow, breathing | No link on the stream port |
+| <img src="docs/images/led/idle.svg" width="48" height="20" alt="white, low"> | White, low and steady | Powered and linked; radio not loaded |
+| <img src="docs/images/led/ready.svg" width="48" height="20" alt="green"> | Green, steady | Ready: radio loaded and tuned, not streaming |
+| <img src="docs/images/led/rates.svg" width="48" height="20" alt="cyan, blue, magenta"> | Cyan / blue / magenta | Streaming at 40 / 80 / 160 Msps |
+| <img src="docs/images/led/rainbow.svg" width="48" height="20" alt="every colour in turn"> | The rainbow, round every six seconds | Streaming at 320 Msps |
+| <img src="docs/images/led/steady.svg" width="48" height="20" alt="steady"> | … at a steady brightness | lossless: every sample bit for bit |
+| <img src="docs/images/led/breathing.svg" width="48" height="20" alt="breathing"> | … breathing | samples reduced to fewer bits to fit the link |
+| <img src="docs/images/led/stalled.svg" width="48" height="20" alt="blinking slowly"> | … slow blink | started, but nothing is leaving the port |
+| <img src="docs/images/led/warning.svg" width="48" height="20" alt="yellow, blinking"> | Yellow, blinking | Look: the captured band's synthesizer is out of lock |
+| <img src="docs/images/led/fault.svg" width="48" height="20" alt="red, blinking"> | Red, blinking | Stop: the stream ended by itself |
+| <img src="docs/images/led/heard.svg" width="48" height="20" alt="a short lift towards white"> | A short lift towards white | The host just changed something |
 
 White then steady red is the loader and the kernel before our software runs;
 red that never changes means the unit did not finish booting.
