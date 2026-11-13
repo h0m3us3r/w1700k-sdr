@@ -121,5 +121,89 @@ class SweepModes(unittest.TestCase):
         self.assertIn(320, ten, 'on 10 GbE there is a second packing to try at 320 Msps')
 
 
+class HostBench(unittest.TestCase):
+    """tools/host_bench.py: what it makes of the counters it reads each second."""
+
+    @classmethod
+    def setUpClass(cls):
+        import host_bench
+        cls.bench = host_bench
+
+    def sample(self, slices=156250, lost=0, missed=0, clock=2.0, celsius=70, dt=1.0):
+        s = {k: 0 for k in self.bench.SERVICE_COUNTERS}
+        s.update(slices=slices, lost=lost, missed=missed, clock_ghz=clock, celsius=celsius, dt=dt)
+        return s
+
+    def test_totals_and_how_the_loss_was_spread(self):
+        samples = [self.sample(), self.sample(lost=4, missed=2), self.sample(), self.sample(), self.sample(),
+                   self.sample(lost=10, missed=5, celsius=75), self.sample()]
+        t = self.bench.summarise(samples, 7.0)
+        self.assertEqual((t['slices'], t['lost'], t['adapter_missed']), (7 * 156250, 14, 7))
+        self.assertEqual(t['msps'], 320.0)
+        self.assertAlmostEqual(t['lost_percent'], 100 * 14 / (7 * 156250), places=5)
+        self.assertEqual((t['seconds_with_loss'], t['worst_second'], t['longest_clean_seconds']), (2, 10, 3))
+        self.assertEqual((t['clock_ghz'], t['celsius_max']), (2.0, 75))
+
+    def test_nothing_measured_and_an_adapter_that_does_not_count(self):
+        t = self.bench.summarise([], 0.0)
+        self.assertEqual((t['slices'], t['lost_percent'], t['msps'], t['adapter_missed']), (0, None, 0.0, None))
+        t = self.bench.summarise([self.sample(missed=None)], 1.0)
+        self.assertIsNone(t['adapter_missed'])
+
+    def test_what_an_adapter_missed_by_any_of_its_names(self):
+        self.assertEqual(self.bench.missed({'rx_packets': 9, 'rx_missed': 3, 'tx_errors': 1}), 3)
+        self.assertEqual(self.bench.missed({'rx_fifo_errors': 2, 'rx_no_buffer_count': 5}), 7)
+        self.assertIsNone(self.bench.missed({'rx_packets': 9}), 'a driver that does not count them')
+        self.assertIsNone(self.bench.missed({}))
+
+    def test_cpu_shares_between_two_readings(self):
+        before = {0: (100, 1000, 10), 7: (500, 1000, 400)}
+        after = {0: (150, 1100, 20), 7: (595, 1100, 482)}
+        self.assertEqual(self.bench.busy_percent(before, after), {0: (50, 10), 7: (95, 82)})
+        self.assertEqual(self.bench.busy_percent(before, before), {0: (0, 0), 7: (0, 0)})
+
+    def test_the_programs_that_used_the_most(self):
+        before = {1: ('w1700k-stream', 100), 2: ('firefox', 50), 3: ('firefox', 10), 4: ('idle', 5)}
+        after = {1: ('w1700k-stream', 100 + 3 * self.bench.TICK * 10), 2: ('firefox', 50 + self.bench.TICK * 5),
+                 3: ('firefox', 10 + self.bench.TICK * 5), 4: ('idle', 5), 9: ('new', 999)}
+        self.assertEqual(self.bench.busiest(before, after, 10.0), [('w1700k-stream', 300), ('firefox', 100)])
+
+    def test_where_an_interfaces_packets_land(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sys_root, proc_root = Path(tmp, 'sys'), Path(tmp, 'proc')
+            controller = sys_root / 'devices' / 'pci0000:00' / '0000:00:0d.0'
+            (controller / 'usb2' / '2-2' / '2-2:1.0').mkdir(parents=True)
+            for number in (130, 125):
+                (controller / 'msi_irqs' / str(number)).mkdir(parents=True)
+            net = sys_root / 'class' / 'net' / 'enx0'
+            (net / 'queues' / 'rx-0').mkdir(parents=True)
+            (net / 'queues' / 'rx-0' / 'rps_cpus').write_text('7f\n')
+            (net / 'device').symlink_to(controller / 'usb2' / '2-2' / '2-2:1.0')
+            (proc_root / 'irq' / '125').mkdir(parents=True)
+            (proc_root / 'irq' / '125' / 'effective_affinity_list').write_text('7\n')
+            self.assertEqual(self.bench.receive_placement('enx0', str(sys_root), str(proc_root)),
+                             {'queues': 1, 'irq': 125, 'irq_cpu': '7', 'steering': '7f'})
+            self.assertEqual(self.bench.receive_placement('none', str(sys_root), str(proc_root)),
+                             {'queues': 0, 'irq': None, 'irq_cpu': None, 'steering': None})
+
+    def test_the_report_in_words(self):
+        samples = [self.sample(), self.sample(lost=4, missed=2), self.sample(slices=0)]
+        flowing = samples[:2]
+        report = {'when': '2026-11-13T15:00:00-08:00', 'commit': 'abc1234', 'interface': 'enx0', 'mtu': 9216,
+                  'link_mbps': 5000, 'placement': {'queues': 1, 'irq': 125, 'irq_cpu': '7', 'steering': '7f'},
+                  'power_limits': {'long_term': 200.0, 'short_term': 15.0}, 'cpus': 8,
+                  'runs': [{'rate_msps': 320, 'packing': 'split', 'problem': '', 'watched': True, 'idle_seconds': 1,
+                            'samples': samples, 'totals': self.bench.summarise(flowing, 2.0),
+                            'cpus': {0: (50, 10), 7: (95, 82)}, 'busiest': [('w1700k-stream', 259)]}]}
+        text = self.bench.text_report(report)
+        for part in ('interrupt on CPU 7, steering mask 7f', 'long-term 200 W, short-term 15 W',
+                     '320 Msps, packing split, 2 s watched: 320.0 Msps arrived', 'no stream arrived in 1 of those',
+                     'lost 4 (0.00128 %)', 'the adapter missed 2 datagrams (1.00 a second)',
+                     'seconds with any loss: 1 of 3', '0:50(10) 7:95(82)', 'w1700k-stream 259 %'):
+            self.assertIn(part, text)
+        self.assertIn('  10 s', self.bench.progress_line([self.sample()] * 10, 10.2))
+
+
+
 if __name__ == '__main__':
     unittest.main()

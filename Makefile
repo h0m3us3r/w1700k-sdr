@@ -13,7 +13,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: all toolchain linux sdr rootfs loader dumper restorer images firmware host check sweep \
+.PHONY: all toolchain linux sdr rootfs loader dumper restorer images firmware host check sweep bench \
 	clean distclean
 
 all: images dumper restorer firmware host
@@ -75,6 +75,10 @@ check:
 # with w1700k-stream running on this host. About five minutes.
 sweep:
 	$(PYTHON) tools/unit_sweep.py
+
+# Watch the stream this host is taking in, until Ctrl-C, and say how it fared and under what load.
+bench:
+	$(PYTHON) tools/host_bench.py
 
 # Remove build outputs but keep downloads and prepared sources.
 clean:

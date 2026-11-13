@@ -21,7 +21,8 @@ adapter on a 10 Gbit/s USB port (USB 3.2 Gen 2, one lane), cabled to a W1700K2's
 | 10 Gbit/s | not reached; see "The missing firmware" |
 
 `make sweep` in the repository's root runs every one of these on a unit and says which pass
-(30 of 30 here).
+(30 of 30 here); `make bench` watches the stream over minutes and says what the host lost and
+under what load.
 
 ## The driver
 

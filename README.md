@@ -136,7 +136,7 @@ between them, in 1.22 kHz bins.*
 | [`init/`](init/README.md) | Installation from stock, updates, recovery, return to stock |
 | [`include/hw/`](include/hw/README.md) | Register reference: every known MT7996, A-die and AN7581 register, as C headers |
 | [`docs/`](docs/) | [Architecture](docs/architecture.md), [the front LED](docs/led.md), [roadmap](docs/roadmap.md) |
-| `tests/`, `tools/` | The test suite and its report page (`tools/test_report.py`), the on-unit sweep of the stream modes (`tools/unit_sweep.py`), a trial of the host's receive settings (`tools/host_rx_trial`), and the driver and notes for a USB adapter on the stream link ([`tools/r8152-rtl8159`](tools/r8152-rtl8159/README.md)) |
+| `tests/`, `tools/` | The test suite and its report page (`tools/test_report.py`), the on-unit sweep of the stream modes (`tools/unit_sweep.py`), a trial of the host's receive settings (`tools/host_rx_trial`), a benchmark of what the host takes in (`tools/host_bench.py`), and the driver and notes for a USB adapter on the stream link ([`tools/r8152-rtl8159`](tools/r8152-rtl8159/README.md)) |
 
 ## Getting started
 
@@ -198,6 +198,7 @@ downloaded or needed.
 ```sh
 make check        # every test; needs no unit
 make sweep        # every stream mode on a real unit, about five minutes
+make bench        # watch the stream this host takes in, until Ctrl-C, and report
 ```
 
 `make check` runs the suite as `python3 -m unittest discover -s tests` does and
@@ -215,6 +216,16 @@ each, and checks that the samples arrive at the rate set, that next to none are
 lost, that they are the kind the packing makes, that their level is plausible,
 that the synthesizer is in lock, and that the front LED shows the mode. Its
 results join the report page.
+
+`make bench` (`tools/host_bench.py`) measures the host, not the unit. Use the
+receiver as you mean to, the spectrum page open in a browser for instance, and
+let it run beside: it changes nothing, and every second writes down what the
+stream service filed and lost, what the adapter itself missed, how busy each
+CPU was and at what clock, the temperature and the power limit. A line every
+ten seconds, and when stopped the whole of it: the share lost, how the loss was
+spread over the seconds, which CPU took the packets, and which programs used
+the most CPU, in `tests/build/host-bench.txt` and `.json`. With
+`--run 320,160` it starts and stops the streams itself.
 
 ## Read before use
 
