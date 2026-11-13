@@ -149,7 +149,11 @@ with no CRC or other receive error counted. That loop cannot show the whole
 9.75 Gbit/s of a 320 Msps stream: every frame sent comes back in, the CPU that
 handles the QDMA takes about 86,000 of them a second, and the export stops
 after two seconds as it falls behind at that same rate (5.4 Gbit/s; one 200 ms
-sample reached 9.5). That takes a receiver that is not the unit itself.
+sample reached 9.5). Cabled to a second W1700K instead (stock firmware, nothing
+else connected to it), the same stream ran for two minutes at a mean of
+9.66 Gbit/s: 19.48 million frames, 150.8 GB, no transmit error or drop, the
+link at 10 Gbit/s throughout. What that unit made of the frames was not looked
+at.
 
 A register reader for the unit needs no driver support: `SIOCGMIIREG` on
 `lan3`, whose own PHY is on the same bus, reaches any address on it, clause 45
