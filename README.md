@@ -152,7 +152,7 @@ sudo init/host/link up IFACE           # 192.168.1.10/24 on the NIC cabled to la
 sudo init/host/tftp-forward enable IFACE
 init/install                           # back up the NAND, install, save the radio calibration
 
-sudo init/host/link up IFACE10G 10.77.0.10/24 9216    # the 10 GbE stream link
+sudo init/host/link keep IFACE10G 10.77.0.10/24 9216  # the 10 GbE stream link: address, jumbo frames
 host/stream/build/w1700k-stream &                      # the stream, for every consumer on this host
 host/spectrum/build/w1700k-spectrum --controller "host/bin/w1700k serve" --listen 0.0.0.0:8073
 ```

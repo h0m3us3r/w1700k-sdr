@@ -7,10 +7,12 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from unittest import mock
 
 import host_fake
 from host_fake import RADIO_ERR_HW, RADIO_ERR_ORDER
 from w1700k import radio, rf, stream
+from w1700k.stream import StreamError
 from w1700k.controller import (LOCK_MARGIN_HZ, LOCK_RESOLUTION_HZ, ControlError, Controller, handle, packing_fits,
                                packing_for, serve)
 
@@ -166,6 +168,28 @@ class Streaming(ControllerTest):
         self.assertFalse(self.dev.streaming or self.dev.route_armed)
         self.assertIsNone(self.ctl.state()['stream']['packing'])
         self.assertIn('stream stopped: 1000 chunks in 1.0 s', self.logs())
+
+    def test_a_stream_this_host_would_drop_is_not_started(self):
+        """With no destination MAC configured the stream comes to this host, whose interface must
+        take its packets: one with a 1500-byte MTU drops 8 KiB slices and says nothing."""
+        self.loaded(0, narrow0=True)
+        self.ctl.config = replace(self.config, export=replace(self.config.export, dst_mac=None))
+        link = ('enx0', '02:00:00:00:00:02', 1500)
+        with mock.patch('w1700k.controller.local_link_for', return_value=link) as lookup:
+            with self.assertRaisesRegex(StreamError, "this host's enx0 has an MTU of 1500, and packing raw sends "
+                                                     'packets of 8236 bytes.*sudo init/host/link up enx0 '
+                                                     r'10\.77\.0\.10/24 9216'):
+                self.ctl.start()
+            lookup.assert_called_with('10.77.0.10')
+            self.assertFalse(self.dev.streaming)
+            self.assertEqual(self.dev.radio_commands, [], 'refused before anything was asked of the radio')
+            lookup.return_value = ('enx0', '02:00:00:00:00:02', 9000)
+            self.ctl.start()
+            self.assertIn('--export eth1 10.77.0.1 10.77.0.10 02:00:00:00:00:02 7700', ' '.join(self.dev.pump_argv))
+            self.ctl.stop()
+            # seven-bit slices of 1792 bytes: five to a datagram of the unit's 9216-byte MTU
+            with self.assertRaisesRegex(StreamError, 'packing 7 sends packets of 9068 bytes'):
+                self.ctl.start('7')
 
     def test_raw_then_half_without_reload(self):
         self.loaded(0, narrow0=True)

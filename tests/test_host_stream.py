@@ -123,6 +123,23 @@ class Link(unittest.TestCase):
         self.assertEqual(stream.mtu_needed('8', 4000), 2048 + 44)
         self.assertEqual(stream.mtu_needed('split'), 8236, 'the driver\'s export runs too')
 
+    def test_largest_packet_and_the_receiving_mtu(self):
+        self.assertEqual(stream.largest_packet('raw', None, 9216), 8236)
+        self.assertEqual(stream.largest_packet('full', None, 9216), 8236)
+        self.assertEqual(stream.largest_packet('split', None, 9216), 8236)
+        self.assertEqual(stream.largest_packet('14', None, 9216), 28 + 2 * 3600, 'two slices to a datagram')
+        self.assertEqual(stream.largest_packet('7', None, 9216), 28 + 5 * 1808)
+        self.assertEqual(stream.largest_packet('7', None, 1900), 28 + 1808, 'never less than one')
+        self.assertEqual(stream.largest_packet('14'), 3628, "the unit port's MTU not known: a slice")
+        self.assertEqual(stream.largest_packet('raw', 1456, 9216), 1500)
+        self.assertEqual(stream.largest_packet('8', 1456, 9216), 1500)
+        stream.check_host_mtu('enx0', 9000, '10.77.0.10', 'raw', None, 9216)
+        stream.check_host_mtu('enx0', 1500, '10.77.0.10', 'raw', 1456, 9216)
+        with self.assertRaisesRegex(stream.StreamError, 'enx0 has an MTU of 1500.*8236 bytes.*init/host/link up enx0'):
+            stream.check_host_mtu('enx0', 1500, '10.77.0.10', 'raw', None, 9216)
+        with self.assertRaisesRegex(stream.StreamError, '9068 bytes'):
+            stream.check_host_mtu('enx0', 9000, '10.77.0.10', '7', None, 9216)
+
     def test_interface_speed(self):
         unit = host_fake.FakeUnit()
         s = stream.Stream(unit)

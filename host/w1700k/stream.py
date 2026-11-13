@@ -122,6 +122,28 @@ def mtu_needed(packing, piece=None):
     return (min(piece, chunk) if piece else chunk) + HEADERS
 
 
+def largest_packet(packing, piece=None, unit_mtu=None):
+    """The largest IP packet of a stream, which the receiving interface's MTU must admit. The
+    senders put as many whole reduced slices into a datagram as the unit port's MTU holds
+    (stream_argv's --datagram), each behind its own export header."""
+    need = mtu_needed(packing, piece)
+    if packing in REDUCED and not piece and unit_mtu:
+        record = REDUCED_CHUNK[packing] + HEADERS - IP_UDP
+        need = IP_UDP + max(1, (unit_mtu - IP_UDP) // record) * record
+    return need
+
+
+def check_host_mtu(interface, mtu, address, packing, piece=None, unit_mtu=None):
+    """check_mtu for the receiving end, where the controller runs on the host the stream goes to.
+    An interface drops what is larger than its MTU without a word: the unit sends, and nothing
+    arrives."""
+    need = largest_packet(packing, piece, unit_mtu)
+    if mtu < need:
+        raise StreamError(f"this host's {interface} has an MTU of {mtu}, and packing {packing} sends packets of "
+                          f'{need} bytes, which it would drop: sudo init/host/link up {interface} {address}/24 9216'
+                          + ('' if piece else ' (or export.piece for small datagrams)'))
+
+
 @dataclass(frozen=True)
 class Result:
     status: int

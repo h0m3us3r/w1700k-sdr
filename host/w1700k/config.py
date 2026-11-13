@@ -149,8 +149,9 @@ def load(path=None):
         raise ConfigError(f'{path}: {exc}')
 
 
-def local_mac_for(ip):
-    """The MAC of the local interface holding `ip` (iproute2 JSON), for the export's destination."""
+def local_link_for(ip):
+    """The local interface holding `ip` (iproute2 JSON), where the export is sent: its name, MAC
+    and MTU."""
     try:
         out = subprocess.run(['ip', '-j', '-4', 'addr', 'show'], capture_output=True, text=True, check=True,
                              stdin=subprocess.DEVNULL).stdout
@@ -160,10 +161,16 @@ def local_mac_for(ip):
     for interface in interfaces:
         if any(a.get('local') == ip for a in interface.get('addr_info', [])):
             try:
-                return Path('/sys/class/net', interface['ifname'], 'address').read_text().strip().lower()
-            except (KeyError, OSError) as exc:
-                raise ConfigError(f'cannot read the MAC of the interface holding {ip}: {exc}')
+                name = interface['ifname']
+                return (name, Path('/sys/class/net', name, 'address').read_text().strip().lower(),
+                        int(Path('/sys/class/net', name, 'mtu').read_text()))
+            except (KeyError, OSError, ValueError) as exc:
+                raise ConfigError(f'cannot read the MAC and MTU of the interface holding {ip}: {exc}')
     raise ConfigError(f'no local interface holds {ip}; configure it or set export.dst_mac')
+
+
+def local_mac_for(ip):
+    return local_link_for(ip)[1]
 
 
 DATA_DIR = Path(os.environ.get('XDG_DATA_HOME', '~/.local/share')).expanduser() / 'w1700k'

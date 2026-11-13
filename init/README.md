@@ -32,7 +32,13 @@ on port 69 themselves; root then also owns the files they write, under root's
 home unless `--data-dir` and `--authorized-key` say otherwise.
 
 For the 10 GbE IQ link (unit `eth1`, 10.77.0.1), give the host side its
-address and jumbo frames: `sudo init/host/link up IFACE10G 10.77.0.10/24 9216`.
+address and jumbo frames: `sudo init/host/link keep IFACE10G 10.77.0.10/24 9216`.
+`up` sets them until the interface goes away; `keep` also writes them into the
+NetworkManager connection of that interface, so a reboot or a USB adapter
+plugged in again comes up the same way. That matters: an adapter back at an
+MTU of 1500 drops the stream's 8 KiB packets without a word. The controller
+checks it where it runs on the receiving host, and refuses to start a stream
+its interface would drop, naming this command.
 
 Settings (serial device, addresses, ports, SSH key) default as shown in
 [`install.example.json`](install.example.json); copy it to

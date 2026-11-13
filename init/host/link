@@ -4,6 +4,7 @@
 #
 #   sudo init/host/link up IFACE [CIDR [MTU]]     # default 192.168.1.10/24, MTU unchanged
 #   sudo init/host/link down IFACE [CIDR]
+#   sudo init/host/link keep IFACE [CIDR [MTU]]   # the same as `up`, and for every time IFACE appears
 #
 # The management link (unit lan3) uses 192.168.1.10/24; the 10 GbE IQ link (unit
 # eth1) uses 10.77.0.10/24 with MTU 9216. Only the named address is added or
@@ -13,12 +14,48 @@
 # maximum: the stream is about 150,000 datagrams/s, so a default 512-entry ring
 # holds 3.4 ms, and a host stall longer than that (a parallel build, say) drops
 # slices before any socket sees them.
+#
+# `up` lasts until the interface goes away: a reboot, or a USB adapter pulled and
+# plugged in again, which comes back with an MTU of 1500 and drops the stream's
+# 8 KiB packets without a word. `keep` also writes the address, the MTU and the
+# ring into the NetworkManager connection that manages IFACE (made if there is
+# none), so that they are applied whenever it appears. Without NetworkManager it
+# says so, and `up` has to be repeated.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "$0: run as root (sudo)" >&2; exit 1; }
-[ $# -ge 2 ] || { echo "usage: $0 up|down IFACE [CIDR [MTU]]" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 up|down|keep IFACE [CIDR [MTU]]" >&2; exit 2; }
 action=$1 iface=$2 cidr=${3:-192.168.1.10/24} mtu=${4:-}
+
+keep()	# the connection that manages $iface keeps $cidr, $mtu and the largest receive ring
+{
+	command -v nmcli >/dev/null && nmcli -t general status >/dev/null 2>&1 || {
+		echo "$0: NetworkManager does not run here: nothing kept; repeat \`$0 up\` when $iface comes back" >&2
+		return 1
+	}
+	[ -e "/sys/class/net/$iface" ] || { echo "$0: no interface $iface" >&2; return 1; }
+	con=$(nmcli -g GENERAL.CONNECTION device show "$iface" 2>/dev/null)
+	if [ -z "$con" ]; then
+		con="w1700k-$iface"
+		nmcli -t connection add type ethernet ifname "$iface" con-name "$con" autoconnect yes \
+			ipv4.method manual ipv4.addresses "$cidr" ipv4.never-default yes ipv6.method disabled >/dev/null
+	else
+		nmcli -g ipv4.addresses connection show "$con" | tr ',' '\n' | grep -q "^ *${cidr%/*}/" ||
+			nmcli connection modify "$con" +ipv4.addresses "$cidr"
+		case $(nmcli -g ipv4.method connection show "$con") in
+		disabled|link-local) nmcli connection modify "$con" ipv4.method manual ;;
+		esac
+	fi
+	if [ -n "$mtu" ]; then
+		nmcli connection modify "$con" 802-3-ethernet.mtu "$mtu"
+		rx=$(ethtool -g "$iface" 2>/dev/null | awk '/^RX:/ { print $2; exit }')
+		[ -z "$rx" ] || nmcli connection modify "$con" ethtool.ring-rx "$rx" 2>/dev/null ||
+			echo "$0: this NetworkManager does not keep the receive ring" >&2
+	fi
+	echo "$0: kept in the NetworkManager connection \"$con\""
+}
+
 case "$action" in
-up)
+up|keep)
 	[ -z "$mtu" ] || ip link set dev "$iface" mtu "$mtu"
 	if [ -n "$mtu" ] && command -v ethtool >/dev/null; then
 		rx=$(ethtool -g "$iface" 2>/dev/null | awk '/^RX:/ { print $2; exit }')
@@ -28,13 +65,14 @@ up)
 	ip link set dev "$iface" up
 	ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/" ||
 		ip address add "$cidr" dev "$iface"
+	[ "$action" = up ] || keep
 	;;
 down)
 	! ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/" ||
 		ip address del "$cidr" dev "$iface"
 	;;
 *)
-	echo "usage: $0 up|down IFACE [CIDR [MTU]]" >&2
+	echo "usage: $0 up|down|keep IFACE [CIDR [MTU]]" >&2
 	exit 2
 	;;
 esac

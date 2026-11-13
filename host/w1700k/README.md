@@ -27,7 +27,7 @@ Build the firmware first (`make -C firmware`); the host reads `firmware/build/fi
 | `eeprom` | see below | the unit's calibration EEPROM |
 | `firmware_dir` | `<repo>/firmware/build` | built firmware set |
 | `export.interface`, `src_ip`, `dst_ip` | `eth1`, `10.77.0.1`, `10.77.0.10` | 10 GbE path |
-| `export.dst_mac` | MAC of the local interface holding `dst_ip` | |
+| `export.dst_mac` | MAC of the local interface holding `dst_ip` | unset, the stream comes to this host, and a start is refused where that interface's MTU is below the stream's packets (`sudo init/host/link keep IFACE 10.77.0.10/24 9216`) |
 | `export.port`, `export.ports` | `7700`, `8` | UDP destination port; source ports cycle over `ports` |
 | `export.link_mbps` | the unit port's negotiated speed | what a stream may put on the link, Mbit/s, where that is less (a USB adapter that carries less than its Ethernet side links at) |
 | `export.packing` | automatic | `raw`, `half`, `full`, `split`, or `16`, `14`, `8`, `7` (bits per I/Q pair): every stream's packing set by hand, where the automatic choice is wrong for a link |

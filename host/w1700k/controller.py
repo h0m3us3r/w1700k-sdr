@@ -47,12 +47,12 @@ import threading
 import time
 
 from . import config, firmware, rf, wm
-from .config import local_mac_for
+from .config import local_link_for
 from dataclasses import replace
 
 from .radio import DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image
 from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MAX_DATAGRAMS, SPLIT, Result,
-                     Stream, StreamError, datagram_rate, wire_rate)
+                     Stream, StreamError, check_host_mtu, datagram_rate, wire_rate)
 from .unit import Unit
 
 STATE_FILE = '/tmp/w1700k-state.json'
@@ -665,12 +665,16 @@ class Controller:
         if not self.loaded:
             self._load()
         export = self.config.export
-        dst_mac = export.dst_mac or local_mac_for(export.dst_ip)
+        # Without a destination MAC in the configuration, the stream goes to this host.
+        here = None if export.dst_mac else local_link_for(export.dst_ip)
+        dst_mac = export.dst_mac or here[1]
         speed, mtu = self.stream.check_interface(export.interface)
         self.link_mbps = min((v for v in (speed, export.link_mbps) if v), default=None)
         manual = packing or export.packing
         packing = self._packing_at(self.bands[self.band].sample_rate, manual)
         self.stream.check_mtu(export.interface, mtu, packing, export.piece)
+        if here:
+            check_host_mtu(here[0], here[2], export.dst_ip, packing, export.piece, mtu)
         self.stream.install_own(self._wm(), packing)
         self.stream.launch(export, dst_mac, packing, mtu)
         self.packing, self.packing_manual = packing, manual
