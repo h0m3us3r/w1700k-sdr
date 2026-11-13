@@ -4,6 +4,7 @@ protocol."""
 import io
 import json
 import threading
+import time
 import unittest
 from dataclasses import replace
 
@@ -693,6 +694,138 @@ class Serve(ControllerTest):
         self.assertEqual(self.ctl.state()['radio']['band'], 1)
         handle(self.ctl, {'op': 'gain', 'lna': 1, 'lpf': 2})
         self.assertEqual(self.dev.rf_ops[-1], (rf.RF_GAIN, 1, 1, 2))
+
+class Sessions(ControllerTest):
+    """Two controllers on one unit (the spectrum page's and a SoapySDR program's, say): each reads
+    the unit's state record before an operation and whenever it polls, and adopts the other's
+    changes; a long operation is written there first, and the other waits its turn."""
+
+    STATE = '/tmp/w1700k-state.json'
+
+    def other(self):
+        events = []
+        other = Controller(self.config, emit=events.append, unit=self.unit)
+        other.attach()
+        self.addCleanup(other.close)
+        events.clear()
+        return other, events
+
+    def record(self):
+        return json.loads(self.unit.files[self.STATE])
+
+    def write(self, **changes):
+        self.unit.files[self.STATE] = json.dumps(dict(self.record(), **changes)).encode()
+
+    def test_a_poll_adopts_what_another_session_changed(self):
+        self.loaded(1)
+        other, events = self.other()
+        self.ctl.tune(5_300_000_000)
+        self.assertNotEqual(other.state()['rf']['lo_hz'], self.ctl.state()['rf']['lo_hz'], 'not before it looks')
+        other.poll()
+        self.assertEqual(other.state()['rf'], self.ctl.state()['rf'])
+        self.assertEqual(events[-1]['state']['rf']['lo_hz'], self.ctl.state()['rf']['lo_hz'], 'and it says so')
+        events.clear()
+        other.poll()
+        self.assertEqual(events, [], 'nothing new: nothing said')
+        other.gain(lna=3, lpf=4)
+        self.ctl.poll()
+        self.assertEqual((self.ctl.state()['rf']['lna'], self.ctl.state()['rf']['lpf']), (3, 4), 'and the other way')
+
+    def test_an_operation_acts_on_the_receiver_as_it_is_now(self):
+        self.loaded(1)
+        other, _ = self.other()
+        self.ctl.configure(0, sample_rate=40_000_000)
+        other.start()                                       # without a poll in between
+        state = other.state()
+        self.assertEqual((state['radio']['band'], state['stream']['sample_rate'], state['stream']['packing']),
+                         (0, 40_000_000, 'raw'), 'the band and rate the first session set, not its own stale ones')
+        self.ctl.poll()
+        self.assertEqual(self.ctl.state()['stream'], state['stream'])
+
+    def test_a_stream_another_session_stopped_did_not_end_by_itself(self):
+        self.loaded(0, narrow0=True)
+        other, events = self.other()
+        self.ctl.start()
+        other.poll()
+        self.assertTrue(other.state()['stream']['running'])
+        self.ctl.stop()
+        other.poll()
+        self.assertEqual((other.state()['stream']['running'], other.state()['error']), (False, None))
+        self.assertFalse([e for e in events if e.get('event') == 'log' and e['level'] == 'error'])
+
+    def test_a_long_operation_is_written_to_the_unit_while_it_runs(self):
+        seen = []
+        push = self.unit.push
+
+        def watching(data, remote, mode=None):
+            if remote == self.STATE:
+                record = json.loads(data)
+                seen.append((record['busy'], record['session'] == self.ctl.session))
+            return push(data, remote, mode)
+
+        self.unit.push = watching
+        self.ctl.load(1)
+        self.assertEqual(seen[0], ('loading', True), 'before anything else')
+        self.assertEqual(seen[-1], (None, True), 'and taken back at the end')
+        self.assertTrue(all(busy == 'loading' for busy, _ in seen[:-1]))
+        seen.clear()
+        self.ctl.tune(5_300_000_000)
+        self.assertEqual({busy for busy, _ in seen}, {None}, 'a short one is not')
+
+    def test_another_sessions_long_operation_is_shown_and_waited_for(self):
+        self.loaded(1)
+        other, events = self.other()
+        self.write(session='someone', busy='configuring', busy_since=time.monotonic())
+        other.poll()
+        self.assertEqual(other.state()['busy'], 'configuring')
+
+        def done():
+            time.sleep(0.5)
+            self.write(busy=None, busy_since=None)
+
+        waiter = threading.Thread(target=done)
+        began = time.monotonic()
+        waiter.start()
+        other.tune(5_300_000_000)
+        waiter.join()
+        self.assertGreaterEqual(time.monotonic() - began, 0.5, 'the tune waited for it')
+        self.assertIsNone(other.state()['busy'])
+        self.assertEqual(other.state()['rf']['lo_hz'], radio.actual_lo(1, 5_300_000_000))
+
+    def test_a_stream_is_not_called_ended_while_another_session_restarts_it(self):
+        self.loaded(0, narrow0=True)
+        self.ctl.start()
+        other, events = self.other()
+        self.write(session='someone', busy='configuring', busy_since=time.monotonic())
+        self.unit.end_stream()                              # that session stopped it, and has not said so yet
+        other.poll()
+        self.assertIsNone(other.state()['error'])
+        self.assertTrue(other.state()['stream']['running'], 'as the record still says')
+
+    def test_a_session_that_died_in_a_long_operation_is_not_waited_for_for_ever(self):
+        self.loaded(1)
+        other, _ = self.other()
+        self.write(session='someone', busy='loading', busy_since=time.monotonic() - 1000)
+        other.poll()
+        self.assertIsNone(other.state()['busy'])
+        began = time.monotonic()
+        other.tune(5_300_000_000)
+        self.assertLess(time.monotonic() - began, 2)
+
+    def test_a_reboot_of_the_unit_is_noticed(self):
+        self.loaded(1)
+        self.unit.boot_id = 'the next boot'
+        del self.unit.files[self.STATE]
+        self.ctl.poll()
+        self.assertFalse(self.ctl.state()['radio']['loaded'])
+        self.assertIn('the unit has rebooted: its radio is not loaded', self.logs())
+
+    def test_the_units_own_reader_of_the_record_still_finds_what_it_looks_for(self):
+        """w1700k-led takes the first match of each key: what a session adds comes after them all."""
+        self.loaded(1)
+        keys = list(self.record())
+        for key in ('session', 'busy', 'busy_since'):
+            self.assertGreater(keys.index(key), max(keys.index(k) for k in ('loaded', 'band', 'bands', 'packing')))
 
 if __name__ == '__main__':
     unittest.main()

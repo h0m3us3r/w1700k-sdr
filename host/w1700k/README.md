@@ -134,8 +134,18 @@ analog filter. Defaults, all set by every load:
   probed (TUNE bisection, then back to its LO) and SELECT points the capture at the band.
   About 2 s from a cold radio.
 - The receiver state lives on the unit (`/tmp/w1700k-state.json`, cleared by a reboot), so CLI
-  calls and a `serve` session share it. Streams run detached on the unit; each is one STREAM
+  calls and `serve` sessions share it. Streams run detached on the unit; each is one STREAM
   command to our WM, acknowledged when it ends. Streams start and stop without a reload.
+- Several controllers may drive one unit at once (the spectrum page's `serve`, a SoapySDR
+  program's, a CLI call). Each reads the unit's state before every operation, and a `serve`
+  session every two seconds while it has nothing to do: what another changed is adopted and
+  reported as a state event, so a retune from one shows in the others within about two
+  seconds, and an operation always acts on the receiver as it is. A long operation (load,
+  configure, start, stop) is written to the unit before it begins: the other sessions report
+  it as `busy`, wait for it before an operation of their own (up to two minutes, in case its
+  session died), and do not take a stream it stops for one that ended by itself. A reboot of
+  the unit is noticed the same way. Two operations sent at the same moment are not otherwise
+  ordered: the later one to save its state wins.
 - RF control (tune, gain, filter, trim, band switch) is one RF command each, which our WM
   expands and runs between stream chunks, or at once without a stream. A tune also rewrites the
   D-die words that follow the LO. Samples captured during a retune are invalid. The per-frequency

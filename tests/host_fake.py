@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -498,6 +499,7 @@ class FakeUnit:
         self.module_replacements = 0
         self.sessions = []                                # every mt7996-ctl --serve started
         self.target = 'root@unit'
+        self.boot_id = BOOT_ID                            # changes when the unit reboots
 
     def tool(self, name):
         return f'{self.bin_dir}/{name}'
@@ -516,7 +518,8 @@ class FakeUnit:
         self.log.append(command)
         d = self.device
         if command.startswith('cat /proc/sys/kernel/random/boot_id'):
-            return self._done((BOOT_ID + '\n').encode() + self.files.get('/tmp/w1700k-state.json', b''))
+            uptime = f'{time.monotonic():.2f}\n' if '/proc/uptime' in command else ''
+            return self._done((self.boot_id + '\n' + uptime).encode() + self.files.get('/tmp/w1700k-state.json', b''))
         if command.startswith('sha256sum'):
             lines = [f'{hashlib.sha256(v).hexdigest()}  {k}' for k, v in self.files.items() if k.endswith('.bin')]
             return self._done('\n'.join(lines).encode())

@@ -10,8 +10,11 @@ until the pump's stop word. Every operation goes to our firmware as a command (w
 host writes no radio register.
 
 The radio's state is kept on the unit (STATE_FILE, in RAM: a reboot clears it, and the boot id
-is checked), so separate CLI invocations and a `serve` session see the same receiver. Streams
-run detached on the unit; a controller attaches to one that is already running.
+is checked), so separate CLI invocations and `serve` sessions see the same receiver: a controller
+reads it before every operation, and a `serve` session every two seconds while it has nothing to
+do, and adopts what another has changed. A long operation (load, configure, start, stop) is
+written there before it begins, so that the others show it and wait their turn. Streams run
+detached on the unit; a controller attaches to one that is already running.
 
 Rules the hardware imposes:
 - RF programs (tune, gain, filter, band switch) run in our WM between stream chunks, or in its
@@ -38,6 +41,7 @@ Rules the hardware imposes:
 """
 import json
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -52,6 +56,11 @@ from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MA
 from .unit import Unit
 
 STATE_FILE = '/tmp/w1700k-state.json'
+# The unit's boot id, its uptime in seconds, then the state file: what a controller follows.
+READ_STATE = f'cat /proc/sys/kernel/random/boot_id; cut -d" " -f1 /proc/uptime; cat {STATE_FILE} 2>/dev/null; true'
+# Another session's long operation is waited for this long, and believed for as long: a session
+# killed in the middle of one leaves its mark behind.
+BUSY_WAIT = 120.0
 BANDS = (0, 1, 2)
 DEFAULT_BAND = 1
 PACKINGS = config.PACKINGS
@@ -134,6 +143,18 @@ class Controller:
         self.stream = Stream(self.unit)
         self._ctl = None
         self.boot_id = None
+        self.session = secrets.token_hex(4)   # this controller, among those that share the unit
+        self._seen = None                 # the state file as this controller last wrote or read it
+        self._unit_clock = None           # the unit's uptime minus this host's monotonic clock
+        self.busy_other = None            # another session's long operation, and when it began
+        self._busy_other_since = None     # (the unit's uptime)
+        self.busy = None
+        self.error = None
+        self._reset()
+        self.snapshot = self.state()
+
+    def _reset(self):
+        """The receiver of a unit that holds no state: nothing loaded, every band at its default."""
         self.loaded = False
         self.bands = dict(DEFAULT_BANDS)
         self.bands_ready = []
@@ -145,16 +166,13 @@ class Controller:
         self.rf = {b: default_rf(cfg, filter_for(cfg)) for b, cfg in self.bands.items()}
         self.synth_locked = [None] * len(BANDS)
         self.lo_lock = {}                 # band -> (lowest, highest) LO its synthesizer locks at, found at load
-        self.busy = None
-        self.error = None
-        self.snapshot = self.state()
 
     # --- state ---
 
     def state(self):
         cfg, rfs = self.bands[self.band], self.rf[self.band]
         return {
-            'busy': self.busy,
+            'busy': self.busy or self.busy_other,
             'radio': {'loaded': self.loaded, 'band': self.band, 'rf_band': cfg.rf_band, 'lo_hz': cfg.lo_hz,
                       'sample_rate': cfg.sample_rate, 'capture_rate': cfg.capture_rate,
                       'bands_ready': sorted(self.bands_ready),
@@ -183,22 +201,62 @@ class Controller:
                   'bands': {str(b): c.as_dict() for b, c in self.bands.items()},
                   'bands_ready': self.bands_ready, 'packing': self.packing, 'link_mbps': self.link_mbps,
                   'packing_manual': self.packing_manual, 'filter_follows_rate': self.filter_follows_rate,
-                  'rf': {str(b): v for b, v in self.rf.items()}, 'synth_locked': self.synth_locked}
-        self.unit.push(json.dumps(record).encode(), STATE_FILE)
+                  'rf': {str(b): v for b, v in self.rf.items()}, 'synth_locked': self.synth_locked,
+                  # last, after everything the unit's own reader of this file looks for: whose it
+                  # is, and the long operation that session is in the middle of
+                  'session': self.session, 'busy': self.busy,
+                  'busy_since': self._unit_now() if self.busy else None}
+        text = json.dumps(record)
+        self.unit.push(text.encode(), STATE_FILE)
+        self._seen = text
+
+    def _unit_now(self):
+        """The unit's uptime now, as far as the last reading of it tells; None before the first."""
+        return None if self._unit_clock is None else round(time.monotonic() + self._unit_clock, 2)
 
     def attach(self):
         """Adopt the receiver state the unit holds for this boot, and a stream already running."""
-        text = self.unit.check(f'cat /proc/sys/kernel/random/boot_id; cat {STATE_FILE} 2>/dev/null; true')
-        boot_id, _, saved = text.partition('\n')
-        self.boot_id = boot_id.strip()
+        self._follow()
+        self._check_stream()
+        self._changed()
+
+    def _follow(self):
+        """Adopt what the unit holds where that is not what this controller last saw there:
+        another session's change, or a reboot. True when the receiver is not as it was believed."""
+        text = self.unit.check(READ_STATE)
+        boot_id, _, rest = text.partition('\n')
+        uptime, _, saved = rest.partition('\n')
+        boot_id, saved = boot_id.strip(), saved.strip()
         try:
-            record = json.loads(saved) if saved.strip() else None
+            self._unit_clock = float(uptime) - time.monotonic()
+        except ValueError:
+            pass
+        if boot_id == self.boot_id and saved == self._seen:
+            if self.busy_other and not self._busy_fresh():      # that session went away mid-operation
+                self.busy_other = None
+                self._changed()
+                return True
+            return False
+        if self.boot_id is not None and boot_id != self.boot_id:
+            self._log('warn', 'the unit has rebooted: its radio is not loaded')
+            self._close_ctl()
+            self._reset()
+        self.boot_id, self._seen = boot_id, saved
+        self.busy_other = None
+        try:
+            record = json.loads(saved) if saved else None
             if record and record.get('boot_id') == self.boot_id:
                 self._restore(record)
         except (ValueError, KeyError, TypeError):
             self._log('warn', 'ignoring an unreadable receiver state on the unit')
-        self.poll()
         self._changed()
+        return True
+
+    def _busy_fresh(self):
+        now, since = self._unit_now(), self._busy_other_since
+        # (two sessions' readings of the unit's clock differ by their round trips: a mark that
+        # seems to lie a moment ahead is a fresh one)
+        return not isinstance(since, (int, float)) or now is None or now - since < BUSY_WAIT
 
     def _restore(self, record):
         bands = {int(b): BandConfig(int(b), **c).validate() for b, c in record['bands'].items()}
@@ -220,6 +278,9 @@ class Controller:
         locks = record.get('synth_locked', [None] * len(BANDS))
         if len(locks) == len(BANDS) and all(v in (None, True, False) for v in locks):
             self.synth_locked = list(locks)
+        busy = record.get('busy') if record.get('session') != self.session else None
+        self._busy_other_since = record.get('busy_since')
+        self.busy_other = busy if isinstance(busy, str) and self._busy_fresh() else None
 
     # --- operations ---
 
@@ -228,9 +289,18 @@ class Controller:
         that is refused (Refused: the receiver stays as it was) is logged, not recorded: the
         state's error is what is wrong with the receiver, and it keeps the one it had."""
         before = self.error
+        try:
+            self._wait_turn()
+        except Exception as exc:
+            self.error = str(exc)
+            self._log('error', self.error)
+            self._changed()
+            raise
         self.busy, self.error = busy, None
         self._changed()
         try:
+            if busy:
+                self._save()        # the other sessions show it, and wait
             return operation(*args)
         except Refused as exc:
             self.error = before
@@ -242,7 +312,24 @@ class Controller:
             raise
         finally:
             self.busy = None
+            if busy:
+                try:
+                    self._save()
+                except Exception as exc:        # the unit is gone: the others will see that themselves
+                    self._log('warn', f'the receiver state was not saved: {exc}')
             self._changed()
+
+    def _wait_turn(self):
+        """The receiver as the unit holds it now, once no other session is in the middle of a long
+        operation on it."""
+        self._follow()
+        deadline = time.monotonic() + BUSY_WAIT
+        while self.busy_other and time.monotonic() < deadline:
+            time.sleep(0.3)
+            self._follow()
+        if self.busy_other:
+            self._log('warn', f'another session has been {self.busy_other} for {BUSY_WAIT:.0f} s: going ahead')
+            self.busy_other = None
 
     def load(self, band=None):
         """Download our firmware and bring the radio up from cold, every band at its LO and sample rate."""
@@ -298,7 +385,14 @@ class Controller:
         return out
 
     def poll(self):
-        """Notice a stream that ended on its own (overrun, lost source, killed pump)."""
+        """Adopt what another session has changed, and notice a stream that ended on its own
+        (overrun, lost source, killed pump)."""
+        self._follow()
+        self._check_stream()
+
+    def _check_stream(self):
+        if self.busy_other:
+            return      # that session is stopping or restarting it: its end is not the stream's own
         if self.packing and self.stream.finished():
             result = self._finish_stream()
             self.error = f'the stream ended: {result.text}'
