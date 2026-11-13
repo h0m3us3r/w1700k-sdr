@@ -53,11 +53,17 @@ restorer: toolchain
 firmware:
 	$(MAKE) -C firmware
 
-# The stream service, the spectrum web UI server and the IQ recorder.
+# The stream service, the spectrum web UI server, the IQ recorder and, where SoapySDR's
+# headers are installed, the SoapySDR module.
 host:
 	$(MAKE) -C host/stream
 	$(MAKE) -C host/spectrum
 	$(MAKE) -C host/recv
+	@if pkg-config --exists SoapySDR 2>/dev/null || [ -e /usr/include/SoapySDR/Device.hpp ]; then \
+		$(MAKE) -C host/soapy; \
+	else \
+		echo "host/soapy: SoapySDR headers not found, not built"; \
+	fi
 
 check:
 	$(PYTHON) tools/check_hw_names.py

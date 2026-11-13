@@ -2,7 +2,8 @@
 
 The host's one receiver of the W1700K's UDP export. It puts the stream in order, unpacks it and
 serves it, as complex int16 IQ, to every consumer on the host through shared memory:
-`w1700k-spectrum`, `sdr-recv`, or any program that maps the ring. On request it also corrects
+`w1700k-spectrum`, `sdr-recv`, the SoapySDR module ([`../soapy`](../soapy/README.md)), or any program that
+maps the ring. On request it also corrects
 the stream for the radio's decimation roll-off ("flatten"), in the samples themselves, so that
 every consumer gets the corrected stream.
 

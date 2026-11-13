@@ -9,6 +9,7 @@ fake exporter can follow it the way the real stream follows the radio. Behaviour
   configure  busy "configuring", three progress events, then the new radio and stream state;
              a running stream is stopped first and started again afterwards
   start/stop the stream's running flag, and its packing: half above 160 Msps, as w1700k picks it
+  load       the radio is loaded (it is from the start, unless --unloaded)
   tune       the LO and the stream's centre frequency
   gain       AGC, or LNA and LPF steps
   filter     the analog filter, 20 to 320 MHz
@@ -36,7 +37,7 @@ def packing_for(rate):
 
 
 class Controller:
-    def __init__(self, log_path, tuning_path, progress_delay):
+    def __init__(self, log_path, tuning_path, progress_delay, unloaded=False, running=False):
         self.log = open(log_path, "a", buffering=1)
         self.tuning_path = tuning_path
         self.delay = progress_delay
@@ -52,6 +53,10 @@ class Controller:
                    "lo_range_hz": LO_RANGE[1]},
             "error": None,
         }
+        if unloaded:
+            self.state["radio"]["loaded"] = False
+        if running:
+            self.state["stream"].update(running=True, packing=packing_for(40000000))
 
     def emit(self, message):
         sys.stdout.write(json.dumps(message) + "\n")
@@ -75,6 +80,11 @@ class Controller:
 
     def op_status(self, request):
         return {"state": copy.deepcopy(self.state)}
+
+    def op_load(self, request):
+        self.state["radio"]["loaded"] = True
+        self.publish()
+        return {}
 
     def op_start(self, request):
         self.state["stream"]["running"] = True
@@ -170,8 +180,10 @@ def main():
     parser.add_argument("--log", required=True, help="append every request here, one JSON line each")
     parser.add_argument("--tuning-file", help="write the stream's tuning here on every change")
     parser.add_argument("--progress-delay", type=float, default=0.2, help="seconds between configure steps")
+    parser.add_argument("--unloaded", action="store_true", help="the radio is not loaded until a load")
+    parser.add_argument("--running", action="store_true", help="the stream is already running")
     args = parser.parse_args()
-    controller = Controller(args.log, args.tuning_file, args.progress_delay)
+    controller = Controller(args.log, args.tuning_file, args.progress_delay, args.unloaded, args.running)
     controller.publish()
     controller.serve()
 
