@@ -31,6 +31,9 @@ struct SpectrumSettings {
     void validate() const;
 };
 
+// dBFS of a frame's power value.
+float spectrum_db(float power);
+
 // FFT window names, in the order the UI offers them, and each one's
 // equivalent noise bandwidth in bins.
 const std::vector<std::string> &spectrum_windows();
@@ -51,7 +54,10 @@ struct SpectrumFrame {
     double sample_rate = 0;    // span of the frame, Hz
     unsigned blocks = 0;       // FFT blocks combined
     bool peak = false;
-    std::vector<float> db;     // dBFS per bin, from center - rate/2 upwards
+    // Power per bin relative to a full-scale tone (1 = 0 dBFS), from center - rate/2 upwards.
+    // Linear, so that frames merge and reduce to a view's bins without a logarithm per FFT bin;
+    // spectrum_db() converts what is sent.
+    std::vector<float> power;
 };
 
 class SpectrumEngine {
@@ -84,6 +90,7 @@ public:
         uint64_t frames_retuned = 0;  // frames dropped because they span or fall in a change
         uint64_t pairs_used = 0;      // samples that went into FFT blocks
         uint64_t pairs_dropped = 0;   // samples of frames skipped while the workers were busy
+        double share = 1;             // of the blocks "every sample" takes, the share the workers keep up with
         uint64_t pairs_missing = 0;   // samples of blocks left out: a slice lost, overwritten or an event
         uint64_t slices_lost = 0;     // slices that never arrived
         uint64_t slices_skipped = 0;  // slices passed over while the scheduler was behind
@@ -93,6 +100,7 @@ public:
     Stats stats() const;
 
 private:
+    struct Plan;
     struct Transform;
     struct Job;
     struct Worker;
@@ -107,6 +115,7 @@ private:
     void work(Worker &worker);
     void finish(uint64_t sequence, std::shared_ptr<SpectrumFrame> frame);
     std::shared_ptr<const Transform> transform(unsigned size, const std::string &window);
+    void refine();  // the thread that measures plans
     void add_segment(Segment segment);  // with mutex_ held
 
     const StreamClient &stream_;
@@ -129,6 +138,11 @@ private:
 
     std::mutex transforms_mutex_;
     std::map<std::pair<unsigned, std::string>, std::shared_ptr<const Transform>> transforms_;
+    std::map<unsigned, std::shared_ptr<const Plan>> plans_;  // by size; windows share them
+    std::deque<unsigned> refine_;                            // sizes whose plan is only estimated
+    std::condition_variable refine_ready_;
+    bool refine_stop_ = false;
+    std::thread refiner_;
 
     std::vector<std::unique_ptr<Worker>> workers_;
     std::thread scheduler_;

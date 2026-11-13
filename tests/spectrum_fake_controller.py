@@ -112,6 +112,17 @@ class Controller:
         if mhz not in (20, 40, 80, 160, 320):
             raise ValueError("filter: one of 20, 40, 80, 160, 320 MHz")
         self.state["rf"]["filter_mhz"] = mhz
+        self.state["rf"]["filter_follows_rate"] = False
+        self.publish()
+        return {}
+
+    def op_filter_follow(self, request):
+        if not isinstance(request.get("on"), bool):
+            raise ValueError("filter_follow: on must be true or false")
+        rf = self.state["rf"]
+        rf["filter_follows_rate"] = request["on"]
+        if request["on"]:
+            rf["filter_mhz"] = min(320, int(self.state["stream"]["sample_rate"]) // 1000000)
         self.publish()
         return {}
 

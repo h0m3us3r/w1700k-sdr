@@ -50,6 +50,7 @@
       <h3>Front end</h3>
       <div class="row"><span class="label" title="The analog filter's width">Filter</span>
         <div class="segmented tight" id="filter"><button type="button" data-v="20">20</button><button type="button" data-v="40">40</button><button type="button" data-v="80">80</button><button type="button" data-v="160">160</button><button type="button" data-v="320">320</button></div><span class="unit">MHz</span></div>
+      <div class="row check"><label title="The filter is as wide as the sample rate, on every band. It is what keeps signals 320 MHz away from folding onto the band: the wider it is than the rate needs, the stronger those ghosts (about 19 dB down at 320 MHz, 32 at 160, 45 at 80). Choosing a width by hand unticks this"><input id="filter-follow" type="checkbox"> Follow the sample rate</label></div>
       <div class="row check"><label title="Divides the decimation's roll-off out of the IQ stream itself (w1700k-stream), for every consumer; it applies where the filter is as wide as the sample rate, and not at 640/2, which is flat already"><input id="flatten" type="checkbox"> Flatten the passband</label></div>
       <p class="note" id="flatten-note"></p>
       <div class="row check"><label><input id="agc" type="checkbox"> Automatic gain control</label></div>
@@ -68,6 +69,7 @@
         <div class="segmented" id="fft-detector"><button type="button" data-v="average">Average</button><button type="button" data-v="peak">Peak</button></div></div>
       <div class="row check"><label><input id="fft-dc" type="checkbox"> Remove DC</label></div>
       <p class="note" id="fft-note"></p>
+      <div class="row buttons"><button id="fft-defaults" type="button" class="small" title="The server's own FFT settings; this browser stops asking for others">Reset to defaults</button></div>
     </details>
 
     <details id="panel-display" data-panel="display">
@@ -82,6 +84,7 @@
       <div class="row check"><label><input id="peak-hold" type="checkbox"> Peak hold</label>
         <button id="peak-reset" type="button" class="small">Reset</button></div>
       <div class="row buttons"><button id="auto-levels" type="button">Auto levels</button><button id="clear-waterfall" type="button">Clear waterfall</button></div>
+      <div class="row buttons"><button id="display-defaults" type="button" class="small" title="Smoothing, colors, fill, peak hold and the level sliders beside the plot">Reset to defaults</button></div>
       <p class="note">Wheel or pinch to zoom, drag to pan, click to place a marker (right-click removes it), double-click to tune there. Keys: + &minus; 0 &larr; &rarr;.</p>
     </details>
 
@@ -109,6 +112,7 @@
       <div class="row"><label for="max-bins">Resolution</label>
         <select id="max-bins"><option value="-1">Auto</option><option value="0">Screen</option><option value="2048">2048 bins</option><option value="1024">1024 bins</option>
           <option value="512">512 bins</option><option value="256">256 bins</option></select></div>
+      <div class="row buttons"><button id="link-defaults" type="button" class="small" title="No limit on frames or bandwidth, automatic resolution">Reset to defaults</button></div>
       <p class="note">One browser at a time: opening the page elsewhere takes over from this one. Frames the link cannot carry are merged into the next, so short signals still show.</p>
     </details>
   </aside>

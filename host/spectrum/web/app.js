@@ -22,13 +22,18 @@ const DEFAULTS = {
     split: 0.42, maxFps: 0, maxKbps: 0, maxBins: -1,  // -1: automatic resolution
     sidebar: window.innerWidth > 900,
     open: {receiver: true, fft: true, display: false, stream: true, link: false},
+    // The analog filter follows the sample rate; asked of the receiver again on every connection.
+    filterFollow: true,
+    // The FFT settings chosen in this browser (size, window, rate, averaging, peak, dc), asked of
+    // the server again on every connection; one not chosen here is the server's.
+    fft: {},
 };
 const prefs = (() => {
     try {
         const saved = JSON.parse(localStorage.getItem('w1700k-spectrum') || '{}');
-        return {...DEFAULTS, ...saved, open: {...DEFAULTS.open, ...(saved.open || {})}};
+        return {...DEFAULTS, ...saved, open: {...DEFAULTS.open, ...(saved.open || {})}, fft: {...(saved.fft || {})}};
     } catch {
-        return {...DEFAULTS};
+        return {...DEFAULTS, open: {...DEFAULTS.open}, fft: {}};
     }
 })();
 let saveTimer = 0;
@@ -54,8 +59,9 @@ const pointer = {x: -1, y: -1, inside: false};
 let marker = null;                     // Hz
 let pendingLo = null, pendingLoAt = 0;
 const dirty = {plot: true, overlay: true};
-const stats = {frames: 0, merged: 0, bytes: 0, renders: 0, draws: [], age: 0, renderFps: 0, dataFps: 0};
-window.w1700k = {stats, prefs, get status() { return status; }, get link() { return link.state; }};  // for inspection
+const stats = {frames: 0, shown: 0, merged: 0, bytes: 0, renders: 0, draws: [], age: 0, renderFps: 0, dataFps: 0};
+window.w1700k = {stats, prefs, get status() { return status; }, get link() { return link.state; },
+                 get playout() { return playout; }};  // for inspection
 
 const canvases = $('canvases');
 let renderer;
@@ -170,6 +176,16 @@ function onMessage(m) {
 
 // ---- frames -----------------------------------------------------------------------------------------
 
+// Frames stand for equal steps of sample time, but they arrive unevenly: the host that receives
+// the stream and computes them is busy, so some come tens of milliseconds late and the next few
+// right behind them. Shown as they arrive, the waterfall would stall and then jump. So each frame
+// is shown at its own place on the frames' clock (the sample time of those before it), a fixed
+// delay behind the earliest that frames have come: the spread of their arrival times over the last
+// seconds, and a margin. A frame later than any before raises the delay at once (the picture has
+// paused for it anyway); the delay falls back slowly, the frames then shown a tenth faster.
+const playout = {queue: [], media: 0, shift: 0, target: 0, delay: 0, second: -1, lo: [], hi: [], ran: 0, key: ''};
+const PLAYOUT_MIN = 30, PLAYOUT_MAX = 400, PLAYOUT_MARGIN = 25, PLAYOUT_WINDOW = 10;  // ms, ms, ms, s
+
 function onFrame(buffer) {
     const d = new DataView(buffer);
     if (d.getUint8(0) !== 1) return;
@@ -181,8 +197,65 @@ function onFrame(buffer) {
     const codes = new Uint8Array(buffer, 48, bins);
     const db = new Float32Array(bins);
     for (let i = 0; i < bins; i++) db[i] = base + codes[i] * step;
+    stats.frames++;
+    stats.merged += merged - 1;
 
-    const key = `${bins}:${start}:${stop}:${peakMode}`;
+    queueFrame({db, bins, start, stop, time, key: `${bins}:${start}:${stop}:${peakMode}`,
+                ms: (Math.max(1, merged) * 1000) / (status ? status.fft.rate : 100)},  // the sample time it covers
+               performance.now(), document.hidden);
+}
+
+function queueFrame(frame, now, hidden) {
+    const p = playout;
+    const restart = () => {
+        while (p.queue.length) showFrame(p.queue.shift());
+        Object.assign(p, {media: 0, shift: 0, target: 0, delay: 0, second: -1, lo: [], hi: []});
+    };
+    // Shown at once: on a page that is not being animated (hidden, or a window the browser has
+    // stopped animating without saying so), where a queue would only grow; and for a new view or
+    // tuning, so that zooming, panning and retuning answer as fast as the link does (what waited
+    // belongs to the old view).
+    if (hidden || now - p.ran > 250 || frame.key !== p.key) {
+        restart();
+        p.key = frame.key;
+        showFrame(frame);
+        return;
+    }
+    let offset = now - p.media;  // when it came, against the frames' own clock
+    // Far later than the delay can cover: frames are missing in between (the stream stopped, or
+    // the server skipped some), and the clock starts again here.
+    if (p.lo.length && offset - Math.min(...p.lo) > PLAYOUT_MAX + 100) {
+        restart();
+        offset = now;
+    }
+    const second = Math.floor(now / 1000);
+    if (second !== p.second) {  // the spread is kept per second, over the last PLAYOUT_WINDOW of them
+        p.second = second;
+        p.lo.unshift(Infinity);
+        p.hi.unshift(-Infinity);
+        p.lo.length = p.hi.length = Math.min(p.lo.length, PLAYOUT_WINDOW);
+    }
+    p.lo[0] = Math.min(p.lo[0], offset);
+    p.hi[0] = Math.max(p.hi[0], offset);
+    const earliest = Math.min(...p.lo);
+    p.delay = clamp(Math.max(...p.hi) - earliest + PLAYOUT_MARGIN, PLAYOUT_MIN, PLAYOUT_MAX);
+    p.target = earliest + p.delay;
+    if (p.target > p.shift) p.shift = p.target;
+    frame.at = p.media;
+    p.media += frame.ms;
+    p.queue.push(frame);
+}
+
+// Shows the queued frames that are due; called for every animation frame, `elapsed` ms after the last.
+function playFrames(now, elapsed) {
+    const p = playout;
+    p.ran = now;
+    if (p.shift > p.target) p.shift = Math.max(p.target, p.shift - 0.1 * elapsed);
+    while (p.queue.length && p.queue[0].at + p.shift <= now) showFrame(p.queue.shift());
+}
+
+function showFrame({db, bins, start, stop, time, key}) {
+    stats.shown++;
     if (key !== spectrum.key) {
         Object.assign(spectrum, {key, start, stop, bins, display: db.slice(), peak: db.slice()});
     } else if (prefs.peakHold) {
@@ -205,8 +278,6 @@ function onFrame(buffer) {
     waterfall.row = row;
     renderer.pushRow(row, start, stop, time);
 
-    stats.frames++;
-    stats.merged += merged - 1;
     stats.age = performance.timeOrigin + performance.now() + link.clockOffset - time;
     dirty.plot = true;
 }
@@ -442,11 +513,12 @@ function columns(values, out) {
     }
 }
 
-let lastTime = performance.now(), renderMark = performance.now(), renderCount = 0, dataMark = 0;
+let lastTime = performance.now(), renderMark = performance.now(), renderCount = 0, dataMark = 0, overlayAt = 0;
 function animate(now) {
     requestAnimationFrame(animate);
     const dt = Math.min(0.25, (now - lastTime) / 1000);
     lastTime = now;
+    playFrames(now, 1000 * dt);
 
     // SDR#'s spectrum attack and decay are per FFT frame; applied here in
     // proportion to the time passed, the trace glides at the display rate.
@@ -481,7 +553,10 @@ function animate(now) {
         renderer.draw(l, visible(), {top: prefs.top, bottom: prefs.top - prefs.range, contrast: prefs.contrast / 100,
                                      fill: prefs.fill, peak: prefs.peakHold});
         dirty.plot = false;
-        dirty.overlay = true;
+        // The overlay shows the trace's level only at the pointer and the marker: with neither it
+        // stays as it is, and with one a few readings a second are enough. Redrawing it with
+        // every frame made the browser upload a second full-size canvas each time.
+        if ((pointer.inside || marker !== null) && now - overlayAt > 100) dirty.overlay = true;
         renderCount++;
         stats.draws.push(performance.now() - started);
         if (stats.draws.length > 240) stats.draws.shift();
@@ -489,6 +564,7 @@ function animate(now) {
     if (dirty.overlay) {
         drawOverlay();
         dirty.overlay = false;
+        overlayAt = now;
     }
     if (now - renderMark >= 1000) {
         stats.renderFps = (renderCount * 1000) / (now - renderMark);
@@ -672,6 +748,8 @@ function onHello(m) {
     $('lna').max = String(m.max_lna ?? 4);
     $('lpf').max = String(m.max_lpf ?? 9);
     draft = null;
+    fftRestored = false;
+    followRestored = false;
 }
 
 function onNotice(m) {
@@ -699,6 +777,7 @@ function onStatus(m) {
         sendView();
     }
     if (!previous || previous.fft.size !== s.fft.size) setView(view.offset, view.span);
+    restoreFft(s.fft);
 
     // Top bar. With a controller the run button shows what the receiver does; without one, what arrives.
     const on = managed() ? streaming() : s.running;
@@ -715,8 +794,14 @@ function onStatus(m) {
     if (r) {
         const radio = radioState()?.radio;
         const half = radio && radio.loaded && radio.capture_rate && radio.capture_rate !== radio.sample_rate;
+        // What the stream carries: the samples' depth and how they are packed for the link.
+        const stream = radioState()?.stream, packing = stream?.running ? PACKING[stream.packing] : null;
         $('span').textContent = `${r.sample_rate / 1e6} Msps` + (half ? ` (${rateLabel(radio)})` : '') +
-            (radio && radio.loaded ? ` · ${RF_NAMES[radio.rf_band] || ''}` : '');
+            (radio && radio.loaded ? ` · ${RF_NAMES[radio.rf_band] || ''}` : '') +
+            (packing ? ` · ${packing.label}${stream.packing_manual ? ' (manual)' : ''}` : '');
+        const gbit = stream?.link_mbps ? ` for the ${stream.link_mbps / 1000} Gbit/s link` : '';
+        $('span').title = packing
+            ? `${packing.detail} ${stream.packing_manual ? 'Set by hand.' : `Chosen automatically${gbit}.`}` : '';
     }
 
     if (!link.replaced) showMessage(s.state === 'waiting' ? s.message : '');
@@ -805,6 +890,7 @@ function showLinkStats(l) {
         ['State', link.state],
         ['Round trip', link.rtt === null ? '—' : `${link.rtt.toFixed(0)} ms`],
         ['Data age', stats.frames ? `${Math.max(0, stats.age).toFixed(0)} ms` : '—'],
+        ['Smoothing', `shown ${playout.delay.toFixed(0)} ms behind, ${playout.queue.length} frames waiting`],
         ['Frames', `${stats.dataFps.toFixed(1)}/s received, ${(l ? l.merged : 0).toFixed(1)}/s merged`],
         ['Drawing', `${stats.renderFps.toFixed(0)} fps, ${percentile(stats.draws, 0.95).toFixed(2)} ms p95`],
     ];
@@ -996,6 +1082,14 @@ function bindSlider(id, onValue) {
 // ---- receiver ---------------------------------------------------------------------------------
 
 const RF_NAMES = {'2g': '2.4 GHz', '5g': '5 GHz', '6g': '6 GHz'};
+// The controller's packings: the samples are the radio's 14-bit I and Q in each, bit for bit.
+const PACKING = {
+    raw: {label: '14-bit, raw (32 b/sample)', detail: '14-bit I and Q as captured, 32 bits per sample on the link.'},
+    half: {label: '14-bit, half packed (30 b/sample)',
+           detail: '14-bit I and Q, lossless: every other chunk packed to 28 bits per sample, 30 on average.'},
+    full: {label: '14-bit, packed (28 b/sample)',
+           detail: '14-bit I and Q, lossless: every chunk packed to 28 bits per sample.'},
+};
 
 function control() { return status && status.controller; }  // the server's controller section
 function managed() { return control()?.mode === 'managed'; }
@@ -1129,6 +1223,8 @@ function showReceiver(s) {
         }
         const rf = st.rf || {};
         showSegmented('filter', rf.filter_mhz);
+        showValue($('filter-follow'), !!rf.filter_follows_rate);
+        restoreFollow(rf);
         showValue($('flatten'), !!r?.flatten);
         showValue($('agc'), !!rf.agc);
         if (rf.lna !== null && rf.lna !== undefined) showValue($('lna'), rf.lna);
@@ -1164,6 +1260,7 @@ function enableControls() {
     if (idle) {
         $('lo').disabled = !rf;
         for (const b of $('filter').querySelectorAll('button')) b.disabled = !rf;
+        $('filter-follow').disabled = !rf;
         $('agc').disabled = !rf;
         $('lna').disabled = $('lpf').disabled = !rf || $('agc').checked;
         const band = Number($('band').value);
@@ -1195,8 +1292,32 @@ $('configure').addEventListener('click', () => {
     draft = c;
     if (!send({t: 'set', ...c})) toast('Not connected.', 'bad');
 });
+// A width chosen by hand ends the filters' following the sample rate (the receiver's rule, and
+// what this browser then remembers); the checkbox starts it again, on every band.
+function rememberFollow(on) {
+    prefs.filterFollow = on;
+    savePrefs();
+}
 for (const b of $('filter').querySelectorAll('button'))
-    b.addEventListener('click', () => setReceiver('filter', {filter: Number(b.dataset.v)}, true));
+    b.addEventListener('click', () => {
+        rememberFollow(false);
+        setReceiver('filter', {filter: Number(b.dataset.v)}, true);
+    });
+$('filter-follow').addEventListener('change', () => {
+    touched.set($('filter-follow'), performance.now());
+    rememberFollow($('filter-follow').checked);
+    setReceiver('filter_follow', {filter_follow: $('filter-follow').checked}, true);
+});
+// Once per connection, when the receiver is there to ask: what this browser remembers. A
+// receiver loaded afresh follows the rate, and another browser or the command line may have
+// left it otherwise.
+let followRestored = false;
+function restoreFollow(rf) {
+    if (followRestored || !receiverReady() || busy() || !radioState()?.radio?.loaded) return;
+    followRestored = true;
+    if (typeof rf.filter_follows_rate === 'boolean' && rf.filter_follows_rate !== prefs.filterFollow)
+        send({t: 'set', filter_follow: prefs.filterFollow});
+}
 function sendGain(immediate) {
     if ($('agc').checked) setReceiver('gain', {agc: true}, true);
     else setReceiver('gain', {agc: false, lna: Number($('lna').value), lpf: Number($('lpf').value)}, immediate);
@@ -1224,10 +1345,43 @@ const AVERAGING = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 0];
 const SIZES = Array.from({length: 10}, (_, k) => 512 * 2 ** k);
 $('fft-size').replaceChildren(...SIZES.map((n) => new Option(n.toLocaleString('en-US'), String(n))));
 // Only the fields that changed: the server keeps the rest, so quick
-// successive changes cannot undo each other.
+// successive changes cannot undo each other. What is chosen here is remembered
+// in this browser, and asked of the server again whenever the page connects:
+// the server starts with its own defaults, and another browser may have set others.
 function sendFft(changes) {
+    Object.assign(prefs.fft, changes);
+    savePrefs();
     if (!send({t: 'fft', ...changes})) toast('Not connected.', 'bad');
 }
+
+let fftRestored = false;  // this connection has been asked for the remembered settings
+function restoreFft(current) {
+    if (fftRestored) return;
+    fftRestored = true;
+    const usable = {  // what a newer or older server may no longer offer is forgotten, not asked for
+        size: (v) => SIZES.includes(v),
+        window: (v) => windows.some((w) => w.name === v),
+        rate: (v) => typeof v === 'number' && v >= 1 && v <= 100,
+        averaging: (v) => AVERAGING.includes(v),
+        peak: (v) => typeof v === 'boolean',
+        dc: (v) => typeof v === 'boolean',
+    };
+    const changes = {};
+    for (const [key, value] of Object.entries(prefs.fft)) {
+        if (!usable[key]?.(value)) delete prefs.fft[key];
+        else if (current[key] !== value) changes[key] = value;
+    }
+    if (Object.keys(changes).length) send({t: 'fft', ...changes});
+}
+
+// The server's own settings again (it names them in its hello), and nothing remembered here.
+const FFT_DEFAULTS = {size: 262144, window: 'blackman-harris-4', rate: 100, averaging: 0, peak: true, dc: false};
+$('fft-defaults').addEventListener('click', () => {
+    prefs.fft = {};
+    savePrefs();
+    for (const id of ['fft-size', 'fft-window', 'fft-rate', 'fft-averaging', 'fft-dc']) touched.delete($(id));
+    if (!send({t: 'fft', ...(hello?.fft_defaults || FFT_DEFAULTS)})) toast('Not connected.', 'bad');
+});
 $('fft-size').addEventListener('change', () => sendFft({size: Number($('fft-size').value)}));
 $('fft-window').addEventListener('change', () => sendFft({window: $('fft-window').value}));
 bindSlider('fft-rate', (v, immediate) => { if (immediate) sendFft({rate: v}); });
@@ -1257,14 +1411,22 @@ function showFft(s) {
 }
 
 // Display preferences (this browser only).
+const preferences = new Map();  // key -> show its value in its control, and apply it
 function bindPreference(id, key, apply) {
     const input = $(id);
     const read = () => (input.type === 'checkbox' ? input.checked
                         : typeof DEFAULTS[key] === 'number' ? Number(input.value) : input.value);
-    if (input.type === 'checkbox') input.checked = prefs[key];
-    else input.value = String(prefs[key]);
     const output = document.querySelector(`output[for="${id}"]`);
-    if (output) output.textContent = input.value;
+    const show = () => {
+        if (input.type === 'checkbox') input.checked = prefs[key];
+        else input.value = String(prefs[key]);
+        if (output) output.textContent = input.value;
+    };
+    show();
+    preferences.set(key, () => {
+        show();
+        apply?.();
+    });
     input.addEventListener(input.type === 'range' ? 'input' : 'change', () => {
         prefs[key] = read();
         if (output) output.textContent = input.value;
@@ -1293,6 +1455,19 @@ bindPreference('offset', 'top');
 bindPreference('max-fps', 'maxFps', sendView);
 bindPreference('max-kbps', 'maxKbps', sendView);
 bindPreference('max-bins', 'maxBins', sendView);
+// A section's preferences back to what a browser that has never seen the page starts with.
+function resetPreferences(keys) {
+    for (const key of keys) {
+        prefs[key] = DEFAULTS[key];
+        preferences.get(key)();
+    }
+    savePrefs();
+    dirty.plot = dirty.overlay = true;
+}
+$('display-defaults').addEventListener('click', () => resetPreferences(
+    ['spectrumAttack', 'spectrumDecay', 'waterfallAttack', 'waterfallDecay', 'palette', 'fill', 'peakHold',
+     'contrast', 'range', 'top']));
+$('link-defaults').addEventListener('click', () => resetPreferences(['maxFps', 'maxKbps', 'maxBins']));
 $('peak-reset').addEventListener('click', () => {
     if (spectrum.display) spectrum.peak = spectrum.display.slice();
     dirty.plot = true;

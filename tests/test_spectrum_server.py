@@ -473,6 +473,14 @@ class SpectrumServerTest(unittest.TestCase):
         s.wait_op(lambda r: r["op"] == "filter" and r["mhz"] == 80)
         ws.send({"t": "set", "filter": 320})                # any filter at any width
         s.wait_op(lambda r: r["op"] == "filter" and r["mhz"] == 320)
+        ws.wait(lambda: self.controller(ws)["state"]["rf"].get("filter_follows_rate") is False,
+                what="a filter set by hand no longer follows the rate")
+        ws.send({"t": "set", "filter_follow": True})        # every band's filter at its sample rate again
+        s.wait_op(lambda r: r["op"] == "filter_follow" and r["on"] is True)
+        ws.wait(lambda: self.controller(ws)["state"]["rf"].get("filter_follows_rate") is True,
+                what="the filters following the rate")
+        ws.send({"t": "set", "filter_follow": "yes"})
+        ws.wait_notice("filter_follow must be true or false")
 
         # A rate the radio does not have is refused before the controller sees it.
         ws.send({"t": "set", "band": 2, "sample_rate": 640e6})
