@@ -16,7 +16,7 @@ adapter on a 10 Gbit/s USB port (USB 3.2 Gen 2, one lane), cabled to a W1700K2's
 | Jumbo frames | MTU 9216 with this driver; the stream needs at least 8236. |
 | 40 and 80 Msps | raw 14-bit samples, nothing lost |
 | 160 Msps | every slice packed to 28 bits, lossless (4.5 Gbit/s), nothing lost |
-| 320 Msps | the `split` packing, 14 bits per sample pair (4.6 Gbit/s): about 0.005 % of slices lost on this host once the link is set up as below, 0.04 % before |
+| 320 Msps | the `split` packing, 14 bits per sample pair (4.6 Gbit/s): about 0.005 % of slices lost on this host once the link is set up as below (0.04 % before), and 0.0008 % with the host's power limit raised from 13 to 15 W |
 | Reduced formats | 16, 14, 8 and 7 bits per sample pair, up to 160 Msps |
 | 10 Gbit/s | not reached; see "The missing firmware" |
 
@@ -79,6 +79,18 @@ All three matter with this adapter:
 - **What is left** is the host: that one CPU is about 90 % busy with the adapter alone at
   320 Msps, on a machine whose eight cores were all occupied and clocked down to 1.7 GHz by its
   13 W power limit. At 160 Msps and below nothing was lost.
+- **The host's power limit.** Those 13 W are the processor's short-term power limit as this
+  machine's firmware leaves it (`/sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw`),
+  not a matter of temperature: the package was at 66 °C. Raised to 15 W, which this machine's
+  cooling is good for, the cores ran at about 2.05 GHz and 71 °C, and a two-minute run at
+  320 Msps lost 0.0008 % of slices, 0.6 datagrams a second, where the two before it lost 0.005
+  and 0.006 %. One run, under the same desktop load; the setting lasts until the next reboot:
+
+  ```sh
+  echo 15000000 | sudo tee /sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw
+  ```
+
+  Whether that is wise is a question of the machine's cooling, not of the stream.
 
 Two things not to do while a stream is arriving: change the driver's ring (`ethtool -G`), which
 left the adapter receiving nothing until the interface was taken down and up; and expect the
