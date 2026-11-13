@@ -28,7 +28,7 @@ register against a trace of MediaTek's own firmware, and takes its commands
 | Tuning | No channels: the LO is any Hz a band's synthesizer locks at (unit A: 2.081–2.748, 4.647–7.509 and 4.707–7.576 GHz), on its grid of 2.98 Hz (2.4 GHz) or 11.9–14.3 Hz steps; retuned mid-stream (about 1 ms) |
 | Front end | AGC or manual LNA/baseband gain; analog filter 20–320 MHz |
 | Transport | the radio DMAs into a 1 GiB ring in SoC DRAM; the kernel sends every 8 KiB slice as one UDP datagram, zero-copy, on the 10 GbE port; at 320 Msps half the slices are packed to 28 bits per sample pair on the radio's own cores to fit the link (lossless, automatic) |
-| Slower links | the stream's packing follows the link's speed: every slice packed to 28 bits (lossless) carries 160 Msps on 5 Gbit/s; below that the SoC requantises to 16, 14, 8 or 7 bits per sample pair with a scale per slice (up to 160 Msps), and can send in datagrams small enough for a 1500-byte MTU; see the table below |
+| Slower links | the stream's packing follows the link's speed: every slice packed to 28 bits (lossless) carries 160 Msps on 5 Gbit/s, and 320 Msps fits it at 14 bits per sample pair, the radio and the SoC each requantising part; below that the SoC requantises to 16, 14, 8 or 7 bits per sample pair with a scale per slice (up to 160 Msps), and can send in datagrams small enough for a 1500-byte MTU; see the table below |
 | Host | `w1700k-stream` receives the export and serves the IQ stream to every consumer on the host (shared memory, complex int16, gap-tagged), with an optional correction ("flatten") of the decimation's roll-off applied to the samples themselves; `w1700k-spectrum`: 262,144-point FFT at 100 frames/s over every sample, browser UI, live controls; `sdr-recv` records the stream |
 
 ## Links slower than 10 GbE
@@ -41,7 +41,7 @@ refused with the rate the link would need.
 | Link | 14-bit, lossless | Reduced on the unit |
 | --- | --- | --- |
 | 10 Gbit/s | 320 Msps (half the slices packed), 160 Msps raw | |
-| 5 Gbit/s | 160 Msps (every slice packed, 4.5 Gbit/s), 80 Msps raw | |
+| 5 Gbit/s | 160 Msps (every slice packed, 4.5 Gbit/s), 80 Msps raw | 320 Msps at 14 bits per sample pair (4.6 Gbit/s) |
 | 2.5 Gbit/s | 80 Msps (packed), 40 Msps raw | 160 Msps at 14 bits per sample pair |
 | 1 Gbit/s | | 80 Msps at 8 bits, 40 Msps at 16 bits |
 
@@ -54,15 +54,24 @@ refused with the rate the link would need.
   consumers see no difference but quantisation noise about 53, 47, 28 and
   25 dB below each block's peak. On a 2.4 GHz test tone the noise floor rose
   0.6, 0.7, 3.1 and 5.8 dB against the lossless stream.
-- **320 Msps needs 10 GbE.** Reducing means reading every sample through the
-  SoC's memory bus, which carries about 1.0 GB/s beside the capture; 320 Msps
-  is 1.28 GB/s. Reduced packings stop at 160 Msps.
+- **320 Msps on 5 Gbit/s** is the `split` packing, 14 bits per sample pair.
+  No one part of the unit can requantise a 320 Msps stream: the SoC's memory
+  bus carries about 1.0 GB/s of reads beside the capture (the stream is 1.28),
+  and the radio's two cores are busy at half of it. So the radio reduces 10 of
+  every 16 chunks itself, under a shift the SoC sets from the signal's level,
+  and the SoC reduces the 6 between. Measured on a 5 Gbit/s link in runs of
+  five and ten minutes: complete, none of 48 and 94 million chunks lost, with
+  a test tone at the same level and phase in the chunks from both. (That is
+  the unit and the stream service. With the spectrum server and a browser
+  also running on that host, an 8-core N350 behind a USB adapter, the
+  adapter itself dropped 1 datagram in 10,000: the host, not the link.) The radio's chunks follow the level with a second's memory, so
+  in a band with strong bursts they are quantised for the bursts.
 - **No jumbo frames?** `"export": {"piece": 1456}` in the configuration sends
   every slice as datagrams a 1500-byte MTU carries (each costs 82 bytes of the
-  link; the unit sends 120 thousand a second without loss: 40 Msps lossless,
-  80 Msps at 16 or 14 bits).
+  link; the unit is asked for at most 200 thousand a second: 80 Msps lossless,
+  160 Msps at 8 bits).
 
-The 5 Gbit/s rows and the small datagrams are measured on a unit (no slice
+The 5 Gbit/s row and the small datagrams are measured on a unit (no slice
 lost); the 2.5 and 1 Gbit/s rows follow from the same arithmetic and have not
 been run on such a link. Details: [`host/w1700k/README.md`](host/w1700k/README.md).
 

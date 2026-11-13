@@ -88,6 +88,18 @@ carries about 1.24 GB/s of payload, so half of the chunks are packed on the
 MT7996 (8 KiB → 7 KiB), which puts the link at about 97 %. The 1 GiB ring
 absorbs short stalls (about 0.8 s at full rate).
 
+Slower links. The packing follows the speed the unit's port negotiates. Every
+chunk packed carries 160 Msps on 5 Gbit/s, lossless and still zero-copy. Below
+what the lossless packings fit, samples are requantised to fewer bits, and
+where that happens is set by what each part can do: the SoC's memory bus
+carries about 1.0 GB/s of reads beside the capture, so up to 160 Msps the SoC
+reduces the stream alone (two threads of `mt7996-stream`, NEON, each on a CPU
+of its own, sending through sockets); at 320 Msps neither the SoC nor the
+radio's two cores can touch every sample, so the radio reduces 10 of every 16
+chunks itself (they still leave zero-copy) and the SoC the 6 between: 14 bits
+per sample pair, 4.6 Gbit/s, on a 5 Gbit/s link. The host puts both back as
+14-bit samples in one stream; see the top-level README's table.
+
 ## Control path
 
 The host talks to our WM through words in its mailbox page in patch SRAM,
