@@ -73,7 +73,11 @@ refused with the rate the link would need.
 
 The 5 Gbit/s row and the small datagrams are measured on a unit (no slice
 lost); the 2.5 and 1 Gbit/s rows follow from the same arithmetic and have not
-been run on such a link. Details: [`host/w1700k/README.md`](host/w1700k/README.md).
+been run on such a link. The 10 Gbit/s row was run again on a W1700K2 after its
+PHY driver was repaired ([platform/README.md](platform/README.md#the-10-gbe-ports-phys)):
+320 Msps left the unit at a mean of 9.66 Gbit/s for two minutes without a
+transmit error, into a second W1700K as the far end, and 160 Msps raw crossed
+a cable between the unit's own two ports with no receive error counted. Details: [`host/w1700k/README.md`](host/w1700k/README.md).
 
 ## The front LED
 
@@ -138,7 +142,12 @@ You need a W1700K (HW 1.x) or W1700K2 (HW 2.1), a 3.3 V USB serial adapter on
 its console header, an Ethernet cable to its `lan3` port for installation, and
 a 10 GbE NIC on the host cabled to its `wan` port (10GBASE-T; an X710 with a
 copper SFP+ module works) for the IQ stream; a slower NIC or USB adapter works
-at lower sample rates (see "Links slower than 10 GbE"). Both revisions run the same images.
+at lower sample rates (see "Links slower than 10 GbE"). The stream port is
+linked 5 to 6 s after it starts where the far end trains at what it offers. An
+RTL8159 USB adapter offers 10 Gbit/s and, without the PHY patch file its Linux
+driver asks for (`rtl_nic/rtl8159-1.fw`, not in linux-firmware), does not train
+at it: three attempts, then 5 Gbit/s, 18 s in all, the front LED breathing
+yellow meanwhile. Both revisions run the same images.
 Most units carry a W25N04KV NAND; some W1700K2s carry a W25N04LV (ID `ef 8b 23`),
 which is supported but has never been run on a unit: `init/install` stops on
 one until you pass `--i-dont-care-about-nand-corruption`, and asks for a raw

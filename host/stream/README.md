@@ -28,7 +28,9 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 | `--name NAME` | `/w1700k-stream` | the shared-memory object (`/dev/shm/w1700k-stream`) |
 | `--report S` | 0 | a JSON status line on stdout every S seconds |
 
-The host needs the destination address on the 10G link, an MTU of at least 8236, and room for
+The host needs the destination address on the 10G link, an MTU of at least 8236
+(`sudo init/host/link keep IFACE 10.77.0.10/24 9216` gives the interface both and keeps them
+there; an interface with a smaller MTU drops the stream without a word), and room for
 48 MiB socket buffers (`sysctl -w net.core.rmem_max=67108864`, or the kernel caps them silently
 and drops datagrams under load: counted as `socket_drops`). One service owns the port: a second
 receiver of the same port would take half the datagrams, so consumers read the ring instead. A

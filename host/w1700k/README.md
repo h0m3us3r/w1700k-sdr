@@ -160,7 +160,11 @@ analog filter. Defaults, all set by every load:
   (`radio.synth_locked`). A firmware reload does not reset the RF dies: a band whose
   synthesizer stays unlocked needs a power cycle of the unit, and is reported as an error.
 - The export sends one 8 KiB slice per datagram: the unit's export interface needs a jumbo MTU
-  (at least 8236; 9216 provisioned), checked before each start.
+  (at least 8236; 9216 provisioned), checked before each start. So does the interface that
+  receives it: where the stream comes to the host the controller runs on (no `export.dst_mac`),
+  a start is refused if that interface's MTU is below the stream's largest packet, since an
+  interface drops what is larger without a word (a USB adapter plugged in again is back at
+  1500). `sudo init/host/link keep IFACE 10.77.0.10/24 9216` sets it for good.
 - Nothing transmits: our firmware runs no transmit calibration and keeps the MAC's transmit
   path disabled.
 
