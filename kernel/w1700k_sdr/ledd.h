@@ -154,7 +154,7 @@ static inline int led_look_same(const struct led_look *a, const struct led_look 
 #define LED_BOOT_SECONDS	3.0
 #define LED_RAINBOW_SECONDS	6.0f
 #define LED_FADE_SECONDS	0.6
-#define LED_RISE_SECONDS	3.5f
+#define LED_RISE_SECONDS	6.0f
 #define LED_ACK_SECONDS		0.25
 #define LED_ACK_QUIET		1.5	/* one lift for all the host writes within this long */
 

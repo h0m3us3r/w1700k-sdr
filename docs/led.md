@@ -10,8 +10,8 @@ separately, driven by `w1700k-led` on the unit from the moment it has booted.
 | --- | --- | --- |
 | <img src="images/led/loader.svg" width="48" height="20" alt="white, then red"> | White for a moment, then steady red | The loader and the kernel, before our software runs. Steady red that never changes: the unit did not finish booting, or `w1700k-led` is not running. |
 | <img src="images/led/start.svg" width="48" height="20" alt="every colour once, out of the dark"> | The colours of the rainbow once round, brightening out of the dark (3 s) | Starting: the unit has booted and the LED is ours from here on. |
-| <img src="images/led/no-link.svg" width="48" height="20" alt="yellow, breathing"> | **Yellow, breathing slowly** | No link on the stream port: no cable, or nothing at the far end. |
-| <img src="images/led/idle.svg" width="48" height="20" alt="white, brightening"> | **White, brightening** from low to full over three and a half seconds, then steady | Powered and reachable, the stream port linked; the radio is not loaded, or is being loaded. |
+| <img src="images/led/no-link.svg" width="48" height="20" alt="yellow, breathing"> | **Yellow, breathing slowly** | No link on the stream port: no cable, or nothing at the far end. Also while the two ends agree on a speed after the unit starts: about 6 s, or about 18 s where the far end offers 10 Gbit/s and cannot train at it. |
+| <img src="images/led/idle.svg" width="48" height="20" alt="white, brightening"> | **White, brightening** from low to full over six seconds, then steady | Powered and reachable, the stream port linked; the radio is not loaded, or is being loaded. |
 | <img src="images/led/ready.svg" width="48" height="20" alt="green"> | **Green, steady** | Ready: the radio is loaded and tuned, and not streaming. |
 | <img src="images/led/rates.svg" width="48" height="20" alt="cyan, blue, magenta"> | **Cyan**, **blue** or **magenta** | Streaming at 40, 80 or 160 Msps. |
 | <img src="images/led/rainbow.svg" width="48" height="20" alt="every colour in turn"> | **The rainbow**, every colour in turn, once round in six seconds | Streaming at 320 Msps: everything the receiver has. |

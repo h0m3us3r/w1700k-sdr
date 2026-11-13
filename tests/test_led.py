@@ -98,8 +98,8 @@ class Led(unittest.TestCase):
 
     def test_each_state_has_its_look(self):
         self.assertEqual(self.look(None, link=0), 'breathe 50 1.00 0.90 3.00 0.85 turn 0', 'no link: yellow breathing')
-        self.assertEqual(self.look(None), 'rise 0 0.00 1.00 3.50 0.65 turn 0', 'link, nothing loaded: white, rising')
-        self.assertEqual(self.look(self.record(loaded=False)), 'rise 0 0.00 1.00 3.50 0.65 turn 0')
+        self.assertEqual(self.look(None), 'rise 0 0.00 1.00 6.00 0.65 turn 0', 'link, nothing loaded: white, rising')
+        self.assertEqual(self.look(self.record(loaded=False)), 'rise 0 0.00 1.00 6.00 0.65 turn 0')
         self.assertEqual(self.look(self.record()), 'steady 120 1.00 0.70 0.00 0.00 turn 0', 'ready: green')
         self.assertEqual(self.look(self.record(synth_locked=[True, False, True])),
                          'blink 50 1.00 0.90 1.20 0.35 turn 0', 'the captured band out of lock: yellow blinking')
@@ -198,19 +198,20 @@ class Led(unittest.TestCase):
         at = {round(t, 2): (s, b) for t, _, s, b in rows}
         white = lambda t: at[t][1]                           # noqa: E731
         self.assertEqual(at[1.0][0], 0.0, 'white: no colour in it')
-        self.assertAlmostEqual(white(1.0), 0.35 + 0.65 * 1.0 / 3.5, places=3)
+        self.assertAlmostEqual(white(1.0), 0.35 + 0.65 * 1.0 / 6, places=3)
         climb = [white(round(k * 0.05, 2)) for k in range(13, 40)]      # after the fade from green
         self.assertTrue(all(b > a for a, b in zip(climb, climb[1:])), 'brighter all the way')
         # 2 s: green comes, and takes over at once
         self.assertEqual(at[2.6], (1.0, 0.7), 'the next state within its fade, not after the climb')
         # 4 s: idle again, on from the 2 s it had climbed
-        self.assertAlmostEqual(white(4.7), 0.35 + 0.65 * 2.7 / 3.5, places=3)
+        self.assertAlmostEqual(white(4.7), 0.35 + 0.65 * 2.7 / 6, places=3)
         self.assertGreater(white(4.7), white(1.95), 'not from low again')
-        self.assertEqual(white(5.5), 1.0, 'full after 3.5 s of climbing in all')
-        self.assertEqual(white(7.9), 1.0, 'and it stays')
-        # 8 s: left after it had finished; 10 s: back, from low
-        self.assertAlmostEqual(white(10.7), 0.35 + 0.65 * 0.7 / 3.5, places=3)
-        self.assertEqual(white(11.95), round(0.35 + 0.65 * 1.95 / 3.5, 4))
+        self.assertLess(white(7.9), 1.0, 'still climbing after 5.9 s of it')
+        self.assertEqual(white(8.05), 1.0, 'full after 6 s of climbing in all')
+        self.assertEqual(white(9.9), 1.0, 'and it stays')
+        # 10 s: left after it had finished; 12 s: back, from low
+        self.assertAlmostEqual(white(12.7), 0.35 + 0.65 * 0.7 / 6, places=3)
+        self.assertAlmostEqual(white(13.95), 0.35 + 0.65 * 1.95 / 6, places=3)
 
 
 if __name__ == '__main__':
