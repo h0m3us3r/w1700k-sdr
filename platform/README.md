@@ -141,6 +141,16 @@ does not train at 10GBASE-T here: both ends try three times, then agree on
 | IQ port linked after a reboot | 92 to 124 s after Linux resets the PHY, at 5 Gbit/s or, with 5 and 2.5 Gbit/s failing three times each as well, at 1 Gbit/s | 18 s, at 5 Gbit/s (5 boots of 5) |
 | IQ port linked after `ip link set eth1 down; up` | 20 s, the PHY unpatched | 18 s |
 
+10GBASE-T between two patched PHYs was tried with a cable between the unit's
+own two 10 GbE ports (`eth1` to `eth2`): both linked at 10 Gbit/s on the first
+attempt, 5 to 6 s after the second port started. A 160 Msps raw stream
+(5.2 Gbit/s) sent to `eth2`'s address crossed it for 30 s, 2.35 million frames,
+with no CRC or other receive error counted. That loop cannot show the whole
+9.75 Gbit/s of a 320 Msps stream: every frame sent comes back in, the CPU that
+handles the QDMA takes about 86,000 of them a second, and the export stops
+after two seconds as it falls behind at that same rate (5.4 Gbit/s; one 200 ms
+sample reached 9.5). That takes a receiver that is not the unit itself.
+
 A register reader for the unit needs no driver support: `SIOCGMIIREG` on
 `lan3`, whose own PHY is on the same bus, reaches any address on it, clause 45
 included (PHY 8 is `eth1`'s, PHY 5 `eth2`'s; extension register `0x801e`, read
