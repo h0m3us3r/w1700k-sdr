@@ -44,8 +44,9 @@ bytes are firmware events that share the ring.
 Completions are filed by `seq` into a reorder ring (256 MiB, 0.2 s at 320 Msps). A run, one stream, begins with the
 first datagram after a second of silence, after a jump in `seq`, or after a consumer asks for one
 (`restart_requests`, which the spectrum server does when the receiver starts or stops). Slots are
-published in order: one whose completion has arrived, a firmware event, or, once 1024 newer
-completions have arrived without it, a loss. After 5 ms with nothing new, what has arrived is
+published in order: one whose completion has arrived, a firmware event, or a loss: a slot that is
+still missing 100 ms after 1024 newer completions arrived (a receive thread kept off its CPU on a
+busy host delivers late, not never), or at once when 8192 newer ones have. After 5 ms with nothing new, what has arrived is
 published; a loss at the very end of a stream stays unpublished until more arrives. Of the
 losses, `overruns` counts those that did arrive but were overwritten in the reorder ring before
 the service published them: the service fell behind (CPU contention), not the export.

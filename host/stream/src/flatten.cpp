@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 #include "flatten.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <stdexcept>
+
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 namespace {
 
@@ -150,31 +156,53 @@ FlattenRun::~FlattenRun()
     fftwf_free(buffer_);
 }
 
+namespace {
+
+// x[k] *= h[k] for `count` (even) complex values, interleaved real and imaginary parts.
+void multiply(fftwf_complex *x, const fftwf_complex *h, unsigned count)
+{
+    unsigned k = 0;
+#if defined(__SSE2__)
+    // Two at a time: (a + jb)(c + jd) = (ac - bd) + j(ad + bc), as [a, a] * [c, d] + [-b, b] * [d, c].
+    const __m128 negate_even = _mm_castsi128_ps(_mm_set_epi32(0, int(0x80000000u), 0, int(0x80000000u)));
+    for (; k + 2 <= count; k += 2) {
+        const __m128 v = _mm_load_ps(x[k]), t = _mm_load_ps(h[k]);
+        const __m128 re = _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 0, 0)), im = _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 1, 1));
+        const __m128 swapped = _mm_shuffle_ps(t, t, _MM_SHUFFLE(2, 3, 0, 1));
+        _mm_store_ps(x[k], _mm_add_ps(_mm_mul_ps(re, t), _mm_xor_ps(_mm_mul_ps(im, swapped), negate_even)));
+    }
+#endif
+    for (; k < count; ++k) {
+        const float re = x[k][0] * h[k][0] - x[k][1] * h[k][1];
+        const float im = x[k][0] * h[k][1] + x[k][1] * h[k][0];
+        x[k][0] = re;
+        x[k][1] = im;
+    }
+}
+
+}  // namespace
+
 // Overlap-save: transform kFft inputs, multiply by the taps' transfer, transform back; the last
-// kBlock outputs are free of wrap-around. Output t (0..n) is the full convolution at t + kTaps - 1,
-// i.e. centred on input t + kDelay: zero-phase against the caller's indexing.
+// kBlock outputs are free of wrap-around: output t is the full convolution at t + kTaps - 1, i.e.
+// centred on input t + kDelay.
+void FlattenRun::filter(const Flatten &f)
+{
+    fftwf_execute(forward_);
+    multiply(buffer_, f.transfer(), Flatten::kFft);
+    fftwf_execute(inverse_);
+}
+
+// A complex sample is two floats in both the caller's arrays and FFTW's, so blocks move in and out
+// as they are.
 void FlattenRun::apply(const Flatten &f, const float *in, size_t n, float *out)
 {
-    const fftwf_complex *h = f.transfer();
     const size_t total = n + Flatten::kTaps - 1;
     for (size_t j = 0; j < n; j += Flatten::kBlock) {
-        for (unsigned k = 0; k < Flatten::kFft; ++k) {
-            const size_t i = j + k;
-            buffer_[k][0] = i < total ? in[2 * i] : 0.0f;
-            buffer_[k][1] = i < total ? in[2 * i + 1] : 0.0f;
-        }
-        fftwf_execute(forward_);
-        for (unsigned k = 0; k < Flatten::kFft; ++k) {
-            const float re = buffer_[k][0] * h[k][0] - buffer_[k][1] * h[k][1];
-            const float im = buffer_[k][0] * h[k][1] + buffer_[k][1] * h[k][0];
-            buffer_[k][0] = re;
-            buffer_[k][1] = im;
-        }
-        fftwf_execute(inverse_);
+        const size_t have = std::min<size_t>(Flatten::kFft, total - j);  // zeros beyond the input
+        std::memcpy(buffer_, in + 2 * j, have * sizeof(fftwf_complex));
+        if (have < Flatten::kFft) std::memset(buffer_ + have, 0, (Flatten::kFft - have) * sizeof(fftwf_complex));
+        filter(f);
         const size_t m = std::min<size_t>(Flatten::kBlock, n - j);
-        for (size_t k = 0; k < m; ++k) {
-            out[2 * (j + k)] = buffer_[Flatten::kTaps - 1 + k][0];
-            out[2 * (j + k) + 1] = buffer_[Flatten::kTaps - 1 + k][1];
-        }
+        std::memcpy(out + 2 * j, buffer_ + Flatten::kTaps - 1, m * sizeof(fftwf_complex));
     }
 }

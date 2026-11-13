@@ -50,8 +50,14 @@ public:
     FlattenRun(const FlattenRun &) = delete;
     FlattenRun &operator=(const FlattenRun &) = delete;
 
-    // in: n + 2 * kDelay complex samples (interleaved float I, Q), the first kDelay before the
-    // first output's; out: n complex samples.
+    // One overlap-save block, in place: the caller writes kFft complex inputs into block(), and
+    // filter() leaves the kBlock outputs from block()[kTaps - 1] on; output t is centred on input
+    // t + kDelay (zero-phase against the caller's indexing).
+    fftwf_complex *block() { return buffer_; }
+    void filter(const Flatten &f);
+
+    // A whole array through blocks. in: n + 2 * kDelay complex samples (interleaved float I, Q),
+    // the first kDelay before the first output's; out: n complex samples.
     void apply(const Flatten &f, const float *in, size_t n, float *out);
 
 private:
