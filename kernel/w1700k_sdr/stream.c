@@ -332,9 +332,11 @@ static void *sender(void *arg)
 				 * have not taken up to near the newest. */
 				s->lapped += end - seq;
 				next = atomic_load(&send_next);
-				while (next + SEND_RESUME < c &&
-				       !atomic_compare_exchange_weak(&send_next, &next, c - SEND_RESUME))
-					;
+				while (next + SEND_RESUME < c)
+					if (atomic_compare_exchange_weak(&send_next, &next, c - SEND_RESUME)) {
+						s->lapped += c - SEND_RESUME - next;	/* what nobody took */
+						break;
+					}
 				break;
 			}
 			if (b->records + pieces_max > SEND_BATCH || b->slices == SEND_SLICES)
