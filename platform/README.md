@@ -111,6 +111,42 @@ U-Boot computed. Linux waits for the chip by polling its status with `udelay()`
 (patch 0012): the kernel has no high-resolution timers, so a sleeping poll
 would take a 4 ms tick per page.
 
+## The 10 GbE ports' PHYs
+
+The W1700K2's RTL8261CE takes a firmware patch (`rtl_nic/rtl8261c.bin`, built
+into the kernel) that the PHY driver writes into it over MDIO: 4714 register
+operations. Two of our kernel patches are about that.
+
+- **0013, the patch arrives whole, and every time.** The driver as backported
+  wrote an entry of the file only when the register did not already read that
+  value. The patch's code is a run of writes to one register (`0xa438`), each
+  taking the next address, so every word left out put the rest in the wrong
+  place, and the PHY came out of its first start after boot with a damaged
+  patch. The driver also loaded the file once per boot, while the PHY's reset
+  line drops it whenever the port is taken down, so a port brought up a second
+  time ran without any. Now every entry is written, on every start of the port.
+- **0014, the bus is not slow.** The PHYs sit on the switch's MDIO bus, whose
+  accessors slept between polls for the end of a transaction: a 4 ms tick each
+  without high-resolution timers, 38 s for the patch, during `w1700k-network`
+  at boot and so before the SSH server started. They poll with `udelay()` now,
+  and the port starts in under a second.
+
+Measured on a W1700K2 whose IQ port is cabled to an RTL8159 USB adapter (which
+does not train at 10GBASE-T here: both ends try three times, then agree on
+5 Gbit/s):
+
+| | before | with 0013 and 0014 |
+| --- | --- | --- |
+| SSH answers after a reboot | 50 to 80 s into the boot | 10.5 s |
+| IQ port linked after a reboot | 92 to 124 s after Linux resets the PHY, at 5 Gbit/s or, with 5 and 2.5 Gbit/s failing three times each as well, at 1 Gbit/s | 18 s, at 5 Gbit/s (5 boots of 5) |
+| IQ port linked after `ip link set eth1 down; up` | 20 s, the PHY unpatched | 18 s |
+
+A register reader for the unit needs no driver support: `SIOCGMIIREG` on
+`lan3`, whose own PHY is on the same bus, reaches any address on it, clause 45
+included (PHY 8 is `eth1`'s, PHY 5 `eth2`'s; extension register `0x801e`, read
+through `0xa436`/`0xa438` in MMD 31, is `0x2215` with the patch and `0x0015`
+without).
+
 ### Updating the root without a console
 
 Linux cannot write `system`, and that stays so. To replace the root over the
