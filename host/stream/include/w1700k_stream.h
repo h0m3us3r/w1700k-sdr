@@ -66,6 +66,7 @@ struct w1700k_stream_header {
 	/* counters since the service started */
 	uint64_t datagrams, bytes;
 	uint64_t slices, packed, events, lost;	/* completions filed: samples (packed among them), events, lost */
+	/* pieces: slices sent as several datagrams of which not all arrived */
 	uint64_t pieces, bad, late, before_start, duplicates, socket_drops;
 	/* the export's integrity: raw slices with spare bits set (words), and slices or 32-byte lines
 	 * equal to the same slice or line one lap (128 completions) earlier: a capture or packer
@@ -74,7 +75,8 @@ struct w1700k_stream_header {
 	uint64_t flattened, saturated;	/* slices the correction produced; samples clipped to int16 */
 	uint64_t overruns;		/* of the lost: arrived, but overwritten in the service's receive
 					 * ring before it was published (the service fell behind) */
-	uint64_t reserved2[12];
+	uint64_t reduced;		/* of the slices: sent with fewer bits than 14 per component */
+	uint64_t reserved2[11];
 
 	/* control: written by consumers, read by the service */
 	uint64_t restart_requests;	/* +1: the next completion starts a new run */

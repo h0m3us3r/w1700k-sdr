@@ -158,6 +158,7 @@ void Publisher::report()
     store(&out_->bytes, s.bytes);
     store(&out_->slices, s.slices);
     store(&out_->packed, s.packed);
+    store(&out_->reduced, s.reduced);
     store(&out_->events, s.events);
     store(&out_->pieces, s.pieces);
     store(&out_->bad, s.bad);

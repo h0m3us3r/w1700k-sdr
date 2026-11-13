@@ -13,6 +13,7 @@ import subprocess
 import time
 import unittest
 
+import iq_reduce_ref
 import stream_shm
 from stream_shm import TAG_EVENT, TAG_FLAT, TAG_LOST, Shm, tag
 
@@ -127,6 +128,17 @@ class StreamServiceTest(unittest.TestCase):
     def send(self, seq, payload):
         self.sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
 
+    def send_pieces(self, magic, last, payload, piece, skip=()):
+        """A slice as datagrams of at most `piece` payload bytes; `skip`: pieces not sent."""
+        for n, at in enumerate(range(0, len(payload), piece)):
+            if n not in skip:
+                self.sock.sendto(struct.pack("<IHHQ", magic, at, len(payload), last) + payload[at:at + piece],
+                                 ("127.0.0.1", self.port))
+
+    def send_reduced(self, seq, words, fmt, piece=None):
+        code, data = iq_reduce_ref.encode(words, fmt)
+        self.send_pieces(iq_reduce_ref.MAGIC, iq_reduce_ref.header_word(seq, fmt, code), data, piece or len(data))
+
     def send_words(self, seq, words):
         self.send(seq, struct.pack("<%dI" % len(words), *words))
         if seq % 32 == 31:
@@ -164,6 +176,90 @@ class StreamServiceTest(unittest.TestCase):
         self.assertEqual((self.shm.get("packed"), self.shm.get("events"), self.shm.get("lost")), (1, 1, 1))
         self.assertEqual(self.shm.get("slices"), 1198)
         self.assertEqual(self.shm.get("flatten_active"), 0)
+
+    def test_reduced_slices_are_restored_by_their_scale(self):
+        formats = (16, 14, 8, 7)
+        words = {}
+        for s in range(64):
+            amplitude = (3, 60, 700, 8000)[s // 4 % 4]
+            words[s] = [word(round(amplitude * math.cos(0.37 * n + s)), round(amplitude * math.sin(0.11 * n * n)))
+                        for n in range(SLICE)]
+        for s in range(1100):
+            if s < 64:
+                self.send_reduced(s, words[s], formats[s % 4])
+            else:
+                self.send_words(s, noise_words(s))
+        run = self.wait_newest(1100)
+        for s in range(64):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            self.assertEqual(self.shm.samples(s), iq_reduce_ref.restored(words[s], formats[s % 4]),
+                             "slot %d, format %d" % (s, formats[s % 4]))
+        self.assertEqual(self.shm.samples(100), unpacked(noise_words(100)))
+        self.assertEqual((self.shm.get("reduced"), self.shm.get("slices"), self.shm.get("lost")), (64, 1100, 0))
+        self.assertEqual(self.shm.get("bad"), 0)
+
+    def test_slices_in_pieces_are_assembled_and_a_broken_one_is_lost(self):
+        words = {s: noise_words(s) for s in range(1100)}
+        for s in range(1100):
+            raw = struct.pack("<%dI" % SLICE, *words[s])
+            if s == 5:
+                self.send_pieces(MAGIC, s, raw, 1456)                          # raw, six pieces
+            elif s == 6:
+                self.send_pieces(MAGIC, s, struct.pack("<%dI" % (SLICE // 8 * 7), *pack(words[s])), 1456)
+            elif s == 7:
+                self.send_reduced(s, words[s], 14, piece=1456)
+            elif s == 8:
+                self.send_reduced(s, words[s], 7, piece=700)
+            elif s == 9:
+                self.send_pieces(MAGIC, s, raw, 1456, skip=(2,))               # a piece lost on the way
+            elif s == 10:
+                self.send_pieces(MAGIC, s, raw, 1456, skip=(0,))               # its first piece lost
+            else:
+                self.send_words(s, words[s])
+        run = self.wait_newest(1100)
+        for s in (4, 5, 6, 11):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            self.assertEqual(self.shm.samples(s), unpacked(words[s]), "slot %d" % s)
+        self.assertEqual(self.shm.samples(7), iq_reduce_ref.restored(words[7], 14))
+        self.assertEqual(self.shm.samples(8), iq_reduce_ref.restored(words[8], 7))
+        for s in (9, 10):
+            self.assertEqual(self.shm.tag(s), tag(run, s) | TAG_LOST, "slot %d" % s)
+        self.assertEqual((self.shm.get("lost"), self.shm.get("slices"), self.shm.get("bad")), (2, 1098, 0))
+        self.assertEqual(self.shm.get("pieces"), 2)
+
+    def test_several_slices_in_one_datagram(self):
+        """The unit's senders put as many whole slices in a datagram as fit, each behind its header."""
+        words = {s: noise_words(s + 50) for s in range(8)}
+
+        def record(s, fmt=None):
+            if fmt is None:
+                payload = struct.pack("<%dI" % SLICE, *words[s])
+                return struct.pack("<IHHQ", MAGIC, 0, len(payload), s) + payload
+            code, data = iq_reduce_ref.encode(words[s], fmt)
+            return struct.pack("<IHHQ", iq_reduce_ref.MAGIC, 0, len(data), iq_reduce_ref.header_word(s, fmt, code)) + data
+        to = ("127.0.0.1", self.port)
+        self.sock.sendto(record(0, 14) + record(1, 14), to)
+        self.sock.sendto(record(2, 7) + record(3, 7) + record(4, 8), to)
+        self.sock.sendto(record(6), to)
+        self.sock.sendto(record(5, 16) + record(7, 14) + b"\x00" * 5, to)  # and five bytes that are no record
+        for s in range(8, 1100):
+            self.send_words(s, noise_words(s))
+        run = self.wait_newest(1100)
+        formats = {0: 14, 1: 14, 2: 7, 3: 7, 4: 8, 5: 16, 7: 14}
+        for s in range(8):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            want = iq_reduce_ref.restored(words[s], formats[s]) if s in formats else unpacked(words[s])
+            self.assertEqual(self.shm.samples(s), want, "slot %d" % s)
+        self.assertEqual((self.shm.get("reduced"), self.shm.get("lost"), self.shm.get("bad")), (7, 0, 1))
+
+    def test_a_reduced_slice_of_the_wrong_length_is_refused(self):
+        code, data = iq_reduce_ref.encode(noise_words(1), 14)
+        self.send_pieces(iq_reduce_ref.MAGIC, iq_reduce_ref.header_word(0, 16, code), data, len(data))
+        self.send_pieces(iq_reduce_ref.MAGIC, iq_reduce_ref.header_word(1, 12, code), data, len(data))
+        for s in range(2, 1100):
+            self.send_words(s, noise_words(s))
+        self.wait_newest(1098)                         # the run starts with the first slice taken
+        self.assertEqual((self.shm.get("bad"), self.shm.get("reduced")), (2, 0))
 
     def test_flatten_gain_follows_the_measured_rolloff(self):
         for field, value in (("radio_sample_rate", 320000000), ("radio_capture_rate", 320000000),

@@ -35,6 +35,15 @@ second service under the same name refuses to start; at exit the object is unlin
 
 ## The stream
 
+A stream reduced to fewer bits (`w1700k` packings `16`, `14`, `8`, `7`) comes under the magic
+`0x32524453` "SDR2" instead: the same header, with `seq` in 48 bits, the format (bits per I/Q
+pair) in the next 8 and the slice's scale code in the top 8; the slice is 4096, 3584, 2048 or
+1792 bytes (`include/hw/mt7996/iq_reduce.h`), and several whole slices may share a datagram,
+each behind its own header. The service scales them back to 14-bit samples, so consumers see no
+difference but the quantisation noise (`reduced` counts them). A slice may also come in pieces
+(`export.piece`): datagrams with a rising `offset`, assembled here; a slice with a piece missing
+counts as lost, and `pieces` counts those.
+
 The export sends one UDP datagram per completion of the unit's DMA ring: a 16-byte header
 (`u32` magic `0x31524453` "SDR1", `u16` offset, `u16` slice_bytes, `u64` seq) and one slice, 8192
 bytes raw (2048 samples, I in bits [29:16], Q in [13:0]) or 7168 bytes packed (of each 8 samples,

@@ -102,11 +102,13 @@ int main(int argc, char **argv)
             uint64_t run, newest;
             w1700k_stream_position(h, &run, &newest);
             std::printf("{\"run\":%" PRIu64 ",\"newest\":%" PRIu64 ",\"datagrams\":%" PRIu64 ",\"slices\":%" PRIu64
-                        ",\"packed\":%" PRIu64 ",\"events\":%" PRIu64 ",\"lost\":%" PRIu64 ",\"overruns\":%" PRIu64 ",\"late\":%" PRIu64
+                        ",\"packed\":%" PRIu64 ",\"reduced\":%" PRIu64 ",\"events\":%" PRIu64 ",\"lost\":%" PRIu64
+                        ",\"overruns\":%" PRIu64 ",\"pieces\":%" PRIu64 ",\"late\":%" PRIu64
                         ",\"duplicates\":%" PRIu64 ",\"bad\":%" PRIu64 ",\"socket_drops\":%" PRIu64
                         ",\"spare_words\":%" PRIu64 ",\"stale_slices\":%" PRIu64 ",\"stale_lines\":%" PRIu64
                         ",\"flatten_active\":%" PRIu64 ",\"flattened\":%" PRIu64 ",\"saturated\":%" PRIu64 "}\n",
-                        run, newest, h->datagrams, h->slices, h->packed, h->events, h->lost, h->overruns, h->late, h->duplicates,
+                        run, newest, h->datagrams, h->slices, h->packed, h->reduced, h->events, h->lost, h->overruns, h->pieces,
+                        h->late, h->duplicates,
                         h->bad, h->socket_drops, h->spare_words, h->stale_slices, h->stale_lines, h->flatten_active,
                         h->flattened, h->saturated);
             std::fflush(stdout);
