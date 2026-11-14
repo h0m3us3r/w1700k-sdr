@@ -26,7 +26,18 @@ INTERRUPT_SECONDS = 15
 MAX_KEYS = 1200
 BOOT_SECONDS = 45
 VERIFY_SECONDS = 5
+# The echo that verifies the console is read-only, so one that came back damaged is sent again.
+VERIFY_ATTEMPTS = 3
 QUIET_SECONDS = 0.1
+# Stock U-Boot can lose characters of a line that arrives in one burst: seen on one unit, a
+# 26-character line echoed with four characters missing. So nothing is sent faster than
+# TX_GAP per character (a character takes 87 us on the wire; a 16-byte FIFO then holds 16 ms of
+# typing), and at a U-Boot prompt a command is typed, its echo compared with what was sent, and
+# only then entered: a line that lost a digit of an address must not run.
+TX_GAP = 0.001
+TYPE_ATTEMPTS = 3
+ECHO_SECONDS = 2.0
+UBOOT_PROMPTS = ('stock', 'dumper', 'restorer', 'loader')
 ANSI = re.compile(rb'\x1b\[[0-?]*[ -/]*[@-~]')
 COUNTDOWN = re.compile(rb'(?i)(?:hit|press)\s+(?:any\s+)?key\s+to\s+'
                        rb'(?:stop|abort|interrupt)\s+(?:auto\s*)?boot')
@@ -107,10 +118,18 @@ class BootCatcher:
         self.view = b''
         self.linux = None
         self.boot = None
+        self.verifies = 0
 
     def transition(self, state, reason, **evidence):
         self.state = state
         self.event('catcher_state', state=state, reason=reason, keys=self.keys, **evidence)
+
+    def verify(self, now):
+        self.verifies += 1
+        self.until = now + VERIFY_SECONDS
+        self.tail = b''  # Only output received after this command can confirm it.
+        self.dirty = True
+        self.send(b'echo ' + self.token + b'\r', 'verify U-Boot console')
 
     def manual(self):
         if self.state != 'manual':
@@ -149,6 +168,10 @@ class BootCatcher:
             elif prompt and quiet and reply and reply.start() < prompt[0]:
                 self.transition('confirmed', 'unique echo output and subsequent U-Boot prompt',
                                 prompt_edits=prompt[1])
+            elif prompt and quiet and self.verifies < VERIFY_ATTEMPTS:
+                # Back at a prompt without the token: the line was damaged on its way in.
+                self.event('verify_retry', attempt=self.verifies, seen=view[-80:].decode('latin-1'))
+                self.verify(now)
             return
         if self.first_rx is not None and now - self.first_rx >= BOOT_SECONDS:
             self.transition('inconclusive', 'no verified prompt within first-RX deadline')
@@ -158,10 +181,8 @@ class BootCatcher:
             if quiet:
                 self.transition('verifying', 'U-Boot prompt observed; checking read-only echo',
                                 prompt_edits=prompt[1])
-                self.until = now + VERIFY_SECONDS
-                self.tail = b''  # Only output received after this command can confirm it.
-                self.dirty = True
-                self.send(b'echo ' + self.token + b'\r', 'verify U-Boot console')
+                self.verifies = 0
+                self.verify(now)
                 return
         if self.state == 'armed' and self.boot:
             self.until = now + INTERRUPT_SECONDS
@@ -325,7 +346,12 @@ class ConsoleSession:
         """The only writer. Two threads reach it: this flow, and the operator FIFO."""
         self.event('tx_attempt', hex=data.hex(), reason=reason)
         with self.write_lock:
-            written = self.uart.write(data)
+            written = 0
+            for index in range(len(data)):
+                written += self.uart.write(data[index:index + 1])
+                if index + 1 < len(data):
+                    self.uart.flush()
+                    time.sleep(TX_GAP)
         self.event('tx_written', bytes=written)
         if written != len(data):
             raise RuntimeError('partial UART write; inspect the transcript before retry')
@@ -399,7 +425,39 @@ class ConsoleSession:
         taken over by the operator.
         """
         self.check_command(line)
-        self._transmit((line + '\n').encode(), 'tool command')
+        if any(self.at_prompt(name) for name in UBOOT_PROMPTS):
+            self._type_checked(line)
+        else:
+            self._transmit((line + '\n').encode(), 'tool command')
+
+    def _type_checked(self, line):
+        """At a U-Boot prompt: type `line`, and enter it only once its echo is exactly what was
+        sent. A damaged line is discarded with Ctrl-C and typed again; after TYPE_ATTEMPTS the
+        run stops, with nothing entered."""
+        wanted = line.encode()
+        echoed = b''
+        for attempt in range(1, TYPE_ATTEMPTS + 1):
+            # The prompt's own last byte may still be on its way (`SDR loader>` seen, its
+            # space not yet): what precedes the echo must have arrived before it is marked.
+            self.wait(lambda: self.last_rx is None
+                      or time.monotonic() - self.last_rx >= QUIET_SECONDS, 1.0, 'a quiet prompt')
+            start = self.mark()
+
+            def echo():
+                with self.lock:
+                    return bytes(self.buffer[start:])
+            self._transmit(wanted, 'tool command, typed')
+            self.wait(lambda: len(echo()) >= len(wanted), ECHO_SECONDS, 'the echo of a typed command')
+            echoed = echo()
+            if echoed == wanted:
+                self._transmit(b'\n', 'tool command, entered')
+                return
+            self.event('echo_mismatch', sent=line, echoed=echoed.decode('latin-1'), attempt=attempt)
+            self._transmit(b'\x03', 'discard a damaged line')
+            self.wait(lambda: any(self.at_prompt(name) for name in UBOOT_PROMPTS), ECHO_SECONDS,
+                      'a prompt after discarding a line')
+        raise RuntimeError(f'the console did not take {line!r} intact in {TYPE_ATTEMPTS} attempts '
+                           f'(the last echo was {echoed!r}); nothing was entered')
 
     def run(self, line, expect=None, limit=20.0, quiet=QUIET_SETTLE, heartbeat=None,
             about=None):

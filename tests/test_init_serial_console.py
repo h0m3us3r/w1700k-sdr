@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 try:
     import serial
@@ -192,6 +193,35 @@ class CatcherTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(self.catcher.state, 'inconclusive')
 
+    def test_a_damaged_verification_is_sent_again(self):
+        self.rx(b'Hit any key to stop autoboot: 4', 0)
+        self.catcher.tick(0)
+        self.rx(b'\r\nECNT> ', 1)
+        self.catcher.tick(2)
+        command = b'echo uart_test123\r'
+        self.assertEqual(self.sent[-1], command)
+        # Stock U-Boot lost a character of the line: what it echoes is not the token.
+        self.rx(b'echo uarttest123\r\nuarttest123\r\nECNT> ', 2.1)
+        self.catcher.tick(2.3)
+        self.assertEqual(self.catcher.state, 'verifying')
+        self.assertEqual(self.sent[-2:], [command, command])
+        self.rx(b'echo uart_test123\r\nuart_test123\r\nECNT> ', 2.4)
+        self.catcher.tick(2.6)
+        self.assertEqual(self.catcher.state, 'confirmed')
+
+    def test_verification_is_not_repeated_without_end(self):
+        self.rx(b'Hit any key to stop autoboot: 4', 0)
+        self.catcher.tick(0)
+        self.rx(b'\r\nECNT> ', 1)
+        now = 2
+        for _ in range(6):
+            self.catcher.tick(now)
+            self.rx(b'echo uarttest123\r\nuarttest123\r\nECNT> ', now + .1)
+            now += .3
+        self.assertEqual(self.sent.count(b'echo uart_test123\r'), console.VERIFY_ATTEMPTS)
+        self.catcher.tick(now + console.VERIFY_SECONDS)
+        self.assertEqual(self.catcher.state, 'inconclusive')
+
     def test_echo_timeout_does_not_claim_success(self):
         self.rx(b'=> ')
         self.catcher.tick(.11)
@@ -286,17 +316,87 @@ class SessionTests(SessionFixture):
         os.write(self.master, b'\r\nU-Boot 2014.04\r\nHit any key to stop autoboot: 4')
         self.assertEqual(set(self.read_until(b' ')), {ord(' ')})
 
-    def test_a_command_waits_for_the_prompt(self):
-        os.write(self.master, b'ECNT> ')
+    def unit(self, lose=(), prompt=b'ECNT> ', slow=0):
+        """Play a U-Boot at its prompt: every character typed is echoed, except the ones whose
+        place in the stream of typed characters is in `lose` (they are lost, as stock U-Boot
+        loses them); Ctrl-C discards the line; a newline runs it. `slow` is how long it takes to
+        answer. Returns what was received and the lines that were run."""
+        os.write(self.master, prompt)
         self.session.wait(lambda: self.session.at_prompt('stock'), 2, 'prompt')
         self.session.catcher.state = 'confirmed'
-        answer = threading.Thread(target=lambda: (self.read_until(b'version\n'),
-                                                  os.write(self.master,
-                                                           b'version\r\nU-Boot\r\nECNT> ')))
-        answer.start()
+        received, ran, stop = bytearray(), [], threading.Event()
+
+        def play():
+            line, typed = b'', 0
+            while not stop.is_set():
+                if not select.select([self.master], [], [], .05)[0]:
+                    continue
+                time.sleep(slow)
+                for value in os.read(self.master, 4096):
+                    byte = bytes([value])
+                    received.extend(byte)
+                    if byte == b'\x03':
+                        line = b''
+                        os.write(self.master, b'<INTERRUPT>\r\n' + prompt)
+                    elif byte in b'\r\n':
+                        ran.append(line.decode())
+                        os.write(self.master, b'\r\nran ' + line + b'\r\n' + prompt)
+                        line = b''
+                    else:
+                        typed += 1
+                        if typed not in lose:
+                            line += byte
+                            os.write(self.master, byte)
+        thread = threading.Thread(target=play)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(stop.set)
+        return received, ran
+
+    def test_a_command_is_entered_once_its_echo_is_whole(self):
+        received, ran = self.unit()
         text = self.session.must_run('version', limit=3)
-        answer.join()
-        self.assertIn('U-Boot', text)
+        self.assertIn('ran version', text)
+        self.assertEqual(ran, ['version'])
+        self.assertEqual(bytes(received), b'version\n')
+
+    def test_a_line_that_lost_a_character_is_typed_again_not_run(self):
+        """`flash read 0x4600000 ...` with a digit lost is another command: it is never run."""
+        line = 'nand read 0x90000000 0x4600000 0x20000'
+        received, ran = self.unit(lose={22})
+        with mock.patch.object(console, 'ECHO_SECONDS', .3):
+            text = self.session.must_run(line, limit=5)
+        self.assertEqual(ran, [line])
+        self.assertEqual(bytes(received), line.encode() + b'\x03' + line.encode() + b'\n')
+        self.assertIn('ran ' + line, text)
+        self.assertEqual([fields['attempt'] for kind, fields in self.events
+                          if kind == 'echo_mismatch'], [1])
+
+    def test_a_console_that_keeps_losing_characters_runs_nothing(self):
+        line = 'printenv bootcmd'
+        received, ran = self.unit(lose={3, 19, 35})
+        with mock.patch.object(console, 'ECHO_SECONDS', .3), \
+                self.assertRaisesRegex(RuntimeError, 'nothing was entered'):
+            self.session.run(line, limit=5)
+        self.assertEqual(ran, [])
+        self.assertNotIn(b'\n', bytes(received))
+        self.assertNotIn(b'\r', bytes(received))
+
+    def test_the_end_of_the_prompt_is_not_taken_for_echo(self):
+        """Seen on a unit: `SDR loader>` in view, its space arriving as the command was typed."""
+        received, ran = self.unit(prompt=b'ECNT>', slow=.06)
+        late = threading.Timer(.03, os.write, (self.master, b' '))
+        late.start()
+        self.session.must_run('version', limit=3)
+        late.join()
+        self.assertEqual(ran, ['version'])
+        self.assertEqual([kind for kind, _ in self.events if kind == 'echo_mismatch'], [])
+
+    def test_characters_are_not_sent_in_one_burst(self):
+        received, ran = self.unit()
+        began = time.monotonic()
+        self.session.must_run('x' * 200, limit=5)
+        self.assertGreater(time.monotonic() - began, 200 * console.TX_GAP)
 
     def test_writes_are_refused_unless_the_session_allows_them(self):
         for line in ('saveenv', 'flash erase 0x600000 0x40000', 'ubi write 0 fit 1',

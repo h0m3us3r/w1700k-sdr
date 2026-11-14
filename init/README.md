@@ -332,3 +332,12 @@ each checked by CRC-32 in RAM before stock verifies the FIT's SHA-1 hashes. Our
 U-Boot fetches whole images on port 7070 and the tools check SHA-256 before and
 after every write. The console session refuses NAND and environment writes
 unless the run is one that writes.
+
+Stock U-Boot can lose characters of a line that reaches it in one burst (seen
+on one unit: four characters of a 26-character line gone from its echo). A lost
+digit of an address makes another command, so the console session sends a
+character per millisecond, and at a U-Boot prompt it types a command, compares
+the echo with what it sent, and presses Enter only when they agree. A line that
+came back damaged is discarded with Ctrl-C and typed again; after three damaged
+tries the run stops with nothing entered. The echo that confirms the console
+after stopping the countdown is repeated the same way.
