@@ -333,11 +333,12 @@ static inline struct hsb led_engine_at(const struct led_engine *e, double t)
  *             slot's key, in colour and in direction (red against green is the colour blindness
  *             most people with one have): green rising out of the dark, like the bar of the idle
  *             look, when the key will be switched on; red sinking from full when it will be
- *             switched off; white rising when the slot is empty and there is nothing to switch.
- *             Then a flash, and the same colour pulsing: letting go now does it. After KEY_PROGRAM_SECONDS it flashes again and
+ *             switched off. Then a flash, and the same colour pulsing: letting go now does it.
+ *             With an empty slot there is nothing to switch and nothing happens before
+ *             KEY_PROGRAM_SECONDS: white rises all that way, twice as slowly, with no flash. After KEY_PROGRAM_SECONDS it flashes again and
  *             pulses blue, faster: letting go now opens the slot for a new key. After
  *             KEY_PURGE_SECONDS a third flash, and red blinking hard: letting go now erases the
- *             slot's key (pale again where there is none)
+ *             slot's key (pale where there is none)
  *   drain     let go before anything: what had filled runs out, nothing happened
  *   on, off   switched: green, twice up and staying; red, sinking into the dark
  *   window    blue, breathing: the unit waits for a key
@@ -411,11 +412,18 @@ static inline float led_key_smooth(float x)
 	return x * x * (3 - 2 * x);
 }
 
-/* The first seconds of a hold, `held` in: what letting go at their end will do to the key. */
+/* How long a hold says only what it is coming to: until the key can be switched, or with an
+ * empty slot until it can be programmed. */
+static inline double led_key_fill_seconds(enum key_slot slot)
+{
+	return slot == KEY_SLOT_EMPTY ? KEY_PROGRAM_SECONDS : KEY_TOGGLE_SECONDS;
+}
+
+/* The first seconds of a hold, `held` in: what letting go at their end will do. */
 static inline struct hsb led_key_fill(enum key_slot slot, double held)
 {
-	float part = led_clamp((float)(held / KEY_TOGGLE_SECONDS));
-	struct hsb c = { 0, 0, 0.06f + 0.94f * part };	/* nothing to switch: white, rising */
+	float part = led_clamp((float)(held / led_key_fill_seconds(slot)));
+	struct hsb c = { 0, 0, 0.06f + 0.94f * part };	/* an empty slot: white, rising */
 
 	if (slot == KEY_SLOT_OFF) {		/* on: green, rising */
 		c.h = LED_KEY_HUE_ON;
@@ -454,19 +462,13 @@ static inline float led_key_at(const struct led_key *k, double t, struct hsb *c)
 	case LED_KEY_HELD:
 		if (z > LED_KEY_HELD_MOST)	/* not a hand: a record nobody ended */
 			return 0;
-		if (z < KEY_TOGGLE_SECONDS) {
+		if (z < led_key_fill_seconds(k->slot)) {
 			*c = led_key_fill(k->slot, z);
 			return led_clamp((float)(z / 0.15));
 		}
 		if (z < KEY_PROGRAM_SECONDS) {
-			z -= KEY_TOGGLE_SECONDS;
-			if (k->slot == KEY_SLOT_EMPTY) {
-				*c = led_key_zone(0, 0, 0.2f, z, 0.8);
-				if (z >= LED_KEY_FLASH)
-					c->b *= 0.45f;
-			} else {
-				*c = led_key_zone(k->slot == KEY_SLOT_ON ? LED_KEY_HUE_OFF : LED_KEY_HUE_ON, 1, 0.3f, z, 0.8);
-			}
+			*c = led_key_zone(k->slot == KEY_SLOT_ON ? LED_KEY_HUE_OFF : LED_KEY_HUE_ON, 1, 0.3f,
+					  z - KEY_TOGGLE_SECONDS, 0.8);
 			return 1;
 		}
 		if (z < KEY_PURGE_SECONDS) {

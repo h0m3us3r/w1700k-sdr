@@ -267,15 +267,16 @@ by how long you held it, and the LED says which stretch you are in
 
 | Held | The LED while held | Letting go |
 | --- | --- | --- |
-| under 5 s | green rising, red sinking or white rising (below) | nothing: what had filled runs out |
+| under 5 s | green rising or red sinking (below) | nothing: what had filled runs out |
 | 5 s | a flash, then the same colour pulsing | switches the slot's key off, or on again |
 | 10 s | a flash, then blue pulsing | opens the slot for a new key: three minutes, blue breathing |
 | 15 s | a flash, then red blinking hard | erases the slot's key |
 
 The first five seconds already say which way the key would be switched, in
 colour and in direction: green rising out of the dark when it is off and would
-be switched on, red sinking from full when it is on and would be switched off,
-white rising when the slot is empty and there is nothing to switch.
+be switched on, red sinking from full when it is on and would be switched off.
+With an empty slot there is nothing to switch, so nothing happens before ten
+seconds: white rises all that way, without the flash at five.
 
 While the slot is open the unit takes one line of text, a public key, on TCP
 port 7722 of its management address (`lan3`). It checks that the line is a

@@ -142,10 +142,16 @@ class Led(Built):
         self.assertLess(levels[-1], 0.2)
         self.assertGreater(levels[-1], 0.1, 'never dark: the button is still held')
 
-    def test_with_nothing_in_the_slot_the_fill_is_white(self):
-        rows = self.at('held 0 empty', *[k / 4 for k in range(1, 20)])
+    def test_with_nothing_in_the_slot_white_rises_for_all_of_ten_seconds(self):
+        """Nothing can happen before a new key can go in: no flash at five seconds, no pulse."""
+        rows = self.at('held 0 empty', *[k / 4 for k in range(1, 40)])
         self.assertTrue(all(own == 1 and s == 0 for own, _, s, _ in rows))
-        self.assertEqual([b for *_, b in rows], sorted(b for *_, b in rows))
+        levels = [b for *_, b in rows]
+        self.assertEqual(levels, sorted(levels))
+        self.assertAlmostEqual(self.at('held 0 empty', 5.05)[3], 0.06 + 0.94 * 0.505, places=2, msg='half way, not a flash')
+        self.assertGreater(levels[-1], 0.95)
+        self.assertEqual(self.at('held 0 empty', 10.05)[2:], (0.0, 1.0), 'the first flash is the one before the blue')
+        self.assertEqual(self.at('held 0 empty', 10.6)[1:3], (225.0, 1.0))
 
     def test_at_five_seconds_a_flash_then_the_colour_of_what_letting_go_would_do(self):
         for slot, hue in (('off', 120), ('on', 0)):
@@ -156,9 +162,6 @@ class Led(Built):
                 levels = [row[3] for row in self.at(f'held 0 {slot}', *[5.3 + k / 20 for k in range(32)])]
                 self.assertLess(min(levels), 0.4)
                 self.assertGreater(max(levels), 0.95, 'it pulses')
-        own, _, s, b = self.at('held 0 empty', 6.0)
-        self.assertEqual((own, s), (1.0, 0.0), 'nothing to switch: no colour')
-        self.assertLess(b, 0.5)
 
     def test_at_ten_seconds_a_flash_then_blue_whatever_the_slot_holds(self):
         for slot in ('on', 'off', 'empty'):
@@ -191,7 +194,7 @@ class Led(Built):
         self.assertEqual(self.at('purged 0', 3.0)[0], 0.0)
 
     def test_letting_go_early_runs_the_fill_out_and_gives_the_led_back(self):
-        for slot, hue, level in (('off', 120, 0.06 + 0.94 * 3 / 5), ('on', 0, 1 - 0.88 * 3 / 5), ('empty', 0, 0.06 + 0.94 * 3 / 5)):
+        for slot, hue, level in (('off', 120, 0.06 + 0.94 * 3 / 5), ('on', 0, 1 - 0.88 * 3 / 5), ('empty', 0, 0.06 + 0.94 * 3 / 10)):
             rows = self.at(f'drain 0 3.000 {slot}', 0.0, 0.1, 0.3, 0.6)
             self.assertAlmostEqual(rows[0][3], level, places=2, msg='from where it stood')
             self.assertEqual(rows[0][1:3], (hue, 0.0 if slot == 'empty' else 1.0), 'in the colour it had')
@@ -338,7 +341,10 @@ esac
 
     def test_an_empty_slot_has_nothing_to_switch(self):
         self.press(self.TOGGLE + 0.15)
-        self.phase('empty')
+        record = self.phase('drain')
+        self.assertAlmostEqual(float(record[2]), self.TOGGLE + 0.15, delta=0.1)
+        self.assertEqual(record[3], 'empty', 'what had filled runs out, from where it stood')
+        self.assertEqual(self.calls(), ['toggle'], 'the slot itself was asked: this boot may not know of its key')
 
     def test_fifteen_seconds_erase_the_key(self):
         (self.dir / 'slot-state').write_text('off 1\n')

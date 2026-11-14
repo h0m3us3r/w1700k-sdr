@@ -43,8 +43,8 @@ look returns when that is over.
 | --- | --- | --- |
 | Held, first 5 s | **Green, rising** out of the dark | Letting go at 5 s will switch the slot's key **on** |
 | | **Red, sinking** from full | Letting go at 5 s will switch the slot's key **off** |
-| | **White, rising** | The slot is empty: nothing to switch |
 | Held 5 s | A white flash, then the same colour **pulsing** | Let go now and it is switched |
+| Held, first 10 s, empty slot | **White, rising** all the way, no flash at 5 s | Nothing to switch: nothing happens before 10 s |
 | Held 10 s | A white flash, then **blue pulsing**, faster | Let go now and the slot opens for a new key |
 | Held 15 s | A white flash, then **red blinking hard**, lit and dark | Let go now and the slot's key is erased |
 | Let go early | What had filled runs out | Nothing happened |

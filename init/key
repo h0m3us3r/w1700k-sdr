@@ -4,8 +4,9 @@
 
     init/key [FILE]          # FILE: a public key (default ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)
 
-Run it, then hold the unit's reset button with a paperclip. The LED fills white for five seconds,
-pulses, and after ten seconds pulses blue: let go then. The unit waits three minutes for a key
+Run it, then hold the unit's reset button with a paperclip. After ten seconds the LED flashes and
+pulses blue: let go then. (Until then it rises white if the unit has no such key yet; with one, it
+shows green or red and pulses from five seconds.) The unit waits three minutes for a key
 (blue, breathing); this sends it, and the LED turns from blue to green when the unit has it.
 
 The unit keeps one such key. Sending another replaces it. Holding the button five seconds (let go

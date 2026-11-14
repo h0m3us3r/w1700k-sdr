@@ -77,8 +77,8 @@ def send(address, line, port=PORT, wait=WAIT_SECONDS, connect=socket.create_conn
                 raise KeyProblem(f'the unit at {address} did not open its slot in {wait:.0f} s ({error}). '
                                 'Hold the reset button ten seconds, until the LED pulses blue, and let go')
             if not told:
-                say('key: waiting for the unit. Hold its reset button with a paperclip: the LED fills for five seconds, '
-                    'pulses, and after ten seconds pulses blue. Let go then.')
+                say('key: waiting for the unit. Hold its reset button with a paperclip until the LED flashes and '
+                    'pulses blue, ten seconds, and let go then.')
                 told = True
             sleep(0.5)
     with link:

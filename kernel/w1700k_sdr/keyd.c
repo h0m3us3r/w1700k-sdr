@@ -327,11 +327,14 @@ int main(int argc, char **argv)
 					say("drain", t, answer);
 					break;
 				case KEY_ACT_TOGGLE:
-					if (slot_run("toggle", NULL, answer, sizeof(answer)))
+					if (slot_run("toggle", NULL, answer, sizeof(answer))) {
 						say("failed", now(), "-");
-					else
-						say(!strncmp(answer, "on", 2) ? "on" : !strncmp(answer, "off", 3) ? "off" : "empty",
-						    now(), "-");
+					} else if (!strncmp(answer, "on", 2) || !strncmp(answer, "off", 3)) {
+						say(!strncmp(answer, "on", 2) ? "on" : "off", now(), "-");
+					} else {	/* nothing to switch: what had filled runs out */
+						snprintf(answer, sizeof(answer), "%.3f empty", t - pressed);
+						say("drain", t, answer);
+					}
 					break;
 				case KEY_ACT_PURGE:
 					if (slot_run("purge", NULL, answer, sizeof(answer)))
