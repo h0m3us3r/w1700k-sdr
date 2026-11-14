@@ -45,7 +45,13 @@ disable)
 	;;
 status)
 	systemctl status "$unit" --no-pager || :
-	nft list chain ip w1700k_tftp prerouting 2>/dev/null || echo "$0: the redirect is not loaded"
+	# Only root may list nftables rules; anyone else would be told "not loaded"
+	# of a redirect that is.
+	if [ "$(id -u)" != 0 ]; then
+		echo "$0: listing the rule itself takes root: sudo $0 status"
+	else
+		nft list chain ip w1700k_tftp prerouting 2>/dev/null || echo "$0: the redirect is not loaded"
+	fi
 	;;
 *)
 	usage

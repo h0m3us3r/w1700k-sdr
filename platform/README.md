@@ -38,7 +38,13 @@ sources; `make distclean` removes `platform/build/` entirely.
 Host requirements: a C compiler, make, git, patch, Python 3.10+, perl, rsync,
 bc, cpio, unzip and the usual Buildroot prerequisites. Bison and flex are built
 by Buildroot. If the host's `install` is not GNU coreutils (some distributions
-ship uutils), `gnuinstall` or `ginstall` must exist.
+ship uutils), `gnuinstall` or `ginstall` must exist. Buildroot also builds its
+own `tar` where the host's is older than 1.35 (quinlansls asked why, in
+[issue 11](https://github.com/h0m3us3r/w1700k-sdr/issues/11)), and takes
+package sources from its own mirror before the packages' sites: with the
+default order a build waited for hours on a download from mpfr.org, as
+vampjaz reported in
+[issue 9](https://github.com/h0m3us3r/w1700k-sdr/issues/9).
 
 ## Sources
 

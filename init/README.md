@@ -30,6 +30,11 @@ systemd unit with one nftables rule that redirects exactly that traffic (from
 the tools run as a normal user. Without it, the tools must run as root to listen
 on port 69 themselves; root then also owns the files they write, under root's
 home unless `--data-dir` and `--authorized-key` say otherwise.
+`sudo init/host/tftp-forward disable` removes the unit and the rule again.
+`init/host/tftp-forward status` shows the unit's state to anyone and the rule
+itself to root only; without root it used to say the redirect was not loaded
+when it was, as vampjaz reported in
+[issue 10](https://github.com/h0m3us3r/w1700k-sdr/issues/10).
 
 For the 10 GbE IQ link (unit `eth1`, 10.77.0.1), give the host side its
 address and jumbo frames: `sudo init/host/link keep IFACE10G 10.77.0.10/24 9216`.

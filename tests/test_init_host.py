@@ -48,6 +48,15 @@ class Scripts(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('root', result.stderr)
 
+    @unittest.skipIf(os.geteuid() == 0, 'runs as root')
+    def test_status_without_root_does_not_claim_the_redirect_is_missing(self):
+        # nft lists rules for root alone, so its failure here says nothing.
+        result = subprocess.run([str(HOST / 'tftp-forward'), 'status'],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('not loaded', result.stdout)
+        self.assertIn('takes root', result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()
