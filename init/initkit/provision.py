@@ -25,6 +25,7 @@ from . import config, paperclip
 from .log import private_file
 
 HOST_KEY = 'dropbear_ed25519_host_key'
+LOGIN_KEY = 'login-key'         # in the unit directory: the fingerprint of the key in its root, or `none'
 KNOWN_HOSTS = 'known_hosts'
 NETWORK = 'network.conf'
 IMAGE = 'rootfs.squashfs'
@@ -143,10 +144,11 @@ def authorized_key(path=None):
 def private_files(unit_directory, public_key, dropbear_key):
     """{path in the root: (bytes, mode)} for one unit."""
     files = {
-        'root/.ssh/authorized_keys': (public_key, 0o600),
         f'etc/dropbear/{HOST_KEY}': (dropbear_key, 0o600),
         f'etc/dropbear/{HOST_KEY}.pub': (host_public_key(dropbear_key) + b'\n', 0o644),
     }
+    if public_key is not None:              # None: no login key in the root (--no-login-key)
+        files['root/.ssh/authorized_keys'] = (public_key, 0o600)
     network = Path(unit_directory) / NETWORK
     if network.is_file():
         files['etc/w1700k/network.conf'] = (network.read_bytes(), 0o644)
@@ -211,15 +213,26 @@ def build(unit_directory, public_key, dropbear_key, generic=config.ROOTFS,
 
 
 def provision(unit_directory, authorized_key_path=None, import_host_key=None, address='192.168.1.1',
-              generic=None):
+              generic=None, no_login_key=False, say=print):
     """Build the unit's root (from `generic`, default this build's); returns (image path, host
     public key line). Also writes `known_hosts` in the unit's directory, for the host tools'
-    `unit.known_hosts`."""
+    `unit.known_hosts`.
+
+    With `no_login_key` the root has no login key built in: the unit takes its key from its reset
+    button alone (init/key). What the root carries is noted in the unit's directory, and a root
+    with a key made for a unit whose last one had none is said, since that is easily done by
+    leaving the option out."""
     unit_directory = Path(unit_directory)
     unit_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     dropbear_key = host_key(unit_directory, import_host_key)
-    image = build(unit_directory, authorized_key(authorized_key_path), dropbear_key,
-                  **({'generic': generic} if generic else {}))
+    key = None if no_login_key else authorized_key(authorized_key_path)
+    image = build(unit_directory, key, dropbear_key, **({'generic': generic} if generic else {}))
     public = host_public_key(dropbear_key).decode()
     (unit_directory / KNOWN_HOSTS).write_text(f'{address} {public}\n')
+    carries = 'none' if key is None else paperclip.fingerprint(key.split()[1].decode())
+    note = unit_directory / LOGIN_KEY
+    if key is not None and note.is_file() and note.read_text().strip() == 'none':
+        say(f'note: this root has a login key built in ({carries}); the last one made for this unit '
+            'had none (--no-login-key)')
+    note.write_text(carries + '\n')
     return image, public

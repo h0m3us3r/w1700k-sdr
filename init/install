@@ -26,6 +26,9 @@ def main():
                         default=settings['authorized_key'],
                         help='SSH public key for root logins (default: ~/.ssh/id_ed25519.pub, '
                              'id_ecdsa.pub or id_rsa.pub)')
+    parser.add_argument('--no-login-key', action='store_true',
+                        help='build no login key into the root: the unit takes its key from its '
+                             'reset button alone (init/key)')
     parser.add_argument('--import-host-key', metavar='FILE',
                         help="use this SSH host key for the unit instead of making one "
                              "(OpenSSH or Dropbear Ed25519 private key)")
@@ -40,7 +43,7 @@ def main():
     try:
         return install.run(session.settings_from(args), args.expect_serial,
                            args.authorized_key, args.import_host_key, args.force,
-                           args.backup_only, args.accept_untested)
+                           args.backup_only, args.accept_untested, no_login_key=args.no_login_key)
     except (StepFailed, ProvisionError, RuntimeError) as error:
         sys.exit(f'install: {error}')
     except KeyboardInterrupt:

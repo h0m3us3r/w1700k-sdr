@@ -306,6 +306,28 @@ to, which is as good an introduction as a host key gets.
 - The key that `init/install` builds into the unit's root is separate and
   stays as it is; both log in.
 
+### A unit with no key built in
+
+By default a unit's root carries the installer's public key. `--no-login-key`
+leaves it out, for a unit that is to take its key from its reset button
+alone, a unit made for someone else, say:
+
+```sh
+init/install --no-login-key           # over the console: no key file is needed
+init/flash --rootfs --no-login-key    # the same for an installed unit, over the console
+init/flash --ssh --no-login-key       # or over ssh, to a unit that has a paperclip key
+```
+
+Such a unit answers ssh from nobody until `init/key` and a paperclip give it
+a key. Over ssh the tools therefore send a root without a key only to a unit
+whose paperclip key is switched on and kept by its loader; log in with that
+key (`--authorized-key` names the key the tools log in with, as always), or
+the update cannot be confirmed and the next boot undoes it.
+
+The option is asked for each time. A later root made without it carries a key
+again; the tools say so when the last root made for that unit had none (the
+unit directory's `login-key` notes which).
+
 ## Returning to stock
 
 ```sh

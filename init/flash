@@ -56,6 +56,9 @@ def main():
     parser.add_argument('--authorized-key', metavar='FILE',
                         default=settings['authorized_key'],
                         help='SSH public key for root logins')
+    parser.add_argument('--no-login-key', action='store_true',
+                        help='build no login key into the root: the unit takes its key from its '
+                             'reset button alone (init/key)')
     args = parser.parse_args()
     targets = (args.system, args.fit, args.rootfs, args.loader, args.durable)
     if args.bundle and (args.ssh or args.recovery or args.detect_only or args.no_boot or any(targets)):
@@ -76,15 +79,17 @@ def main():
             return update.detect(settings)
         if args.bundle or (args.ssh and args.loader and args.rootfs):
             return remote.run_joint(settings, args.unit, authorized_key=args.authorized_key,
-                                    bundle_path=args.bundle)
+                                    bundle_path=args.bundle, no_login_key=args.no_login_key)
         if args.ssh and args.loader:
             return remote.run_loader(settings, args.unit, authorized_key=args.authorized_key)
         if args.ssh:
-            return remote.run(settings, args.unit, authorized_key=args.authorized_key)
+            return remote.run(settings, args.unit, authorized_key=args.authorized_key,
+                              no_login_key=args.no_login_key)
         return update.run(settings, args.unit, fit=args.fit or args.system,
                           rootfs=args.rootfs or args.system, durable=args.durable,
                           loader=args.loader, recovery=args.recovery,
-                          boot=not args.no_boot, authorized_key=args.authorized_key)
+                          boot=not args.no_boot, authorized_key=args.authorized_key,
+                          no_login_key=args.no_login_key)
     except (StepFailed, ProvisionError, RuntimeError) as error:
         sys.exit(f'flash: {error}')
     except KeyboardInterrupt:

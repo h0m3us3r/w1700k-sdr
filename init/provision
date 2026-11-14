@@ -24,6 +24,9 @@ def main():
     parser.add_argument('--data-dir', type=Path, default=Path(settings['data_dir']))
     parser.add_argument('--authorized-key', metavar='FILE',
                         default=settings['authorized_key'])
+    parser.add_argument('--no-login-key', action='store_true',
+                        help='build no login key into the root: the unit takes its key from its '
+                             'reset button alone (init/key)')
     parser.add_argument('--import-host-key', metavar='FILE')
     args = parser.parse_args()
     if not backup.SERIAL_FORM.match(args.unit):
@@ -31,7 +34,8 @@ def main():
     directory = config.unit_dir(args.data_dir, args.unit)
     try:
         image, host_key = provision.provision(directory, args.authorized_key,
-                                              args.import_host_key, address=settings['device_ip'])
+                                              args.import_host_key, address=settings['device_ip'],
+                                              no_login_key=args.no_login_key)
     except provision.ProvisionError as error:
         sys.exit(f'provision: {error}')
     print(f'provision: {image}')

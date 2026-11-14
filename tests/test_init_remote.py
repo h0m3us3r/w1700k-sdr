@@ -52,6 +52,9 @@ class Unit:
             if self.down:
                 return 255, ''
         self.calls.append(command)
+        if command == '/usr/sbin/w1700k-keyslot status':
+            keyslot = getattr(self, 'keyslot', None)
+            return (0, keyslot) if keyslot else (127, 'sh: /usr/sbin/w1700k-keyslot: not found\n')
         if command == 'true':
             return 0, ''
         if command.startswith('cat > '):
@@ -117,10 +120,10 @@ class Remote(unittest.TestCase):
             self.printed = patcher.start()
             self.addCleanup(patcher.stop)
 
-    def run_update(self, unit):
+    def run_update(self, unit, **options):
         def sleep(seconds):
             self.now += seconds
-        return remote.run(self.settings, link=unit, clock=lambda: self.now, sleep=sleep)
+        return remote.run(self.settings, link=unit, clock=lambda: self.now, sleep=sleep, **options)
 
     def said(self):
         return ' '.join(str(call.args[0]) for call in self.printed.call_args_list if call.args)
@@ -139,6 +142,31 @@ class Remote(unittest.TestCase):
         self.assertIn('runs and is confirmed', self.said())
         unit.reboot()
         self.assertEqual((unit.running, unit.tried), (self.new, ''), 'and it stays')
+
+    def test_a_root_with_no_login_key_goes_to_a_unit_that_has_its_own_key(self):
+        unit = Unit()
+        unit.keyslot = 'slot=on\npersist=1\n'
+        self.assertEqual(self.run_update(unit, no_login_key=True), 0)
+        self.assertTrue(provision.provision.call_args.kwargs['no_login_key'])
+        self.assertEqual(self.verbs(unit)[:3], ['status', '/usr/sbin/w1700k-keyslot', 'cat'], 'asked before anything is sent')
+        self.assertEqual(unit.running, self.new)
+
+    def test_a_root_with_no_login_key_is_not_sent_where_it_would_lock_the_unit(self):
+        for keyslot, why in (('slot=off\npersist=1\n', 'switched off'), ('slot=empty\npersist=1\n', 'not set'),
+                             ('slot=on\npersist=0\n', 'loader does not keep one'), (None, 'unknown to its root')):
+            with self.subTest(keyslot):
+                unit = Unit()
+                unit.keyslot = keyslot
+                with self.assertRaisesRegex(StepFailed, f'no way in.*{why}.*init/key'):
+                    self.run_update(unit, no_login_key=True)
+                self.assertEqual(self.verbs(unit), ['status', '/usr/sbin/w1700k-keyslot'], 'nothing sent')
+                self.assertEqual(unit.running, OLD)
+
+    def test_the_default_builds_a_key_in_and_asks_the_unit_nothing_about_its_slot(self):
+        unit = Unit()
+        self.assertEqual(self.run_update(unit), 0)
+        self.assertFalse(provision.provision.call_args.kwargs['no_login_key'])
+        self.assertNotIn('/usr/sbin/w1700k-keyslot', self.verbs(unit))
 
     def test_a_root_that_already_runs_is_left_alone(self):
         unit = Unit()
@@ -220,6 +248,9 @@ class LoaderUnit:
             if self.down:
                 return 255, ''
         self.calls.append(command)
+        if command == '/usr/sbin/w1700k-keyslot status':
+            keyslot = getattr(self, 'keyslot', None)
+            return (0, keyslot) if keyslot else (127, 'sh: /usr/sbin/w1700k-keyslot: not found\n')
         if command == 'true':
             return 0, ''
         if command.startswith('cat > '):
@@ -372,6 +403,9 @@ class JointUnit:
             else:
                 return 255, ''
         self.calls.append(command)
+        if command == '/usr/sbin/w1700k-keyslot status':
+            keyslot = getattr(self, 'keyslot', None)
+            return (0, keyslot) if keyslot else (127, 'sh: /usr/sbin/w1700k-keyslot: not found\n')
         if command == 'true':
             return 0, ''
         if command == 'cat /proc/mtd':
@@ -444,8 +478,9 @@ class RemoteJoint(unittest.TestCase):
         self.now = 0.0
         self.provisioned = []
 
-        def provisioned(directory, key, address=None, generic=None):
+        def provisioned(directory, key, address=None, generic=None, no_login_key=False):
             self.provisioned.append(Path(generic).read_bytes() if generic else None)
+            self.no_login_key = no_login_key
             return self.root_image, 'key'
         for patcher in (mock.patch.object(config, 'require_images'),
                         mock.patch.object(config, 'pick_unit', return_value='SERIAL'),
@@ -455,11 +490,11 @@ class RemoteJoint(unittest.TestCase):
             self.printed = patcher.start()
             self.addCleanup(patcher.stop)
 
-    def run_update(self, unit, bundle_path=None):
+    def run_update(self, unit, bundle_path=None, **options):
         def sleep(seconds):
             self.now += seconds
         return remote.run_joint(self.settings, bundle_path=bundle_path, link=unit, clock=lambda: self.now,
-                                sleep=sleep)
+                                sleep=sleep, **options)
 
     def said(self):
         return ' '.join(str(call.args[0]) for call in self.printed.call_args_list if call.args)
@@ -477,6 +512,17 @@ class RemoteJoint(unittest.TestCase):
         self.assertEqual((unit.staged, unit.lstaged), ('', ''))
         self.assertIn(f'loader {self.loader[:12]} and root {self.root[:12]} run and are confirmed', self.said())
         self.assertEqual(self.provisioned, [None], "this build's root, with the unit's keys")
+
+    def test_both_with_no_login_key_only_where_the_unit_has_its_own(self):
+        unit = JointUnit()
+        with self.assertRaisesRegex(StepFailed, 'no way in'):
+            self.run_update(unit, no_login_key=True)
+        self.assertEqual((unit.staged, unit.lstaged, unit.running), ('', '', OLD), 'neither part was sent')
+        unit = JointUnit()
+        unit.keyslot = 'slot=on\npersist=1\n'
+        self.assertEqual(self.run_update(unit, no_login_key=True), 0)
+        self.assertTrue(self.no_login_key)
+        self.assertEqual((unit.running, unit.second), (self.root, self.loader))
 
     def test_an_archive_brings_the_same_two_files(self):
         archive = self.work / 'w1700k-update.tar'

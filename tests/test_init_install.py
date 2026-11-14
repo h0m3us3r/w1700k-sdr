@@ -125,6 +125,19 @@ class Install(Bench):
                              for line in self.commands()))
         self.assertEqual(unit.saved.get('bootcmd'), fake.STOCK_BOOTCMD)
 
+    def test_an_install_with_no_login_key_needs_no_key_and_says_how_the_unit_gets_one(self):
+        self.make_unit()
+        key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA=='
+        with mock.patch.object(install, 'open_session', self.open_session), \
+                mock.patch.object(provision, 'authorized_key', side_effect=provision.ProvisionError('no key')), \
+                mock.patch.object(provision, 'provision', return_value=(self.unit_root, key)) as provisioned, \
+                mock.patch('builtins.print') as printed:
+            self.assertEqual(install.run(self.settings, no_login_key=True), 0)
+        self.assertTrue(provisioned.call_args.kwargs['no_login_key'])
+        said = ' '.join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn('It has no login key: give it one with its reset button (init/key)', said)
+        self.assertNotIn('Log in with', said)
+
     def test_the_flag_installs_on_an_untested_nand_with_its_own_layout(self):
         unit = self.make_unit(part=LV)
         self.assertEqual(self.install(accept_untested=True), 0)

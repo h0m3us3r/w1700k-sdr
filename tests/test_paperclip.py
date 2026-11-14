@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'init'))
 sys.path.insert(0, str(ROOT / 'tests'))
-from initkit import paperclip, provision                 # noqa: E402
+from initkit import config, paperclip, provision         # noqa: E402
 import test_loader_update                                 # noqa: E402
 
 CC = shutil.which(os.environ.get('CC', 'cc'))
@@ -601,6 +601,50 @@ class AcrossAReboot(test_loader_update.Model):
         self.slot.keyslot('program', self.slot.slot_form(rsa(4096)) + '\n')
         self.reboot()
         self.assertEqual(self.slot.keys(), [rsa(4096) + ' paperclip'])
+
+
+@unittest.skipUnless((config.SQUASHFS_TOOLS / 'unsquashfs').exists() and config.ROOTFS.exists(),
+                     'needs the built root and squashfs tools (make)')
+class NoLoginKey(unittest.TestCase):
+    """init/install, init/flash and init/provision --no-login-key: a unit's root with no key
+    built in, for a unit that takes its key from its reset button alone. Not the default."""
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+        (self.dir / 'k.pub').write_text(ed25519(4) + ' installer\n')
+        self.said = []
+
+    def root(self, **options):
+        image, _ = provision.provision(self.dir / 'unit', self.dir / 'k.pub', say=self.said.append, **options)
+        listing = subprocess.run([str(config.SQUASHFS_TOOLS / 'unsquashfs'), '-l', str(image)],
+                                 capture_output=True, text=True, check=True).stdout
+        return {line.split('squashfs-root/', 1)[1] for line in listing.splitlines() if 'squashfs-root/' in line}
+
+    def test_by_default_the_installers_key_is_built_in(self):
+        self.assertIn('root/.ssh/authorized_keys', self.root())
+        self.assertEqual((self.dir / 'unit/login-key').read_text().strip(), paperclip.fingerprint(ed25519(4).split()[1]))
+
+    def test_with_the_option_the_root_has_no_login_key_and_everything_else(self):
+        with_key, without = self.root(), self.root(no_login_key=True)
+        self.assertEqual(with_key - without, {'root/.ssh/authorized_keys', 'root/.ssh'})
+        self.assertIn('etc/dropbear/dropbear_ed25519_host_key', without, 'the unit still has its host key')
+        self.assertIn('usr/sbin/w1700k-key', without, 'and the button that gives it a login key')
+        self.assertEqual((self.dir / 'unit/login-key').read_text().strip(), 'none')
+        self.assertEqual(self.said, [])
+
+    def test_no_key_file_is_needed_for_it(self):
+        (self.dir / 'k.pub').unlink()
+        self.assertNotIn('root/.ssh/authorized_keys', self.root(no_login_key=True))
+
+    def test_a_key_built_in_after_a_root_without_one_is_said(self):
+        self.root(no_login_key=True)
+        self.root(no_login_key=True)
+        self.assertEqual(self.said, [])
+        self.root()
+        self.assertEqual(len(self.said), 1)
+        self.assertIn('the last one made for this unit had none', self.said[0])
+        self.root()
+        self.assertEqual(len(self.said), 1, 'said once, when it changes')
 
 
 class Unit:

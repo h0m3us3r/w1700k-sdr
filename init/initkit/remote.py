@@ -57,6 +57,20 @@ class Link:
         return result.returncode, text
 
 
+def check_paperclip_key(link):
+    """Before a root with no login key built in goes to a unit over ssh: the unit must have a key
+    of its own that will still be there, or nothing could log in to confirm the update (it would
+    be undone by the next boot, and a unit that was reachable would have been made unreachable
+    for that long)."""
+    code, text = link.call('/usr/sbin/w1700k-keyslot status')
+    state = dict(line.split('=', 1) for line in text.splitlines() if '=' in line) if code == 0 else {}
+    if state.get('slot') != 'on' or state.get('persist') != '1':
+        raise StepFailed('a root with no login key would leave this unit with no way in: its paperclip key is '
+                         + {'off': 'switched off', 'empty': 'not set'}.get(state.get('slot'), 'unknown to its root')
+                         + ('' if state.get('persist', '1') == '1' else ' and its loader does not keep one')
+                         + '. Give it a key with its reset button first (init/key), and log in with that key')
+
+
 def tool(link, *arguments, timeout=180):
     """Run system-update on the unit from this tree's copy; (exit status, its output)."""
     command = 'sh -s -- ' + ' '.join(shlex.quote(str(a)) for a in arguments)
@@ -84,11 +98,13 @@ def wait(link, answering, seconds, clock, sleep):
     return False
 
 
-def run(settings, serial=None, authorized_key=None, link=None, clock=time.monotonic, sleep=time.sleep):
+def run(settings, serial=None, authorized_key=None, link=None, clock=time.monotonic, sleep=time.sleep,
+        no_login_key=False):
     config.require_images(config.ROOTFS)
     serial = config.pick_unit(settings.data_dir, serial)
     directory = config.unit_dir(settings.data_dir, serial)
-    image, _ = provision.provision(directory, authorized_key, address=settings.device_ip)
+    image, _ = provision.provision(directory, authorized_key, address=settings.device_ip,
+                                   no_login_key=no_login_key)
     data = Path(image).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     link = link or Link(settings, directory, authorized_key)
@@ -98,6 +114,8 @@ def run(settings, serial=None, authorized_key=None, link=None, clock=time.monoto
         raise StepFailed(f'the unit does not answer over ssh at {link.address}; '
                          'without it, update over the serial console (init/flash --rootfs)')
     print(f'flash: the unit runs root {state["running"][:12]}')
+    if no_login_key and state['running'] != digest:
+        check_paperclip_key(link)
     if state.get('boot') != 'installed':
         raise StepFailed('the unit runs from RAM, not from its installed root')
     if state['running'] == digest and state.get('staged') == digest:
@@ -173,7 +191,7 @@ def check_layout(link, expected=None):
 
 
 def run_joint(settings, serial=None, authorized_key=None, bundle_path=None, link=None,
-              clock=time.monotonic, sleep=time.sleep):
+              clock=time.monotonic, sleep=time.sleep, no_login_key=False):
     """The loader and the root in one go, with one reboot: from the update archive at
     `bundle_path` (init/flash --bundle), or from this build's images. Both are staged, the
     first loader writes and starts the second, which writes the root, and once the system is
@@ -191,7 +209,8 @@ def run_joint(settings, serial=None, authorized_key=None, bundle_path=None, link
         else:
             config.require_images(config.ROOTFS, config.LOADER_B)
             loader_data, generic = config.LOADER_B.read_bytes(), None
-        image, _ = provision.provision(directory, authorized_key, address=settings.device_ip, generic=generic)
+        image, _ = provision.provision(directory, authorized_key, address=settings.device_ip, generic=generic,
+                                       no_login_key=no_login_key)
     root_data = Path(image).read_bytes()
     root, loader = hashlib.sha256(root_data).hexdigest(), hashlib.sha256(loader_data).hexdigest()
     link = link or Link(settings, directory, authorized_key)
@@ -209,6 +228,8 @@ def run_joint(settings, serial=None, authorized_key=None, bundle_path=None, link
     print(f'flash: the unit runs root {state["running"][:12]}, second loader '
           f'{state["second_loader"][:12] or "absent"}')
     need_root, need_loader = state['running'] != root, state['second_loader'] != loader
+    if no_login_key and need_root:
+        check_paperclip_key(link)
     # Something still staged is an earlier run's; the loader's own notes without it are those of
     # an update that was settled, and go with the next boot.
     if state.get('staged') or state.get('loader_staged'):

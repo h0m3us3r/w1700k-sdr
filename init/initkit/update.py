@@ -21,7 +21,7 @@ def detect(settings):
 
 
 def run(settings, serial=None, fit=False, rootfs=False, durable=False, loader=False,
-        recovery=False, boot=True, authorized_key=None):
+        recovery=False, boot=True, authorized_key=None, no_login_key=False):
     wanted = [config.SYSTEM_FIT] if fit else []
     wanted += [config.ROOTFS] if rootfs else []
     wanted += list(config.DURABLES) if durable else []
@@ -32,7 +32,7 @@ def run(settings, serial=None, fit=False, rootfs=False, durable=False, loader=Fa
     if rootfs:
         serial = config.pick_unit(settings.data_dir, serial)
         image, _ = provision.provision(config.unit_dir(settings.data_dir, serial),
-                                       authorized_key, address=settings.device_ip)
+                                       authorized_key, address=settings.device_ip, no_login_key=no_login_key)
     with open_session(settings, 'flash', write=not recovery) as session:
         console, log = session.console, session.log
         state = unit.identify(console, log)
