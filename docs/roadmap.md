@@ -10,6 +10,15 @@ and switch bands. A load brings a power-cycled radio up in about 2 s; streams
 start and stop without a reload. No MediaTek code is loaded, and nothing
 transmits.
 
+Around that: a stream fits the link the unit's port negotiates (160 Msps
+lossless and 320 Msps at 14 bits per I/Q pair on 5 Gbit/s, fewer bits below
+that); the front LED says what the unit is doing; an installed unit is
+updated over ssh, root and loader, with every update undone unless confirmed;
+its login key is set, switched off and erased with the reset button, so a unit
+can be handed over with no key on it; and a SoapySDR module gives the stream
+to other programs. The serial console is still needed for a first
+installation, the first loader and the kernel image.
+
 ## How the firmware became ours
 
 1. **Our code on the MT7996.** The ROM does not authenticate the patch's hook
@@ -50,26 +59,84 @@ transmits.
 
 ## Next
 
+### A unit in someone else's hands
+
+- **Updates for a unit installed elsewhere.** `init/flash --ssh` builds a
+  unit's root on the host from the unit's directory there, which holds its ssh
+  host key. A host that did not install the unit has no such directory, so it
+  cannot update it. Either an "adopt" step makes the directory from the unit
+  over ssh, or the host key moves out of the root, beside the paperclip key's
+  slot, and one root fits every unit.
+- **A signed update archive.** Every image is hashed before and after it is
+  written, which guards against corruption and says nothing of who made it.
+  A signature over the archive's manifest, checked by `init/flash --bundle`.
+- **The kernel image over ssh.** It is a volume beside the root and could be
+  staged and confirmed the same way; today it takes the console.
+- **The paths not yet run on a unit:** a console install with
+  `--no-login-key`, and an RSA key handed over by the loader (both pass the
+  tests and the loader's model).
+
+### The control plane
+
 - **Unit-side control daemon.** The control plane is small (load, configure,
   start, stop, RF commands). A daemon on the unit can serve it on a socket, so
-  the host no longer needs ssh.
+  the host no longer needs ssh for it, and a login key is for administration
+  alone.
 - **A dedicated command ring.** Commands use words in the firmware's mailbox
   page, relayed by the stream pump while it runs. A WFDMA command/event ring
   pair of its own (or the MT7996's second PCIe host interface) would give
-  events and queueing.
+  events and queueing. It would also let code be called on the WM during a
+  stream, which the mailbox cannot do: the WM is inside the producer then.
 - **Sample rate mid-stream.** A new sample rate is a RATE between streams; it
   could run inside a stream as a resumable program.
-- **The tables as formulas.** SETUP still applies MediaTek's per-frequency-group
-  and per-bandwidth-class tables (and a TUNE does not reload the group tables);
-  each should become a computed function of the LO and the sample rate.
+
+### Using the samples
+
+- **Lower sample rates.** The stream and the SoapySDR module offer the
+  radio's own rates, 40 Msps and up, which many SDR programs cannot take.
+  Decimation in the stream service would serve them.
+- **Calibrated levels.** dBFS to dBm per band and gain setting.
 - **Frequency coverage.** Measured LO coverage is 2.081–2.748 GHz and
   4.647–7.576 GHz (unit A; above 7.41 GHz by the lock flag only). Below and between needs external conversion, or capture of the
   2.4 GHz monitor receiver (chain 4 of band 0), whose own PLL is known but whose
   capture path is not.
-- **Calibrated levels.** dBFS to dBm per band and gain setting.
+- **Fewer datagrams.** At 320 Msps on 5 Gbit/s the host takes 127,000
+  datagrams a second, and a single-queue adapter is where slices are lost.
+  Two of the radio's chunks to a datagram would halve that.
+
+### Processing on the chip
+
+- **The DSP cores.** Three RISC-V cores, one per band, sit idle under our
+  firmware. A memory-to-memory DMA path into a core's data memory was found
+  by a contributor and reproduces here (8 KiB in 8.8 us); posted from the
+  host it ran beside a raw 80 Msps stream with no slice lost. With a packed
+  stream its descriptors and source were in memory the WM's packers rewrite
+  (`include/hw/mt7996/mcu_map.h`), so that case is open: the rings need a
+  place of their own, and the transfers a driver inside the producer.
+- **What the cores are for.** Not the stream itself: the path carries
+  0.9 GB/s against the 1.28 of 320 Msps, and a core has four clock cycles a
+  sample at 160 Msps. A share of the chunks, one way, is enough for a
+  detector: an occupancy map per band, a squelch or trigger for a capture, a
+  faster level meter for the shift of the split packing.
+
+### Understanding the radio
+
+- **The tables as formulas.** SETUP still applies MediaTek's per-frequency-group
+  and per-bandwidth-class tables (and a TUNE does not reload the group tables);
+  each should become a computed function of the LO and the sample rate.
 - **More of the radio understood.** Many A-die registers of the RF init tables
   have no known function yet; they carry offset names and MediaTek's values.
+
+### Proving it
+
 - **Long runs.** A 24-hour stream with the export validated.
+- **Links not yet run.** The 2.5 and 1 Gbit/s rows of the link table are
+  arithmetic; 10 Gbit/s was run into a second unit as the far end, not into a
+  host.
+- **What only the loader's model has shown:** a second loader that hangs, and
+  a `loader-b` damaged at rest.
+- **One test that fails now and then under load** (the spectrum server's
+  `tuning_steady`).
 
 ## Release checklist
 
@@ -82,7 +149,9 @@ transmits.
       byte-identical to the development tree's.
 - [ ] The same on a fresh machine (only the development machine has built it).
 - [x] Install and return to stock run on a second unit (a W1700K2).
-- [ ] Update and recovery (`init/flash`) run on a second unit.
+- [x] Updates run on a second unit (a W1700K2 from the factory: installed,
+      every stream mode, then `init/flash --ssh`).
+- [ ] Recovery (`init/flash --recovery`) run on a second unit.
 - [ ] A W25N04LV unit (some W1700K2s) read raw and installed: the part, its
       spare layout and its vendor bad-block reserve are supported from three
       community driver tables and the W1700K's stock U-Boot, none read on one.
