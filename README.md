@@ -105,6 +105,11 @@ The unit's status LED tells you what the receiver is doing without a screen
 White then steady red is the loader and the kernel before our software runs;
 red that never changes means the unit did not finish booting.
 
+The LED also answers the reset button, which sets the unit's login key
+without a console ([the paperclip key](init/README.md#the-paperclip-key)):
+hold it and the LED shows what letting go would do, five seconds to switch
+the key off or on, ten for a new key (`init/key`), fifteen to erase it.
+
 ## Screenshots
 
 ![The web UI at 2.4 GHz](docs/images/ui-2g4.png)
@@ -209,7 +214,8 @@ who has the tools but does not build. Either command takes about a minute.
   partitions first, and says how such a unit is moved.
 
 The kernel image and a unit's first installation still take the serial
-console. [init/README.md](init/README.md#updates) has the details, and what to
+console. A unit's login key does not: `init/key` and a paperclip set it
+([init/README.md](init/README.md#the-paperclip-key)). [init/README.md](init/README.md#updates) has the details, and what to
 do with a unit installed from an earlier version.
 
 Build requirements: a C/C++ compiler, make, git, Python 3.10+, the usual

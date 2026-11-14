@@ -11,7 +11,12 @@
  *                                  times a lift begins, on one line
  * led_check rise                   the idle look's climb, left twice and come back to: one
  *                                  "T H S B" line per 50 ms from 0 to 14 s
- * kernel/w1700k_sdr/ledd.h built for the host, for tests/test_led.py.
+ * led_check key "RECORD" T...     the reset button's say (w1700k-key's record, begun at 0) at each
+ *                                  time T: one "T OWN H S B" line, OWN the share of the LED it takes
+ * led_check line "TEXT"            a line offered as a login key: "ok TYPE:BASE64" or "bad REASON"
+ * led_check action HELD            what letting the button go after HELD seconds means
+ * kernel/w1700k_sdr/ledd.h and keyd.h built for the host, for tests/test_led.py and
+ * tests/test_paperclip.py.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,6 +117,27 @@ int main(int argc, char **argv)
 			c = led_engine_at(&e, t);
 			printf("%.2f %.3f %.4f %.4f\n", t, c.h, c.s, c.b);
 		}
+	} else if (argc >= 4 && !strcmp(argv[1], "key")) {
+		struct led_key key;
+		struct hsb c;
+		float own;
+		int k;
+
+		led_key_parse(argv[2], &key);
+		for (k = 3; k < argc; k++) {
+			own = led_key_at(&key, atof(argv[k]), &c);
+			printf("%s %.3f %.1f %.3f %.3f\n", argv[k], own, c.h, c.s, c.b);
+		}
+	} else if (argc == 3 && !strcmp(argv[1], "line")) {
+		char slot[KEY_LINE_MAX];
+		const char *wrong = key_line_check(argv[2], slot, sizeof(slot));
+
+		printf("%s %s\n", wrong ? "bad" : "ok", wrong ? wrong : slot);
+	} else if (argc == 3 && !strcmp(argv[1], "action")) {
+		static const char *const actions[] = { "none", "toggle", "program", "purge" };
+
+		printf("%s\n", actions[key_action_for(atof(argv[2]), KEY_TOGGLE_SECONDS, KEY_PROGRAM_SECONDS,
+							KEY_PURGE_SECONDS)]);
 	} else {
 		return 2;
 	}

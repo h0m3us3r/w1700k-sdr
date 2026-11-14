@@ -1,0 +1,148 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# The paperclip key's slot: one login key that only a hand on the unit can put in, switch off
+# and switch on (w1700k-key watches the reset button and calls this).
+#
+#   w1700k-keyslot boot      at start-up: root's login keys are the one built into the root, if
+#                            any, and the slot's key if the loader says it is on
+#   w1700k-keyslot program   the key on stdin ("TYPE:BASE64") goes into the slot, switched on
+#   w1700k-keyslot toggle    the slot's key is switched off, or on again
+#   w1700k-keyslot purge     the slot's key is erased
+#   w1700k-keyslot status    the slot as this boot knows it
+#   w1700k-keyslot serve     run w1700k-key on the management address (from inittab)
+#
+# The slot is a file in durable storage, `key/slot`, in the form the loader imports:
+#
+#   key_line=TYPE:BASE64
+#   key_on=1
+#
+# Linux opens durable storage only to change it. At every boot it is the loader that reads the
+# slot, and hands it over on the kernel command line: `w1700k.keyslot=on|off|empty`, and with
+# `on` the key, `w1700k.key=TYPE:BASE64`. A loader that says nothing does not know of the slot: a
+# key programmed then works until the unit restarts (`persist=0` below).
+#
+# What the slot is goes to /run/w1700k-keyslot, "STATE PERSIST", for w1700k-key and the LED.
+# `toggle` and `purge` print what the slot then is (on, off, empty; purged), `program` what a host
+# is told, each on one line.
+set -eu
+RUN=${W1700K_KEYSLOT_RUN:-/run/w1700k-keyslot}
+KEYS=${W1700K_KEYSLOT_KEYS:-/root/.ssh/authorized_keys}
+BUILT_IN=${W1700K_KEYSLOT_BUILT_IN:-/.lower/root/.ssh/authorized_keys}
+CMDLINE=${W1700K_KEYSLOT_CMDLINE:-/proc/cmdline}
+HOST_KEY=${W1700K_KEYSLOT_HOST_KEY:-/etc/dropbear/dropbear_ed25519_host_key.pub}
+DURABLE_RUN=${W1700K_KEYSLOT_DURABLE_RUN:-/usr/sbin/durable-run}
+SLOT_DIR=${W1700K_KEYSLOT_DIR:-/durable/key}
+
+fail() { echo "w1700k-keyslot: $*" >&2; exit 1; }
+
+# A key as the slot holds it: one word, a type and a base64 body, nothing a shell, the loader or a
+# kernel command line would read as more.
+good()
+{
+	case $1 in
+	*[!A-Za-z0-9+/=:-]* | *:*:* | :* | *: | '') return 1 ;;
+	ssh-ed25519:* | ecdsa-sha2-nistp256:* | ecdsa-sha2-nistp384:* | ecdsa-sha2-nistp521:* | ssh-rsa:*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+persist() { [ -r "$RUN" ] && cut -d' ' -f2 "$RUN" || echo 0; }
+
+# Root's login keys, and the record: STATE, PERSIST, and with `on` the key.
+apply()
+{
+	directory=$(dirname "$KEYS")
+	mkdir -p "$directory"
+	chmod 700 "$directory"
+	{
+		[ ! -r "$BUILT_IN" ] || cat "$BUILT_IN"
+		[ "$1" != on ] || echo "${3%%:*} ${3#*:} paperclip"
+	} > "$KEYS.part"
+	chmod 600 "$KEYS.part"
+	mv "$KEYS.part" "$KEYS"
+	echo "$1 $2" > "$RUN.part"
+	mv "$RUN.part" "$RUN"
+}
+
+# The slot file changed inside durable storage; what its script prints after "slot: " comes back.
+in_durable()
+{
+	"$DURABLE_RUN" sh -c "$1" sh "$SLOT_DIR" "${2:-}" | sed -n 's/^slot: //p'
+}
+
+case ${1:-} in
+boot)
+	state=empty persist=0 key=
+	for word in $(cat "$CMDLINE"); do
+		case $word in
+		w1700k.keyslot=on | w1700k.keyslot=off | w1700k.keyslot=empty) state=${word#*=} persist=1 ;;
+		w1700k.key=*) key=${word#*=} ;;
+		esac
+	done
+	if [ "$state" = on ] && ! good "$key"; then
+		echo "w1700k-keyslot: the loader handed over no usable key; the slot counts as off" >&2
+		state=off
+	fi
+	apply "$state" "$persist" "$key"
+	;;
+program)
+	IFS= read -r key || :
+	good "$key" || fail "not a key as the slot holds one"
+	written=$(in_durable '
+		set -e
+		mkdir -p "$1"
+		printf "key_line=%s\nkey_on=1\n" "$2" > "$1/slot.part"
+		mv "$1/slot.part" "$1/slot"
+		echo "slot: written"' "$key")
+	[ "$written" = written ] || fail "the slot could not be written"
+	apply on "$(persist)" "$key"
+	host=
+	[ ! -r "$HOST_KEY" ] || host=$(cut -d' ' -f1,2 "$HOST_KEY" | tr ' ' ':')
+	echo "persist=$(persist) hostkey=$host"
+	;;
+toggle)
+	# The slot itself says what it holds: this boot's record may be older than the slot (a
+	# loader that does not pass it on).
+	now=$(in_durable '
+		set -e
+		[ -r "$1/slot" ] || { echo "slot: empty"; exit 0; }
+		key=$(sed -n "s/^key_line=//p" "$1/slot")
+		[ -n "$key" ] || { echo "slot: empty"; exit 0; }
+		if [ "$(sed -n "s/^key_on=//p" "$1/slot")" = 1 ]; then on=0; else on=1; fi
+		printf "key_line=%s\nkey_on=%s\n" "$key" "$on" > "$1/slot.part"
+		mv "$1/slot.part" "$1/slot"
+		echo "slot: $on $key"')
+	case $now in
+	empty) apply empty "$(persist)" ''; echo empty ;;
+	'1 '*) good "${now#1 }" || fail "the slot holds no usable key"; apply on "$(persist)" "${now#1 }"; echo on ;;
+	'0 '*) apply off "$(persist)" ''; echo off ;;
+	*) fail "the slot could not be read or written" ;;
+	esac
+	;;
+purge)
+	now=$(in_durable '
+		set -e
+		[ -e "$1/slot" ] || { echo "slot: empty"; exit 0; }
+		rm -f "$1/slot" "$1/slot.part"
+		echo "slot: purged"')
+	case $now in
+	empty | purged) apply empty "$(persist)" ''; echo "$now" ;;
+	*) fail "the slot could not be erased" ;;
+	esac
+	;;
+status)
+	[ -r "$RUN" ] || fail "no record of the slot (w1700k-keyslot boot has not run)"
+	read -r state persist < "$RUN"
+	echo "slot=$state"
+	echo "persist=$persist"
+	;;
+serve)
+	. /etc/w1700k/network.conf
+	/usr/sbin/w1700k-key --listen "${MGMT_ADDRESS%/*}" || :
+	sleep 5		# init starts it again; not in a tight loop if it cannot run
+	;;
+*)
+	echo "usage: w1700k-keyslot boot | program | toggle | purge | status | serve" >&2
+	exit 2
+	;;
+esac

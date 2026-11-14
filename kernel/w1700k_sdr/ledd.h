@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "keyd.h"
 
 struct hsb {
 	float h;	/* hue, degrees: 0 red, 60 yellow, 120 green, 180 cyan, 240 blue, 300 magenta */
@@ -320,6 +321,230 @@ static inline struct hsb led_engine_at(const struct led_engine *e, double t)
 		c = hsb_blend(c, lifted, 0.6f * up);
 	}
 	return c;
+}
+
+/* ---- the button: what the LED says while a hand on the unit speaks through the paperclip ----
+ *
+ * w1700k-key (keyd.c) writes what the button is doing, one line: a word, the time it began (the
+ * monotonic clock both programs read) and a detail. While that goes on it is all the LED shows,
+ * over whatever the receiver is doing, and the receiver's look returns when it is over.
+ *
+ *   held      for KEY_TOGGLE_SECONDS the LED says what letting go at their end will do to the
+ *             slot's key, in colour and in direction (red against green is the colour blindness
+ *             most people with one have): green rising out of the dark, like the bar of the idle
+ *             look, when the key will be switched on; red sinking from full when it will be
+ *             switched off; white rising when the slot is empty and there is nothing to switch.
+ *             Then a flash, and the same colour pulsing: letting go now does it. After KEY_PROGRAM_SECONDS it flashes again and
+ *             pulses blue, faster: letting go now opens the slot for a new key. After
+ *             KEY_PURGE_SECONDS a third flash, and red blinking hard: letting go now erases the
+ *             slot's key (pale again where there is none)
+ *   drain     let go before anything: what had filled runs out, nothing happened
+ *   on, off   switched: green, twice up and staying; red, sinking into the dark
+ *   window    blue, breathing: the unit waits for a key
+ *   taken     the key is in: a flash, then the blue turns through cyan to green and stays a moment
+ *   closed    the wait ended without a key: the blue goes out
+ *   purged    erased: the red pales to white as it sinks into the dark
+ *   failed    red, three times: the key could not be kept
+ *
+ * Green and red keep their meaning (go, stop); blue is the colour of waiting to be paired.
+ */
+enum led_key_phase {
+	LED_KEY_NONE,
+	LED_KEY_HELD,
+	LED_KEY_DRAIN,
+	LED_KEY_ON,
+	LED_KEY_OFF,
+	LED_KEY_EMPTY,
+	LED_KEY_WINDOW,
+	LED_KEY_TAKEN,
+	LED_KEY_CLOSED,
+	LED_KEY_FAILED,
+	LED_KEY_PURGED,
+};
+
+struct led_key {
+	enum led_key_phase phase;
+	double since;		/* when the phase began */
+	enum key_slot slot;	/* held, drain: the slot as it is */
+	double held;		/* drain: how long the button had been down */
+};
+
+#define LED_KEY_HUE_ON		120.0f
+#define LED_KEY_HUE_OFF		0.0f
+#define LED_KEY_HUE_PROGRAM	225.0f
+#define LED_KEY_FLASH		0.12	/* seconds of white where a threshold is crossed */
+#define LED_KEY_HELD_MOST	60.0	/* a button down for longer says nothing more */
+
+/* "PHASE SINCE [DETAIL]"; anything else is no phase. */
+static inline void led_key_parse(const char *text, struct led_key *k)
+{
+	static const char *const words[] = { "none", "held", "drain", "on", "off", "empty", "window",
+					     "taken", "closed", "failed", "purged" };
+	char word[16] = "", detail[16] = "", more[16] = "";
+	double since = 0;
+	unsigned int i;
+
+	memset(k, 0, sizeof(*k));
+	if (!text || sscanf(text, "%15s %lf %15s %15s", word, &since, detail, more) < 2)
+		return;
+	for (i = 1; i < sizeof(words) / sizeof(words[0]); i++)
+		if (!strcmp(word, words[i]))
+			k->phase = (enum led_key_phase)i;
+	k->since = since;
+	if (k->phase == LED_KEY_HELD)
+		k->slot = key_slot_named(detail);
+	else if (k->phase == LED_KEY_DRAIN) {
+		k->held = atof(detail);
+		k->slot = key_slot_named(more);
+	}
+}
+
+/* A pulse that begins at its brightest: 1 down to 0 and back, once a period. */
+static inline float led_key_pulse(double z, double period)
+{
+	return 0.5f + 0.5f * cosf(6.2831853f * (float)(fmod(z, period) / period));
+}
+
+static inline float led_key_smooth(float x)
+{
+	x = led_clamp(x);
+	return x * x * (3 - 2 * x);
+}
+
+/* The first seconds of a hold, `held` in: what letting go at their end will do to the key. */
+static inline struct hsb led_key_fill(enum key_slot slot, double held)
+{
+	float part = led_clamp((float)(held / KEY_TOGGLE_SECONDS));
+	struct hsb c = { 0, 0, 0.06f + 0.94f * part };	/* nothing to switch: white, rising */
+
+	if (slot == KEY_SLOT_OFF) {		/* on: green, rising */
+		c.h = LED_KEY_HUE_ON;
+		c.s = 1;
+	} else if (slot == KEY_SLOT_ON) {	/* off: red, sinking */
+		c.h = LED_KEY_HUE_OFF;
+		c.s = 1;
+		c.b = 1.0f - 0.88f * part;
+	}
+	return c;
+}
+
+/* A zone of the hold, `z` seconds in: a flash of white, then the hue, pulsing. */
+static inline struct hsb led_key_zone(float hue, float saturation, float low, double z, double period)
+{
+	struct hsb c = { hue, 0, 1 };
+
+	if (z >= LED_KEY_FLASH) {
+		c.s = saturation * led_clamp((float)((z - LED_KEY_FLASH) / 0.15));
+		c.b = low + (1.0f - low) * led_key_pulse(z - LED_KEY_FLASH, period);
+	}
+	return c;
+}
+
+/* The button's colour at t, and how much of the LED is its own (0: none, the receiver's look
+ * shows; 1: all of it). */
+static inline float led_key_at(const struct led_key *k, double t, struct hsb *c)
+{
+	double z = t - k->since;
+	struct hsb white = { 0, 0, 1 };
+
+	*c = white;
+	if (z < 0)
+		return 0;
+	switch (k->phase) {
+	case LED_KEY_HELD:
+		if (z > LED_KEY_HELD_MOST)	/* not a hand: a record nobody ended */
+			return 0;
+		if (z < KEY_TOGGLE_SECONDS) {
+			*c = led_key_fill(k->slot, z);
+			return led_clamp((float)(z / 0.15));
+		}
+		if (z < KEY_PROGRAM_SECONDS) {
+			z -= KEY_TOGGLE_SECONDS;
+			if (k->slot == KEY_SLOT_EMPTY) {
+				*c = led_key_zone(0, 0, 0.2f, z, 0.8);
+				if (z >= LED_KEY_FLASH)
+					c->b *= 0.45f;
+			} else {
+				*c = led_key_zone(k->slot == KEY_SLOT_ON ? LED_KEY_HUE_OFF : LED_KEY_HUE_ON, 1, 0.3f, z, 0.8);
+			}
+			return 1;
+		}
+		if (z < KEY_PURGE_SECONDS) {
+			*c = led_key_zone(LED_KEY_HUE_PROGRAM, 1, 0.3f, z - KEY_PROGRAM_SECONDS, 0.45);
+			return 1;
+		}
+		z -= KEY_PURGE_SECONDS;
+		if (k->slot == KEY_SLOT_EMPTY) {
+			*c = led_key_zone(0, 0, 0.2f, z, 0.8);
+			if (z >= LED_KEY_FLASH)
+				c->b *= 0.45f;
+		} else if (z >= LED_KEY_FLASH) {	/* not a pulse: lit and dark, three times a second */
+			c->h = LED_KEY_HUE_OFF;
+			c->s = 1;
+			c->b = fmod(z - LED_KEY_FLASH, 0.3) < 0.15 ? 1.0f : 0.06f;
+		}
+		return 1;
+	case LED_KEY_DRAIN:
+		*c = led_key_fill(k->slot, k->held);
+		c->b *= 1.0f - led_key_smooth((float)(z / 0.35));
+		return 1.0f - led_key_smooth((float)((z - 0.2) / 0.3));
+	case LED_KEY_ON:
+		c->h = LED_KEY_HUE_ON;
+		c->s = 1;
+		c->b = z < 0.6 ? 0.25f + 0.75f * (0.5f - 0.5f * cosf(6.2831853f * (float)(z / 0.3)))
+			       : 0.25f + 0.75f * led_key_smooth((float)((z - 0.6) / 0.25));
+		return 1.0f - led_key_smooth((float)((z - 1.7) / 0.5));
+	case LED_KEY_OFF:
+		c->h = LED_KEY_HUE_OFF;
+		c->s = 1;
+		c->b = 1.0f - led_key_smooth((float)(z / 1.3));
+		return 1.0f - led_key_smooth((float)((z - 1.6) / 0.6));
+	case LED_KEY_EMPTY:
+		c->b = 0.3f;
+		return 1.0f - led_key_smooth((float)(z / 0.8));
+	case LED_KEY_WINDOW:
+		if (z > KEY_WINDOW_SECONDS + 5)
+			return 0;
+		c->h = LED_KEY_HUE_PROGRAM;
+		c->s = 1;
+		c->b = 0.25f + 0.75f * led_key_pulse(z, 1.6);
+		return 1;
+	case LED_KEY_TAKEN:
+		if (z >= LED_KEY_FLASH) {
+			c->h = LED_KEY_HUE_PROGRAM +
+			       (LED_KEY_HUE_ON - LED_KEY_HUE_PROGRAM) * led_key_smooth((float)((z - LED_KEY_FLASH) / 0.9));
+			c->s = led_clamp((float)((z - LED_KEY_FLASH) / 0.15));
+		}
+		return 1.0f - led_key_smooth((float)((z - 2.0) / 0.6));
+	case LED_KEY_CLOSED:
+		c->h = LED_KEY_HUE_PROGRAM;
+		c->s = 1;
+		c->b = 0.6f * (1.0f - led_key_smooth((float)(z / 0.6)));
+		return 1.0f - led_key_smooth((float)((z - 0.5) / 0.5));
+	case LED_KEY_PURGED:
+		c->h = LED_KEY_HUE_OFF;
+		c->s = 1.0f - led_key_smooth((float)(z / 1.0));
+		c->b = 1.0f - led_key_smooth((float)((z - 0.3) / 1.3));
+		return 1.0f - led_key_smooth((float)((z - 1.7) / 0.5));
+	case LED_KEY_FAILED:
+		c->h = LED_KEY_HUE_OFF;
+		c->s = 1;
+		c->b = z < 1.2 && fmod(z, 0.4) < 0.2 ? 1 : 0;
+		return 1.0f - led_key_smooth((float)((z - 1.2) / 0.6));
+	case LED_KEY_NONE:
+		break;
+	}
+	return 0;
+}
+
+/* The LED with the button's say laid over the receiver's look. A dark or white button colour takes
+ * the look's hue as it comes and goes, as every fade here does. */
+static inline struct hsb led_key_over(struct hsb look, const struct led_key *k, double t)
+{
+	struct hsb c;
+	float own = led_key_at(k, t, &c);
+
+	return own <= 0 ? look : own >= 1 ? c : hsb_blend(look, c, own);
 }
 
 #endif

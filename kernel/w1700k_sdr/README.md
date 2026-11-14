@@ -117,6 +117,16 @@ w1700k-led DEVICE --demo [SECONDS] | --show H S B | --status
   colour maths, all in hue, saturation and brightness). It opens the device
   only for each change of the LED, so the module can be replaced under it.
   --status prints one {"at":"led",...} line: what it sees, and the look for it.
+
+w1700k-key [--chip DEV] [--line N] [--listen ADDRESS] [--port N] [--state FILE] ...
+  The reset button's service (not a client of the driver; keyd.c, with its
+  logic in keyd.h): the paperclip key. It watches the button on the pin
+  controller's line 0 through the GPIO character device, and when the button
+  is let go does what the hold meant: switches the login key's slot off or on
+  (5 s), opens it for a new key on TCP port 7722 (10 s), or erases it (15 s).
+  The slot itself is kept by /usr/sbin/w1700k-keyslot; what the button is
+  doing goes to /run/w1700k-key for the LED. init/README.md, "The paperclip
+  key".
 ```
 
 ## Bring-up

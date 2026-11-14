@@ -245,6 +245,40 @@ first loader's description carries `second-loader 1` for `system-update`.
 its cases comes from a unit, where a property was looked up in an image of
 which only the first page had been read.
 
+### The paperclip key's slot
+
+The reset button (line 0 of the pin controller, low when pressed; not in the
+device tree, taken through the GPIO character device) changes one slot for a
+login key: `init/README.md`, "The paperclip key". The slot is the file
+`key/slot` in `durable`, in the form the loader imports:
+
+```
+key_line=ssh-ed25519:AAAA...
+key_on=1
+```
+
+- `w1700k-key`, started from `inittab` by `w1700k-keyslot serve` and started
+  again if it ends, watches the button. `w1700k-keyslot program`, `toggle` and
+  `purge` change the file, each inside one `durable-run`: the only times Linux
+  opens `durable` for it.
+- The loader reads it at every boot (`key_pass`, after `update_apply`, with a
+  read-only attach of its own) and adds to the kernel command line
+  `w1700k.keyslot=on`, `off` or `empty`, and with `on` the key,
+  `w1700k.key=TYPE:BASE64`. Nothing of it is saved in the loader's environment.
+- `w1700k-keyslot boot`, from `rcS` before the ssh server starts, writes
+  root's `authorized_keys` in the RAM overlay: the key built into the root
+  (read from the SquashFS below the overlay), and the slot's key if it is on.
+  A command line without `w1700k.keyslot=` is a loader that does not know of
+  the slot (`persist=0` in `w1700k-keyslot status`).
+
+A key is one word everywhere on that way: its type and base64 body joined by a
+colon, checked by `w1700k-key` when it arrives (the body must be base64 and
+begin with the type it names) and again by shape wherever it is read, so that
+nothing in it is more than a word to a shell, the loader or the kernel.
+`tests/test_paperclip.py` runs the service with presses from a FIFO, the
+slot's program over a directory, and both through the loader's model across a
+reboot.
+
 ## Checks in the build
 
 The build stops when an output is wrong rather than leaving it for the unit to

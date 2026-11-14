@@ -32,6 +32,35 @@ The white fills like a bar while the unit waits for its radio. Whatever comes ne
 once, without waiting for it to fill; if the unit comes back to white before it had filled, it
 goes on from where it was, and once it has filled, the next time starts from low again.
 
+## The reset button
+
+The button behind the paperclip hole changes the unit's one slot for a login key
+([init/README.md](../init/README.md#the-paperclip-key)). While it is held, and for a moment after,
+the LED is the button's: it shows what letting go would do, and then what was done. The receiver's
+look returns when that is over.
+
+| | What you see | What it means |
+| --- | --- | --- |
+| Held, first 5 s | **Green, rising** out of the dark | Letting go at 5 s will switch the slot's key **on** |
+| | **Red, sinking** from full | Letting go at 5 s will switch the slot's key **off** |
+| | **White, rising** | The slot is empty: nothing to switch |
+| Held 5 s | A white flash, then the same colour **pulsing** | Let go now and it is switched |
+| Held 10 s | A white flash, then **blue pulsing**, faster | Let go now and the slot opens for a new key |
+| Held 15 s | A white flash, then **red blinking hard**, lit and dark | Let go now and the slot's key is erased |
+| Let go early | What had filled runs out | Nothing happened |
+| After letting go | **Green, twice up** and staying a moment | Switched on |
+| | **Red, sinking** into the dark | Switched off |
+| | **Blue, breathing** | Waiting for a key (`init/key`), up to three minutes; a press ends it |
+| | A flash, then **blue turning through cyan to green** | The key is in |
+| | The blue goes out | The wait ended without a key |
+| | The red pales to white as it sinks | Erased |
+| | **Red, three times** | The key could not be kept |
+
+Which way the key will be switched is said twice, by colour and by direction (rising or sinking),
+because red against green is the colour blindness most people with one have. Green and red keep
+their meaning here (go, stop); blue is the colour of waiting to be paired. `w1700k-led DEVICE
+--demo` walks through these after the receiver's looks.
+
 ## How it decides
 
 Every quarter of a second `w1700k-led` looks at what the unit knows of itself:
@@ -43,7 +72,10 @@ Every quarter of a second `w1700k-led` looks at what the unit knows of itself:
 - the mark a stream's pump leaves when it ends (`/tmp/w1700k-stream.done`) while that record
   still says a stream is running.
 
-`w1700k-led /dev/w1700k-sdr --status` prints that and the look that goes with it;
+- what the reset button is doing, which `w1700k-key` writes down the moment it changes
+  (`/run/w1700k-key`): this one is looked at every frame, and read when it has changed.
+
+`w1700k-led /dev/w1700k-sdr --status` prints the first three and the look that goes with it;
 `--demo` walks through every look, and `--show H S B` sets one colour.
 
 ## How it shows it

@@ -249,6 +249,63 @@ by block, and rewrites what differs: on the unit this was done with, the 144
 blocks the old `durable` had covered and nothing else. It then boots the
 installed system again.
 
+## The paperclip key
+
+A unit has one slot for a login key that only a hand on the unit can change:
+its reset button, pressed with a paperclip. It needs no serial console and no
+key on the unit beforehand, so it is how a unit gets its first key when it was
+installed without yours, and how you get back in when a key is lost.
+
+```sh
+init/key                      # your public key (~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)
+init/key FILE.pub
+```
+
+Run it, then hold the button. What a press means is decided when you let go,
+by how long you held it, and the LED says which stretch you are in
+([docs/led.md](../docs/led.md#the-reset-button)):
+
+| Held | The LED while held | Letting go |
+| --- | --- | --- |
+| under 5 s | green rising, red sinking or white rising (below) | nothing: what had filled runs out |
+| 5 s | a flash, then the same colour pulsing | switches the slot's key off, or on again |
+| 10 s | a flash, then blue pulsing | opens the slot for a new key: three minutes, blue breathing |
+| 15 s | a flash, then red blinking hard | erases the slot's key |
+
+The first five seconds already say which way the key would be switched, in
+colour and in direction: green rising out of the dark when it is off and would
+be switched on, red sinking from full when it is on and would be switched off,
+white rising when the slot is empty and there is nothing to switch.
+
+While the slot is open the unit takes one line of text, a public key, on TCP
+port 7722 of its management address (`lan3`). It checks that the line is a
+whole public key of a type its ssh server takes, keeps it switched on, and
+answers; `init/key` then logs in with it. A line that is not a key is refused
+and the wait goes on; a press ends the wait. A new key replaces the one the
+slot held.
+
+The unit's answer carries its ssh host key. `init/key` tries the login against
+exactly that key and prints the line for `known_hosts` (`--known-hosts FILE`
+writes it there): it came over a cable to a unit you are holding a paperclip
+to, which is as good an introduction as a host key gets.
+
+- **The key stays** across restarts and updates: it is not part of the root.
+  It is a file in durable storage that the loader reads at every boot and
+  hands to the system, so a normal boot still writes nothing to flash and
+  Linux opens durable storage only when the button changes the slot.
+- **Switched off, it is kept but does not log in**, and stays off across
+  restarts until the button switches it on again. A unit whose root has no key
+  built in is then closed to the network altogether.
+- **It needs a loader that knows of the slot.** `init/key` says so when the
+  unit's does not: the key then works until the unit restarts. `init/flash
+  --ssh` brings the loader up to date.
+- **It is the button's, not the network's.** Nobody without a hand on the unit
+  can change the slot, and whoever has one could open the case and use the
+  serial console anyway. The slot holds what was last put in it: program your
+  own key into a unit that comes from someone else.
+- The key that `init/install` builds into the unit's root is separate and
+  stays as it is; both log in.
+
 ## Returning to stock
 
 ```sh

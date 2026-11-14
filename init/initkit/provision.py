@@ -21,7 +21,7 @@ import struct
 import subprocess
 import tempfile
 
-from . import config
+from . import config, paperclip
 from .log import private_file
 
 HOST_KEY = 'dropbear_ed25519_host_key'
@@ -131,8 +131,10 @@ def authorized_key(path=None):
     for candidate in candidates:
         if candidate.is_file():
             line = candidate.read_bytes().strip()
-            if not line.split(b' ', 1)[0] in KEY_TYPES:
-                raise ProvisionError(f'{candidate} is not an SSH public key')
+            try:
+                paperclip.public_key(line)
+            except paperclip.KeyProblem as problem:
+                raise ProvisionError(f'{candidate}: {problem}')
             return line + b'\n'
     raise ProvisionError('no SSH public key for root logins; pass --authorized-key '
                          'or create ~/.ssh/id_ed25519.pub')

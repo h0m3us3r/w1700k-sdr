@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * w1700k-led DEVICE [--state FILE] [--done FILE] [--iface IF] [--brightness B]
+ * w1700k-led DEVICE [--state FILE] [--done FILE] [--key FILE] [--iface IF] [--brightness B]
  * w1700k-led DEVICE --demo [SECONDS]
  * w1700k-led DEVICE --show H S B
  * w1700k-led DEVICE --status
@@ -15,6 +15,9 @@
  *   a stream that ended by itself                            the record still names its packing
  *                                                            and --done FILE exists
  *                                                            (default /tmp/w1700k-stream.done)
+ *   what the reset button is doing (the paperclip key)       --key FILE, w1700k-key's record,
+ *                                                            read at every frame it changes
+ *                                                            (default /run/w1700k-key)
  *
  * The device is opened for each change of the levels and closed again: a held descriptor would
  * keep the driver from being replaced (`w1700k load`). While the driver is away, nothing is
@@ -80,12 +83,29 @@ static int read_text(const char *path, char *text, size_t size)
 
 struct watch {
 	char carrier[96], tx_bytes[96];
-	const char *state, *done;
+	const char *state, *done, *key;
 	unsigned long long last_tx;
-	time_t state_mtime;
-	long state_nsec;
+	time_t state_mtime, key_mtime;
+	long state_nsec, key_nsec;
 	int seen_state;
 };
+
+/* What the button is doing: looked at every frame, read when it has changed. */
+static void look_key(struct watch *w, struct led_key *k)
+{
+	char text[64];
+	struct stat st;
+
+	if (stat(w->key, &st)) {
+		k->phase = LED_KEY_NONE;
+		w->key_mtime = 0;
+	} else if (st.st_mtime != w->key_mtime || st.st_mtim.tv_nsec != w->key_nsec) {
+		if (!read_text(w->key, text, sizeof(text)))
+			led_key_parse(text, k);
+		w->key_mtime = st.st_mtime;
+		w->key_nsec = st.st_mtim.tv_nsec;
+	}
+}
 
 /* What the unit knows now. Returns 1 when the host has just rewritten the state record. */
 static int look(struct watch *w, struct led_status *s)
@@ -141,9 +161,11 @@ static void frame_sleep(void)
 	nanosleep(&t, NULL);
 }
 
-/* Render the engine until `until` (0: until stopped), looking at the unit's state unless `w` is NULL. */
-static void run(struct led_engine *e, struct watch *w, float brightness, double until)
+/* Render the engine until `until` (0: until stopped), looking at the unit's state unless `w` is NULL;
+ * `shown`, if given, is what the button is doing (the demo's). */
+static void run(struct led_engine *e, struct watch *w, const struct led_key *shown, float brightness, double until)
 {
+	struct led_key key = { 0 };
 	struct led_levels last = { 0 }, l;
 	struct led_status status = { 0 };
 	struct led_look target;
@@ -162,7 +184,9 @@ static void run(struct led_engine *e, struct watch *w, float brightness, double 
 				led_engine_show(e, &target, t);
 			}
 		}
-		c = led_engine_at(e, t);
+		if (w)
+			look_key(w, &key);
+		c = led_key_over(led_engine_at(e, t), shown ? shown : &key, t);
 		c.b *= brightness;
 		l = hsb_to_levels(c);
 		if (first || memcmp(&l, &last, sizeof(l))) {
@@ -199,6 +223,28 @@ static void demo(float brightness, double seconds)
 		  { .link = 1, .loaded = 1, .streaming = 1, .ended = 1, .rate_msps = 160 } },
 		{ "radio ready again (green), with the host's acknowledgement", { .link = 1, .loaded = 1 } },
 	};
+	static const struct {
+		const char *name;
+		struct led_key key;
+		double seconds;
+	} keys[] = {
+		{ "reset button held, the key is off: green rises (5 s), flashes and pulses (letting go switches it on), then blue (10 s: a new key)",
+		  { .phase = LED_KEY_HELD, .slot = KEY_SLOT_OFF }, 13 },
+		{ "let go in the blue: waiting for a key (blue, breathing)", { .phase = LED_KEY_WINDOW }, 6 },
+		{ "the key is in (a flash, blue turning to green)", { .phase = LED_KEY_TAKEN }, 3.5 },
+		{ "reset button held, the key is on: red sinks (5 s), flashes and pulses (letting go switches it off)",
+		  { .phase = LED_KEY_HELD, .slot = KEY_SLOT_ON }, 8 },
+		{ "let go in the red: switched off (red, sinking into the dark)", { .phase = LED_KEY_OFF }, 3.5 },
+		{ "held again and let go in the green: switched on (green, twice up)", { .phase = LED_KEY_ON }, 3.5 },
+		{ "reset button held with nothing in the slot: white rises, then pale (nothing to switch)",
+		  { .phase = LED_KEY_HELD, .slot = KEY_SLOT_EMPTY }, 7 },
+		{ "let go too early: what had filled runs out", { .phase = LED_KEY_DRAIN, .held = 3.0, .slot = KEY_SLOT_OFF }, 2 },
+		{ "the wait ended without a key, or a press ended it (the blue goes out)", { .phase = LED_KEY_CLOSED }, 2.5 },
+		{ "reset button held 15 s with a key in the slot: red sinks and pulses, blue, then red blinking hard (letting go erases it)",
+		  { .phase = LED_KEY_HELD, .slot = KEY_SLOT_ON }, 19 },
+		{ "let go there: erased (the red pales as it sinks into the dark)", { .phase = LED_KEY_PURGED }, 3 },
+		{ "the key could not be kept (red, three times)", { .phase = LED_KEY_FAILED }, 3 },
+	};
 	struct led_engine e;
 	struct led_look target;
 	unsigned int k;
@@ -206,7 +252,7 @@ static void demo(float brightness, double seconds)
 	led_engine_start(&e, now());
 	printf("starting (the hue once round, out of the dark)\n");
 	fflush(stdout);
-	run(&e, NULL, brightness, now() + LED_BOOT_SECONDS);
+	run(&e, NULL, NULL, brightness, now() + LED_BOOT_SECONDS);
 	for (k = 0; k < sizeof(states) / sizeof(states[0]) && !stopping; k++) {
 		target = led_look_for(&states[k].s);
 		led_engine_show(&e, &target, now());
@@ -214,13 +260,22 @@ static void demo(float brightness, double seconds)
 			e.ack = now() + 1.5;
 		printf("%s\n", states[k].name);
 		fflush(stdout);
-		run(&e, NULL, brightness, now() + seconds);
+		run(&e, NULL, NULL, brightness, now() + seconds);
+	}
+	/* The reset button, over the green of a ready radio: each as long as it takes. */
+	for (k = 0; k < sizeof(keys) / sizeof(keys[0]) && !stopping; k++) {
+		struct led_key key = keys[k].key;
+
+		key.since = now();
+		printf("%s\n", keys[k].name);
+		fflush(stdout);
+		run(&e, NULL, &key, brightness, now() + keys[k].seconds);
 	}
 }
 
 static int usage(void)
 {
-	fprintf(stderr, "usage: w1700k-led DEVICE [--state FILE] [--done FILE] [--iface IF] [--brightness B]\n"
+	fprintf(stderr, "usage: w1700k-led DEVICE [--state FILE] [--done FILE] [--key FILE] [--iface IF] [--brightness B]\n"
 		"       [--demo [SECONDS] | --show H S B | --status]\n");
 	return 2;
 }
@@ -228,7 +283,8 @@ static int usage(void)
 int main(int argc, char **argv)
 {
 	struct sigaction sa = { .sa_handler = on_signal };
-	static struct watch w = { .state = "/tmp/w1700k-state.json", .done = "/tmp/w1700k-stream.done" };
+	static struct watch w = { .state = "/tmp/w1700k-state.json", .done = "/tmp/w1700k-stream.done",
+				  .key = "/run/w1700k-key" };
 	const char *iface = "eth1";
 	float brightness = 0.8f;
 	struct led_engine e;
@@ -244,6 +300,8 @@ int main(int argc, char **argv)
 			w.state = argv[++i];
 		} else if (!strcmp(argv[i], "--done") && i + 1 < argc) {
 			w.done = argv[++i];
+		} else if (!strcmp(argv[i], "--key") && i + 1 < argc) {
+			w.key = argv[++i];
 		} else if (!strcmp(argv[i], "--iface") && i + 1 < argc) {
 			iface = argv[++i];
 		} else if (!strcmp(argv[i], "--brightness") && i + 1 < argc) {
@@ -277,6 +335,6 @@ int main(int argc, char **argv)
 	if (status)
 		return report(&w);
 	led_engine_start(&e, now());
-	run(&e, &w, brightness, 0);
+	run(&e, &w, NULL, brightness, 0);
 	return 0;
 }

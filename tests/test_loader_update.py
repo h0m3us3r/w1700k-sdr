@@ -31,7 +31,7 @@ saveenv() {
     for name in update_tried update_failed loader_tried loader_failed loader_booted; do
         eval "[ -z \"\${$name+x}\" ]" || eval "echo \"$name=\$$name\""
     done > "$M/saved"
-    for name in update_new update_old update_file update_want update_got loader_new loader_kind; do
+    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on; do
         eval "[ -z \"\${$name+x}\" ]" || { echo "saved a scratch variable: $name" >> "$M/log"; }
     done
 }
@@ -133,6 +133,11 @@ mkdir -p "$M/ram"
 [ -z "$SLOT" ] || loader_slot=$SLOT
 run loader_next
 run update_apply
+run key_pass
+for name in key_line key_on; do
+    eval "[ -z \"\${$name+x}\" ]" || note "left a scratch variable: $name"
+done
+echo "$bootargs" >> "$M/bootargs"
 note "booted $(sha256sum < "$M/rootfs" | cut -d' ' -f1)${SLOT:+ by the second loader}"
 '''
 
@@ -141,7 +146,8 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-class LoaderUpdate(unittest.TestCase):
+class Model(unittest.TestCase):
+    """A unit's flash as the harness models it, and one boot of the loader on it."""
     OLD, NEW, NEWER = b'the root that runs' * 5000, b'the new root' * 9000, b'a later root' * 7000
 
     def setUp(self):
@@ -194,9 +200,11 @@ class LoaderUpdate(unittest.TestCase):
         path = self.model / 'saved'
         return dict(line.split('=', 1) for line in path.read_text().splitlines()) if path.exists() else None
 
+class LoaderUpdate(Model):
     def test_the_boot_command_applies_updates_first_and_then_boots_as_before(self):
         bootcmd = (self.model / 'env' / 'bootcmd').read_text()
-        self.assertTrue(bootcmd.startswith('run loader_next; run update_apply; ubi part.ro ${bootpart} && ubi read'))
+        self.assertTrue(bootcmd.startswith('run loader_next; run update_apply; run key_pass; '
+                                           'ubi part.ro ${bootpart} && ubi read'))
         self.assertTrue(bootcmd.endswith('bootm ${loadaddr}#${bootconf}'))
 
     def test_nothing_staged_nothing_written(self):
@@ -413,6 +421,74 @@ class SecondLoader(LoaderUpdate):
         self.assertEqual(self.boot(), ['the second loader starts', 'write rootfs', 'saveenv', self.by_second(self.OLD)],
                          'never confirmed: the second loader puts the previous root back')
         self.assertEqual(self.second(), self.B1)
+
+
+class KeySlot(Model):
+    """The paperclip key's slot (durable `key/slot`, written by w1700k-keyslot): the loader reads it
+    at every boot and hands it to Linux on the kernel command line, which never opens durable
+    storage to find it."""
+    KEY = 'ssh-ed25519:AAAAC3NzaC1lZDI1NTE5AAAAIHRoaXMgaXMgbm90IGEgcmVhbCBrZXksIGJ1dCBvaw=='
+    PLAIN = 'console=ttyS0,115200 earlycon panic=5 ro rdinit=/init ubi.mtd=system ubi.block=0,rootfs'
+
+    def slot(self, on, key=KEY):
+        directory = self.model / 'durable' / 'key'
+        directory.mkdir(exist_ok=True)
+        (directory / 'slot').write_text(f'key_line={key}\nkey_on={on}\n')
+
+    def bootargs(self):
+        handed = self.model / 'bootargs'
+        handed.unlink(missing_ok=True)
+        self.boot()
+        lines = handed.read_text().splitlines()
+        self.assertEqual(len(lines), 1, 'one system is booted, with one command line')
+        self.assertNotIn('left a scratch variable', ' '.join(self.lines))
+        return lines[0]
+
+    def test_no_slot_is_said_to_be_empty(self):
+        self.assertEqual(self.bootargs(), self.PLAIN + ' w1700k.keyslot=empty')
+        (self.model / 'durable' / 'key').mkdir()
+        self.assertEqual(self.bootargs(), self.PLAIN + ' w1700k.keyslot=empty', 'a directory without the file')
+
+    def test_a_key_that_is_on_is_handed_over(self):
+        self.slot(1)
+        self.assertEqual(self.bootargs(), f'{self.PLAIN} w1700k.keyslot=on w1700k.key={self.KEY}')
+
+    def test_a_key_that_is_off_stays_in_the_slot(self):
+        self.slot(0)
+        args = self.bootargs()
+        self.assertEqual(args, self.PLAIN + ' w1700k.keyslot=off')
+        self.assertNotIn('AAAA', args)
+
+    def test_every_boot_reads_the_slot_anew(self):
+        self.slot(1)
+        self.assertIn('w1700k.keyslot=on', self.bootargs())
+        self.slot(0)
+        self.assertEqual(self.bootargs(), self.PLAIN + ' w1700k.keyslot=off')
+        shutil.rmtree(self.model / 'durable' / 'key')
+        self.assertEqual(self.bootargs(), self.PLAIN + ' w1700k.keyslot=empty')
+
+    def test_the_key_is_handed_over_beside_an_update_and_never_saved(self):
+        self.slot(1)
+        self.stage(self.NEW, self.OLD)
+        args = self.bootargs()
+        self.assertIn('write rootfs', self.lines)
+        self.assertIn('saveenv', self.lines)
+        self.assertEqual(args, f'{self.PLAIN} w1700k.keyslot=on w1700k.key={self.KEY}')
+        self.assertNotIn('key', ' '.join(self.saved()))
+        self.settle()
+        self.assertEqual(self.bootargs(), f'{self.PLAIN} w1700k.keyslot=on w1700k.key={self.KEY}')
+
+    def test_storage_that_cannot_be_read_hands_over_no_key(self):
+        self.slot(1)
+        (self.model / 'durable').rename(self.model / 'durable.gone')
+        self.assertEqual(self.bootargs(), self.PLAIN + ' w1700k.keyslot=empty')
+
+    def test_the_second_loader_hands_it_over_when_it_boots_the_system(self):
+        self.slot(1)
+        (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
+        args = self.bootargs()
+        self.assertIn('the second loader starts', self.lines)
+        self.assertEqual(args, f'{self.PLAIN} w1700k.keyslot=on w1700k.key={self.KEY}')
 
 
 if __name__ == '__main__':
