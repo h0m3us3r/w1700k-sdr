@@ -66,7 +66,8 @@ refused with the rate the link would need.
   also running on that host, an 8-core N350 behind a USB adapter, the
   adapter itself missed 1 datagram in 2400. With its packets spread over the
   CPUs, as `init/host/link` now does, and the host's power limit at 15 W, a
-  27-minute run with the spectrum page open lost 1 slice in 440,000
+  27-minute run with the spectrum page open lost 1 slice in 440,000 and a
+  nine-hour run overnight 1 in 3.6 million
   ([the measurements](tools/r8152-rtl8159/README.md)): the host, not the link.) The radio's chunks follow the level with a second's memory, so
   in a band with strong bursts they are quantised for the bursts.
 - **No jumbo frames?** `"export": {"piece": 1456}` in the configuration sends

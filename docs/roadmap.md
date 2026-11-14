@@ -129,7 +129,10 @@ installation, the first loader and the kernel image.
 
 ### Proving it
 
-- **Long runs.** A 24-hour stream with the export validated.
+- **Long runs.** A 24-hour stream with the export validated. The longest so
+  far is 9 h 23 min at 320 Msps on a 5 Gbit/s link, the samples not checked:
+  1 slice in 3.6 million lost, every one of them a datagram the host's adapter
+  missed ([the measurements](../tools/r8152-rtl8159/README.md)).
 - **Links not yet run.** The 2.5 and 1 Gbit/s rows of the link table are
   arithmetic; 10 Gbit/s was run into a second unit as the far end, not into a
   host.
