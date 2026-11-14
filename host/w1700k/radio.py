@@ -113,6 +113,25 @@ DEFAULT_BANDS = {
 }
 
 
+# Where a unit carries its calibration: 16 KiB at 0x5000 of the vendor's factory partition, which
+# our layout names `calibration` and nothing of ours writes (NAND 0x405000).
+UNIT_EEPROM_OFFSET = 0x5000
+EEPROM_CHIP_ID = b'\x90\x79'                           # 0x7990, little-endian, where the image starts
+UNIT_EEPROM = ('n=$(sed -n \'s/^mtd\\([0-9]*\\):.*"calibration"$/\\1/p\' /proc/mtd); [ -n "$n" ] && '
+               f'dd if=/dev/mtd${{n}}ro bs=4096 skip={UNIT_EEPROM_OFFSET // 4096} '
+               f'count={EEPROM_FILE_BYTES // 4096} 2>/dev/null')
+
+
+def unit_eeprom(unit):
+    """The calibration EEPROM file the unit itself holds, or None when it gives none (a system
+    without the partition, or a partition without an MT7996 image)."""
+    result = unit.run(UNIT_EEPROM, timeout=30)
+    data = result.stdout
+    if result.returncode or len(data) != EEPROM_FILE_BYTES or data[:2] != EEPROM_CHIP_ID:
+        return None
+    return data
+
+
 def eeprom_image(data):
     """The 7680 calibration bytes of a unit EEPROM file (16 KiB with a blank tail, or 7680 bytes)."""
     if len(data) == EEPROM_FILE_BYTES:

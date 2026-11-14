@@ -55,7 +55,7 @@ class HostLookupTest(unittest.TestCase):
             cfg = host_config.parse({})
             with mock.patch.object(host_config, 'DATA_DIR', data), \
                     mock.patch.object(host_config, 'USER_EEPROM', user):
-                found = host_config.eeprom_path(cfg)
+                found = host_config.eeprom_path(cfg) or host_config.saved_eeprom()
             return os.path.relpath(found, tmp)
 
     def test_explicit_setting_wins(self):
@@ -66,6 +66,20 @@ class HostLookupTest(unittest.TestCase):
         self.assertEqual(self.lookup(['config/w1700k/eeprom.bin', 'data/w1700k/units/A/eeprom.bin']),
                          'config/w1700k/eeprom.bin')
         self.assertEqual(self.lookup(['data/w1700k/units/A/eeprom.bin']), 'data/w1700k/units/A/eeprom.bin')
+
+    def test_without_a_named_file_the_unit_is_asked_first(self):
+        with mock.patch.object(host_config, 'USER_EEPROM', Path('/nowhere/eeprom.bin')):
+            self.assertIsNone(host_config.eeprom_path(host_config.parse({})))
+
+    def test_where_the_unit_keeps_it_is_where_the_backup_has_it(self):
+        from w1700k import radio
+        sys.path.insert(0, str(ROOT / 'platform'))
+        import partitions
+        self.assertEqual(partitions.GEOMETRY['calibration'][0] + radio.UNIT_EEPROM_OFFSET, backup.EEPROM_OFFSET)
+        self.assertEqual(radio.EEPROM_FILE_BYTES, backup.EEPROM_BYTES)
+        self.assertEqual(radio.EEPROM_CHIP_ID, backup.EEPROM_CHIP_ID)
+        self.assertIn('"calibration"', radio.UNIT_EEPROM)
+        self.assertIn('skip=5 count=4', radio.UNIT_EEPROM)
 
     def test_ambiguous_or_missing_is_an_error(self):
         with self.assertRaises(host_config.ConfigError):

@@ -142,6 +142,7 @@ class Led(unittest.TestCase):
     def test_the_record_the_controller_writes(self):
         """The real thing: a controller against the fake unit, its state file read by the LED."""
         unit = host_fake.FakeUnit()
+        unit.calibration = b'\x90\x79' + bytes(7678) + b'\xff' * (16384 - 7680)
         ctl = Controller(config.parse({}), unit=unit)
         try:
             ctl.load(1)

@@ -50,7 +50,8 @@ from . import config, firmware, rf, wm
 from .config import local_link_for
 from dataclasses import replace
 
-from .radio import DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image
+from .radio import (DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image,
+                    unit_eeprom)
 from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MAX_DATAGRAMS, SPLIT, Result,
                      Stream, StreamError, check_host_mtu, datagram_rate, wire_rate)
 from .unit import Unit
@@ -595,8 +596,15 @@ class Controller:
         return wm.Wm(self.unit, session=self._session())
 
     def _eeprom(self):
+        """The calibration to load: a file the user named; else what the unit itself carries, so
+        that a host with several units never gives one unit another's; else the one saved copy."""
         try:
             path = config.eeprom_path(self.config)
+            if path is None:
+                own = unit_eeprom(self.unit)
+                if own is not None:
+                    return eeprom_image(own)
+                path = config.saved_eeprom()
             return eeprom_image(path.read_bytes())
         except config.ConfigError as exc:
             raise ControlError(str(exc))

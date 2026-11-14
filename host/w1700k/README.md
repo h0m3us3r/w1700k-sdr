@@ -38,10 +38,18 @@ All ssh traffic shares one ControlMaster connection (socket in `$XDG_RUNTIME_DIR
 **Calibration EEPROM.** Each unit carries its own RF calibration, a 16 KiB EEPROM image
 (7680 bytes used) in the factory `calibration` partition at NAND 0x405000. `init/install`
 saves it from the unit's backup to `~/.local/share/w1700k/units/SERIAL/eeprom.bin`
-(`init/eeprom --unit SERIAL` does it for an existing backup). Without an `eeprom` setting the
-host uses `~/.config/w1700k/eeprom.bin` if present, else that saved copy when exactly one unit
-has one. It is written into our WM's EEPROM buffer on every load, before the bring-up; nothing
-is written to the unit's flash or eFuses.
+(`init/eeprom --unit SERIAL` does it for an existing backup). The host loads the file the
+`eeprom` setting names, else `~/.config/w1700k/eeprom.bin` if present. Without either it reads
+the image from the unit it is talking to, out of that partition (which nothing of ours
+writes), so a host with several units never gives one unit another's calibration. Only a unit
+that gives none (a system without the partition) gets the saved copy, and only when exactly one
+unit has one. The image is written into our WM's EEPROM buffer on every load, before the
+bring-up; nothing is written to the unit's flash or eFuses.
+
+Two units on one host have the same address and different ssh host keys. `init/install` writes
+each unit's key to `~/.local/share/w1700k/units/SERIAL/known_hosts`; name the one in use as
+`unit.known_hosts`, or keep both lines in `~/.ssh/known_hosts` (ssh accepts any of the keys it
+holds for an address).
 
 ## Commands
 

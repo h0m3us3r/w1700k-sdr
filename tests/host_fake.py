@@ -500,6 +500,7 @@ class FakeUnit:
         self.sessions = []                                # every mt7996-ctl --serve started
         self.target = 'root@unit'
         self.boot_id = BOOT_ID                            # changes when the unit reboots
+        self.calibration = None                           # the EEPROM file in its own partition, if any
 
     def tool(self, name):
         return f'{self.bin_dir}/{name}'
@@ -520,6 +521,8 @@ class FakeUnit:
         if command.startswith('cat /proc/sys/kernel/random/boot_id'):
             uptime = f'{time.monotonic():.2f}\n' if '/proc/uptime' in command else ''
             return self._done((self.boot_id + '\n' + uptime).encode() + self.files.get('/tmp/w1700k-state.json', b''))
+        if '"calibration"' in command:                    # radio.py unit_eeprom
+            return self._done(self.calibration or b'', rc=0 if self.calibration else 1)
         if command.startswith('sha256sum'):
             lines = [f'{hashlib.sha256(v).hexdigest()}  {k}' for k, v in self.files.items() if k.endswith('.bin')]
             return self._done('\n'.join(lines).encode())

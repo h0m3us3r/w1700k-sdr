@@ -178,14 +178,20 @@ USER_EEPROM = Path('~/.config/w1700k/eeprom.bin').expanduser()
 
 
 def eeprom_path(config):
-    """The calibration EEPROM to load: `eeprom` if set; else ~/.config/w1700k/eeprom.bin; else
-    the one init/install saved, if exactly one unit has one."""
+    """The calibration EEPROM file the user named: `eeprom` if set, else
+    ~/.config/w1700k/eeprom.bin; None without either, when the unit's own copy is used."""
     if config.eeprom:
         return config.eeprom
     if USER_EEPROM.is_file():
         return USER_EEPROM
+    return None
+
+
+def saved_eeprom():
+    """The copy init/install saved, for a unit that cannot give its own: only when exactly one
+    unit has one, since nothing here says which unit is at the other end."""
     found = sorted(DATA_DIR.glob('units/*/eeprom.bin'))
     if len(found) == 1:
         return found[0]
-    where = 'several units have one; set "eeprom"' if found else 'run init/install or init/eeprom'
-    raise ConfigError(f'no calibration EEPROM: {where} (see host/w1700k/README.md)')
+    where = 'several units have a saved one; set "eeprom"' if found else 'run init/install or init/eeprom'
+    raise ConfigError(f'no calibration EEPROM: the unit gave none, and {where} (see host/w1700k/README.md)')

@@ -7,10 +7,12 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest import mock
 
 import host_fake
 from host_fake import RADIO_ERR_HW, RADIO_ERR_ORDER
+from w1700k import config as host_config
 from w1700k import radio, rf, stream
 from w1700k.stream import StreamError
 from w1700k.controller import (LOCK_MARGIN_HZ, LOCK_RESOLUTION_HZ, ControlError, Controller, handle, packing_fits,
@@ -142,6 +144,49 @@ class Load(ControllerTest):
         other.attach()
         self.assertFalse(other.state()['radio']['loaded'])
         other.close()
+
+    def unnamed(self, saved=()):
+        """A controller whose configuration names no EEPROM file, on a host where `saved` units
+        have a copy from their installation."""
+        data = Path(self.tmp.name) / 'data'
+        for serial, image in saved:
+            (data / 'units' / serial).mkdir(parents=True)
+            (data / 'units' / serial / 'eeprom.bin').write_bytes(image)
+        for name, value in (('DATA_DIR', data), ('USER_EEPROM', data / 'none.bin')):
+            patch = mock.patch.object(host_config, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        ctl = Controller(replace(self.config, eeprom=None), unit=self.unit)
+        self.addCleanup(ctl.close)
+        return ctl
+
+    @staticmethod
+    def calibration(fill):
+        return b'\x90\x79' + bytes([fill]) * 7678 + b'\xff' * (16384 - 7680)
+
+    def test_the_unit_is_given_its_own_calibration_not_another_units(self):
+        """Two units installed from one host: neither saved copy is taken on trust."""
+        self.unit.calibration = self.calibration(3)
+        ctl = self.unnamed(saved=(('A', self.calibration(1)), ('B', self.calibration(2))))
+        ctl.load()
+        self.assertEqual(self.dev.eeprom(), self.calibration(3)[:7680])
+
+    def test_a_unit_that_gives_none_gets_the_one_saved_copy(self):
+        ctl = self.unnamed(saved=(('A', self.calibration(1)),))
+        ctl.load()
+        self.assertEqual(self.dev.eeprom(), self.calibration(1)[:7680])
+
+    def test_a_unit_that_gives_none_among_several_saved_copies_is_not_guessed(self):
+        ctl = self.unnamed(saved=(('A', self.calibration(1)), ('B', self.calibration(2))))
+        with self.assertRaisesRegex(ControlError, 'several units have a saved one'):
+            ctl.load()
+        self.assertEqual(self.unit.module_replacements, 0)
+
+    def test_what_is_in_the_partition_must_be_a_calibration(self):
+        self.unit.calibration = b'\xff' * 16384
+        ctl = self.unnamed(saved=(('A', self.calibration(1)),))
+        ctl.load()
+        self.assertEqual(self.dev.eeprom(), self.calibration(1)[:7680])
 
     def test_missing_eeprom(self):
         self.config.eeprom.unlink()
