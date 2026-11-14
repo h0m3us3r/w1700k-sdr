@@ -11,7 +11,7 @@ RAM, and `nandsync` compares it with the NAND block by block, erasing, writing
 and reading back only the blocks that differ, through the same vendor BBT/BMT
 translation and replacement engine as the loader with the chip's ECC on. Its
 write range is wider than the loader's, from stock's `uenv` to the end of
-`scratch`, which takes in stock's images under ours; `init/restore` never
+`stock`, which takes in stock's images under and behind ours; `init/restore` never
 writes `calibration`, and checks it. There is no UBI, no saved environment and
 no autoboot.
 """
@@ -81,7 +81,7 @@ def patches():
 
 
 def main():
-    src = uboot.prepare('restorer', patches(), FILES, partitions.policy_header('uenv'))
+    src = uboot.prepare('restorer', patches(), FILES, partitions.policy_header('uenv', 'stock'))
     uboot.mkimage(src)
     out = uboot.build('restorer', src, DEFCONFIG)
     config = kconfig(out / '.config')

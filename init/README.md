@@ -82,9 +82,11 @@ interrupted, run it again: the backup is kept and is never overwritten.
 `--expect-serial SERIAL` stops before anything is written unless the unit is
 the one you meant, and `--backup-only` stops after the backup.
 
-The backup is the only copy of the stock firmware and of the unit's factory
-data (it includes the unit's stock passwords). Keep it. Steps 4 to 6 replace
-the stock operating system; `init/restore` puts it back (below).
+The backup is the only complete copy of what the unit held, its factory data
+included (and the unit's stock passwords). Keep it. Steps 4 to 6 replace the
+stock operating system in the first of stock's two firmware slots; the second
+slot, a whole copy of the stock firmware, and stock's own data behind it are
+not written. `init/restore` puts everything back (below).
 
 ### The NAND part
 
@@ -185,6 +187,25 @@ such a write, so run by hand afterwards it objects until the next boot.)
 It needs a loader that applies staged updates. A unit installed before this
 existed says so before anything is sent; give it the new loader once, over the
 serial console: `init/flash --loader`.
+
+### A unit installed before the second slot was left alone
+
+Until November 2026 our `durable` storage reached 18 MiB into stock's second
+firmware slot, the copy of the stock firmware that stock keeps beside the one
+it boots. Everything of ours now lies in the first slot (`platform/README.md`
+has the table), and a unit installed before is moved in two steps, both over
+the serial console:
+
+```sh
+init/install --force       # the same backup is kept; `system` and `durable` are made again, smaller
+init/restore --stock-slot  # stock's second slot and data, from the backup; our system stays
+```
+
+The first takes a minute and a half and empties `durable`. The second sends
+the backup to the unit, compares stock's part of the chip with it block by
+block, and rewrites what differs: on the unit this was done with, the 144
+blocks the old `durable` had covered and nothing else. It then boots the
+installed system again.
 
 ## Returning to stock
 

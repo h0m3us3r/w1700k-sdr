@@ -83,15 +83,25 @@ the W25N04LV; a unit with that part ships a newer one, and nothing here has
 read its tables yet. Tables that do not validate under the rule are refused,
 never rewritten.
 
+Stock divides the chip into its boot stages, two 64 MiB firmware slots
+(`tclinux` at 0x600000 and `tclinux_slave` at 0x4600000, each a whole copy of
+the stock firmware) and a UBI of its own behind them. Everything of ours lies
+in the first slot. The second slot and stock's UBI are one partition, `stock`,
+that no stage of ours writes: it is read-only in both device trees and outside
+the range the BMT layer lets the loader and Linux write, so only the restorer
+can put anything there. (Until November 2026 `durable` was 32 MiB at 0x3800000
+and reached 18 MiB into the second slot; `init/README.md` says how a unit
+installed then is moved.)
+
 | Partition | Offset | Size | Contents | Linux |
 | --- | --- | --- | --- | --- |
 | `bootloader` | 0x0000000 | 2 MiB | vendor BL2/BL31 and stock U-Boot | read-only |
 | `uenv` | 0x0200000 | 2 MiB | stock U-Boot's saved environment | read-only |
 | `calibration` | 0x0400000 | 2 MiB | identity and radio calibration | read-only |
 | `loader` | 0x0600000 | 2 MiB | our U-Boot FIT | read-only |
-| `system` | 0x0800000 | 48 MiB | UBI: `ubootenv`, `ubootenv2`, `fit`, `rootfs` | attached read-only |
-| `durable` | 0x3800000 | 32 MiB | UBI: `durable`, a UBIFS for persistent files, and for a root update on its way in (below) | detached; `durable-open` |
-| `scratch` | 0x5800000 | 358 MiB | unused | read-only |
+| `system` | 0x0800000 | 34 MiB | UBI: `ubootenv`, `ubootenv2`, `fit`, `rootfs` | attached read-only |
+| `durable` | 0x2a00000 | 28 MiB | UBI: `durable`, a UBIFS for persistent files, and for a root update on its way in (below) | detached; `durable-open` |
+| `stock` | 0x4600000 | 376 MiB | stock's second firmware slot (`tclinux_slave`, a whole copy of the stock firmware) and stock's own UBI behind it, as the factory left them | read-only |
 | `reserved-bmt` | 0x1be00000 | 66 MiB | vendor bad-block reserve pool | read-only |
 
 Writes program erased pages directly, in ascending order, and read each page
@@ -101,7 +111,7 @@ use (UBI keeps its free blocks erased across boots). One program per page, one
 erase per block reused. The BMT layer replaces a block only when a program or
 erase fails (journalled in the block after the BBT, so an interrupted
 replacement recovers on the next boot), and only ever writes inside
-`system`..`scratch` (the restorer: `uenv`..`scratch`, except `calibration`). It
+`system`..`durable` (the restorer: `uenv`..`stock`, except `calibration`). It
 writes only while the BBT is the reserve's first good block, as the vendor
 places it: otherwise the pool it computed is not the one stock computes. A set
 factory marker is read twice in the pool scan (the byte has no ECC). Before

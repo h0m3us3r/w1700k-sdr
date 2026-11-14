@@ -29,9 +29,9 @@
 #define T_PAGES 64u
 #define T_BS (T_PAGES * T_PS)
 #define T_SECTIONS (T_FREE / 14u)	/* 16-byte spare groups with free bytes */
-/* The writable range, `system` to the end of `scratch`, in blocks. */
+/* The writable range, `system` to the end of `durable`, in blocks. */
 #define T_FIRST ((unsigned)(0x800000ull / T_BS))
-#define T_END ((unsigned)(0x1be00000ull / T_BS))
+#define T_END ((unsigned)(0x4600000ull / T_BS))
 #define T_STRIDE (T_PS + T_FREE)
 /* Factory-bad blocks in the LV's scanned span (OOB byte 0 cleared). */
 #define T_FACTORY_TOP_A (T_LAST - 40u)

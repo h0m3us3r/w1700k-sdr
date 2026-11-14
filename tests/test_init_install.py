@@ -132,7 +132,7 @@ class Install(Bench):
         self.assertNotEqual(config.durable(LV).read_bytes(), config.durable(KV).read_bytes())
         sizes = {name: int(size, 16) for name, size, *_ in unit.created['system']}
         self.assertEqual(sizes['fit'], 64 * LV.leb)
-        self.assertEqual(sizes['rootfs'], 82 * LV.leb)
+        self.assertEqual(sizes['rootfs'], 26 * LV.leb)
         self.assertEqual(unit.state, 'linux')
 
     def test_a_pool_stock_does_not_share_stops_the_flagged_install(self):
@@ -184,7 +184,7 @@ class Install(Bench):
         erased = {}
         for partition, offset, length in self.unit.erased:
             erased[partition] = erased.get(partition, 0) + length
-        self.assertEqual(erased, {'system': 0x3000000, 'durable': 0x2000000})
+        self.assertEqual(erased, {'system': 0x2200000, 'durable': 0x1c00000})
         stock_writes = [line for line in self.commands('stock')
                         if line.startswith(('flash write', 'flash erase'))]
         self.assertTrue(all(' 0x600000 ' in line for line in stock_writes))
@@ -324,10 +324,10 @@ class Layout(unittest.TestCase):
     def test_volumes_are_created_in_id_order(self):
         self.assertEqual(layout.create_system_volumes(KV), [
             'ubi create ubootenv 0x4000 d 0', 'ubi create ubootenv2 0x4000 d 1',
-            f'ubi create fit {128 * 0x1f000:#x} s 2', f'ubi create rootfs {170 * 0x1f000:#x} s 3'])
+            f'ubi create fit {128 * 0x1f000:#x} s 2', f'ubi create rootfs {58 * 0x1f000:#x} s 3'])
         self.assertEqual(layout.create_system_volumes(LV), [
             'ubi create ubootenv 0x4000 d 0', 'ubi create ubootenv2 0x4000 d 1',
-            f'ubi create fit {64 * 0x3e000:#x} s 2', f'ubi create rootfs {82 * 0x3e000:#x} s 3'])
+            f'ubi create fit {64 * 0x3e000:#x} s 2', f'ubi create rootfs {26 * 0x3e000:#x} s 3'])
 
     def test_erase_steps_cover_the_partition_exactly(self):
         steps = layout.erase('system')

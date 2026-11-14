@@ -17,6 +17,12 @@
     7. compare everything written once more: no block may differ
     8. reset, and watch stock U-Boot start stock's kernel
 
+With `stock_only` (init/restore --stock-slot) only steps 1 to 5 and then the
+`stock` partition are done: stock's second firmware slot and its own UBI behind
+it, which nothing of ours occupies. That puts back what an installation under
+the layout before November 2026 overwrote there (its `durable` reached 18 MiB
+into the second slot), leaves our system as it is, and boots it again.
+
 The backup is the vendor-logical data the dumper read (backup.py), so this puts
 back every byte stock firmware reads. The chip's own state (bad blocks, the
 reserve pool) stays as the vendor tables describe it now. Nothing is read back
@@ -48,6 +54,12 @@ def writes(size):
     ours, then its environment last."""
     first = partitions.GEOMETRY['loader'][0]
     return ((first, size - first), partitions.GEOMETRY['uenv'])
+
+
+def stock_span(size):
+    """(offset, length) of the `stock` partition within a backup of `size` bytes."""
+    first = partitions.GEOMETRY['stock'][0]
+    return (first, size - first)
 
 
 def plan_is_safe(size):
@@ -164,17 +176,18 @@ def check_kept(console, block, force=False):
                   'left as they are (never written), continuing (--force)', flush=True)
 
 
-def sync(session, block):
+def sync(session, block, spans=None):
     """Rewrite only the blocks that differ, `uenv` last; then none may differ."""
     console, log = session.console, session.log
     rewritten = 0
-    for offset, length in writes(backup.DUMP_BYTES):
+    spans = spans or writes(backup.DUMP_BYTES)
+    for offset, length in spans:
         print(f'  syncing {offset:#x}+{length:#x} (progress in the console log)', flush=True)
         count = nandsync(console, offset, length, check=False, block=block)
         log.event('synced', offset=offset, length=length, rewritten=count)
         rewritten += count
     print(f'  {rewritten} blocks rewritten; comparing everything again', flush=True)
-    for offset, length in writes(backup.DUMP_BYTES):
+    for offset, length in spans:
         if nandsync(console, offset, length, check=True, block=block):
             raise StepFailed(f'{offset:#x}+{length:#x} still differs from the backup')
     log.text('bmtstats.txt', console.must_run('bmtstats', limit=20))
@@ -192,9 +205,10 @@ def watch_stock(console, log, limit=180):
 
 
 def run(settings, backup_path=None, serial=None, boot=True, force=False,
-        accept_untested=False):
+        accept_untested=False, stock_only=False):
     """Restore the connected unit from `backup_path`, or else from init/install's
     backup of the unit (`serial`, when given, must be the connected unit's).
+    `stock_only` writes back the `stock` partition alone and boots our system.
     `force` reports, instead of stopping at, a serial that is not the unit's and
     `bootloader`/`calibration` contents that differ from the backup's (still
     never written). A NAND part never run on a unit needs `accept_untested`."""
@@ -213,6 +227,18 @@ def run(settings, backup_path=None, serial=None, boot=True, force=False,
         print(f'restore: unit {found} ({nand.name}), backup {backup_path}', flush=True)
         load_backup(session, backup_path, digest)
         check_kept(console, nand.block, force)
+        if stock_only:
+            span = stock_span(backup.DUMP_BYTES)
+            differ = nandsync(console, *span, check=True, block=nand.block)
+            print(f"restore: {differ} blocks of stock's second slot and data differ from the backup"
+                  + ('; writing them back' if differ else '; nothing to write'), flush=True)
+            rewritten = sync(session, nand.block, (span,)) if differ else 0
+            log.event('stock_slot', differed=differ, rewritten=rewritten)
+            status = unit.boot_linux(console, log, command_line='reset') if boot else None
+            print("restore: done; stock's second slot and data are the backup's"
+                  + (f'; the installed system runs ({status})' if boot else
+                     '; the unit waits at the restorer prompt'), flush=True)
+            return 0
         print('restore: writing back what differs', flush=True)
         sync(session, nand.block)
         print('restore: the NAND holds the backup', flush=True)

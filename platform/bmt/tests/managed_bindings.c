@@ -211,11 +211,12 @@ static void writes(void)
 	       !layer.counters.markbad_attempts && !layer.counters.markbad_completed);
 	assert(!layer.writer->remaps && storage(64)->main[0][0]==0x5c &&
 	       storage(64)->main[1][0]==0x5c && storage(T_SYSTEM+4)->main[0][0]==0x5c);
-	/* The same erase-then-write rule covers on-demand scratch without WAL. */
-	struct erase_info scratch_erase={.addr=448ull*BS,.len=BS};
+	/* The same erase-then-write rule covers `durable`, opened on demand, without WAL
+	 * (its first block: 0x2a00000 on both parts). */
+	struct erase_info scratch_erase={.addr=(0x2a00000ull),.len=BS};
 	assert(!m._erase(&m,&scratch_erase));before_mutations=mutations;before_reads=physical_reads;
 	op=(struct mtd_oob_ops){.mode=MTD_OPS_AUTO_OOB,.len=PS,.datbuf=data};
-	assert(!m._write_oob(&m,448ull*BS,&op) && op.retlen==PS);
+	assert(!m._write_oob(&m,(0x2a00000ull),&op) && op.retlen==PS);
 	assert(mutations==before_mutations+1 && physical_reads==before_reads+1);
 	/* A block erased in an earlier boot (a UBI free PEB: an EC header in page
 	 * 0, the rest erased) is learned once, then appended to directly: one
