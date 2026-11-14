@@ -79,21 +79,28 @@ GEOMETRY = {
     'bootloader': (0x00000000, 0x00200000),   # vendor: BL2/BL31 and stock U-Boot
     'uenv': (0x00200000, 0x00200000),         # vendor: stock U-Boot environment
     'calibration': (0x00400000, 0x00200000),  # vendor: identity and radio calibration
-    'loader': (0x00600000, 0x00200000),       # ours: our U-Boot FIT, read by stock
-    'system': (0x00800000, 0x02200000),       # ours: UBI with environment, FIT, root
+    'loader': (0x00600000, 0x00040000),       # ours: our U-Boot FIT, read by stock (256 KiB of it)
+    'loader-b': (0x00640000, 0x000c0000),     # ours: a newer U-Boot FIT, started by the first
+    'system': (0x00700000, 0x02300000),       # ours: UBI with environment, FIT, root
     'durable': (0x02a00000, 0x01c00000),      # ours: UBI with the durable UBIFS
     'stock': (0x04600000, 0x17800000),        # vendor: second firmware slot and stock's UBI, never written
     'reserved-bmt': (0x1be00000, 0x04200000), # vendor: BMT reserve pool
 }
 
-# Read-only partitions per stage. The loader can rewrite everything we own; Linux
-# keeps `system` read-only and opens `durable` only on request. `stock` is
-# read-only to both, and outside what the BMT layer lets them write.
+# Read-only partitions per stage. The loader can rewrite everything we own but
+# itself: `loader`, the copy stock boots, is written only through stock U-Boot
+# (the serial console), and a loader delivered over the network goes to
+# `loader-b`, which the first one starts if it is whole and was not found
+# wanting. Linux keeps the loaders and `system` read-only and opens `durable`
+# only on request. `stock` is read-only to both, and outside what the BMT layer
+# lets them write.
 READ_ONLY = {
     'loader': {'bootloader', 'uenv', 'calibration', 'loader', 'stock', 'reserved-bmt'},
-    'linux': {'bootloader', 'uenv', 'calibration', 'loader', 'system', 'stock',
+    'linux': {'bootloader', 'uenv', 'calibration', 'loader', 'loader-b', 'system', 'stock',
               'reserved-bmt'},
 }
+# Where each stage's writes begin (they end with `durable`): the BMT write policy.
+WRITES_FROM = {'loader': 'loader-b', 'linux': 'system'}
 DEVICE_TREES = {
     'platform/linux/dts/an7581-w1700k-sdr.dts': 'linux',
     'platform/loader/an7581-w1700k-sdr-loader.dts': 'loader',
@@ -177,11 +184,12 @@ def check_table():
 
 def policy_header(first_partition='system', last_partition='durable'):
     """airoha_bmt_policy.h: the bytes the BMT engine may write, from
-    `first_partition` to the end of `last_partition`. Our loader and Linux
-    write only what we own, `system` and `durable`; the restorer, `uenv` to
-    `stock`, also writes back stock's environment and the stock images over
-    ours (and is told never to touch `calibration`). The engine converts them
-    to blocks of the part it finds."""
+    `first_partition` to the end of `last_partition`. Linux writes only
+    `system` and `durable` (the default); our loader also the second loader
+    before them (WRITES_FROM); the restorer, `uenv` to `stock`, also writes
+    back stock's environment and the stock images over ours (and is told never
+    to touch `calibration`). The engine converts them to blocks of the part it
+    finds."""
     check_table()
     first = GEOMETRY[first_partition][0]
     end = sum(GEOMETRY[last_partition])

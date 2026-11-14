@@ -25,6 +25,23 @@ DEFCONFIG = 'an7581_w1700k_sdr_defconfig'
 # In the FIT's description, where a running unit can read it from its `loader`
 # partition: this loader applies a root staged in durable storage (init/flash --ssh).
 STAGED_UPDATE = 'staged-update 1'
+# The loader comes in two images of one build. The first is what stock boots from
+# `loader`, written only over the serial console. The second, for `loader-b`, is
+# what an update over the network delivers: the first starts it when it is whole,
+# is of this kind (the FIT's description, which the first compares) and was not
+# found wanting. They differ in two bytes of the built-in environment, and in
+# the description: `loader_slot`, by which each knows which it is, and
+# `bootdelay`, since the second counts down one second where the first counts
+# five (the first is the one the console tools stop; the second can still be
+# stopped by hand).
+# SECOND_LOADER in the first's description tells a running unit that its loader
+# starts a second one (system-update reads it).
+SECOND_LOADER = 'second-loader 1'
+SECOND_KIND = 'W1700K SDR second ARM loader'      # loader_b_kind in the environment
+SLOT_A, SLOT_B = b'loader_slot=a\0', b'loader_slot=b\0'
+DELAY_A, DELAY_B = b'bootdelay=5\0', b'bootdelay=1\0'
+FIT_B = IMAGES / 'w1700k-loader-b.itb'
+SECOND_AT = 0x8e000000                            # loader_b_at: where the first reads the second
 BMT = UNIT.parent / 'bmt'
 FILES = {
     f'configs/{DEFCONFIG}': UNIT / DEFCONFIG,
@@ -91,7 +108,8 @@ def compress(image):
 
 def main():
     partitions.check('platform/loader/an7581-w1700k-sdr-loader.dts', 'loader')
-    src = uboot.prepare('loader', patches(), FILES)
+    src = uboot.prepare('loader', patches(), FILES,
+                        partitions.policy_header(partitions.WRITES_FROM['loader']))
     uboot.mkimage(src)
     out = uboot.build('loader', src, DEFCONFIG)
     config = kconfig(out / '.config')
@@ -108,8 +126,8 @@ def main():
     payload = BUILD / 'loader/u-boot.bin.lzma'
     write_if_changed(payload, compress(image))
     IMAGES.mkdir(parents=True, exist_ok=True)
-    its = uboot.stock_fit(f'W1700K SDR persistent ARM loader, {STAGED_UPDATE}', 'loader', payload, 'lzma',
-                          out / 'u-boot.dtb')
+    its = uboot.stock_fit(f'W1700K SDR persistent ARM loader, {STAGED_UPDATE}, {SECOND_LOADER}', 'loader',
+                          payload, 'lzma', out / 'u-boot.dtb')
     uboot.make_fit(its, FIT, out / 'scripts/dtc', LOGS / 'loader.log')
     size = FIT.stat().st_size
     require(size <= partitions.GEOMETRY['loader'][1],
@@ -118,6 +136,27 @@ def main():
         require(not base <= uboot.ENTRY < base + size and not base <= uboot.FDT_LOAD < base + size,
                 f'loader: a FIT staged at {base:#x} overlaps its own load addresses')
     print(f'loader: {FIT} ({size} bytes)')
+
+    # The second loader: the same build with `loader_slot=b`.
+    require(image.count(SLOT_A) == 1 and SLOT_B not in image,
+            'loader: the built-in environment does not say loader_slot=a exactly once')
+    require(image.count(DELAY_A) == 1 and DELAY_B not in image,
+            'loader: the built-in environment does not say bootdelay=5 exactly once')
+    environment = (UNIT / 'an7581_w1700k_sdr_env').read_text().splitlines()
+    require(f'loader_b_kind={SECOND_KIND}' in environment and f'loader_b_at={SECOND_AT:#x}' in environment,
+            'loader: the environment and build.py disagree about the second loader')
+    payload_b = BUILD / 'loader/u-boot-b.bin.lzma'
+    write_if_changed(payload_b, compress(image.replace(SLOT_A, SLOT_B).replace(DELAY_A, DELAY_B)))
+    its = uboot.stock_fit(SECOND_KIND, 'loader', payload_b, 'lzma', out / 'u-boot.dtb')
+    uboot.make_fit(its, FIT_B, out / 'scripts/dtc', LOGS / 'loader.log')
+    size = FIT_B.stat().st_size
+    require(size <= partitions.GEOMETRY['loader-b'][1],
+            f'loader: the second FIT ({size} bytes) does not fit the loader-b partition')
+    for base in (STAGING, SECOND_AT):
+        require(not base <= uboot.ENTRY < base + partitions.GEOMETRY['loader-b'][1]
+                and not base <= uboot.FDT_LOAD < base + partitions.GEOMETRY['loader-b'][1],
+                f'loader: a second FIT staged at {base:#x} overlaps its own load addresses')
+    print(f'loader: {FIT_B} ({size} bytes)')
     return 0
 
 

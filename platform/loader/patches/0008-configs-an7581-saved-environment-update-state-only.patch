@@ -14,5 +14,5 @@ for the ones this loader was built with.
 + * set: a staged root update's state. Everything else, the boot and update
 + * scripts first of all, is always the built-in default.
 + */
-+#define CFG_ENV_FLAGS_LIST_STATIC	"update_tried:sw,update_failed:sw"
++#define CFG_ENV_FLAGS_LIST_STATIC	"update_tried:sw,update_failed:sw,loader_tried:sw,loader_failed:sw,loader_booted:sw"
 +

@@ -52,6 +52,10 @@ def write_loader_slot(session):
         command(console, line, limit=300)
     verify_fit(console, layout.READBACK)
     stock.boot(console, 'loader', layout.READBACK, interrupt=True)
+    # What is written here is the loader from now on: a second loader delivered earlier
+    # (init/flash --loader --ssh), or whatever stock left in that megabyte, must not be
+    # started in its place.
+    command(console, f"mtd erase loader-b 0x0 {config.partitions.GEOMETRY['loader-b'][1]:#x}", limit=120)
     session.log.event('loader_written', extent=extent)
     return extent
 

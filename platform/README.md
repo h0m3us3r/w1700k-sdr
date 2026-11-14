@@ -98,8 +98,9 @@ installed then is moved.)
 | `bootloader` | 0x0000000 | 2 MiB | vendor BL2/BL31 and stock U-Boot | read-only |
 | `uenv` | 0x0200000 | 2 MiB | stock U-Boot's saved environment | read-only |
 | `calibration` | 0x0400000 | 2 MiB | identity and radio calibration | read-only |
-| `loader` | 0x0600000 | 2 MiB | our U-Boot FIT | read-only |
-| `system` | 0x0800000 | 34 MiB | UBI: `ubootenv`, `ubootenv2`, `fit`, `rootfs` | attached read-only |
+| `loader` | 0x0600000 | 256 KiB | our U-Boot FIT, as stock boots it; written through stock U-Boot only | read-only |
+| `loader-b` | 0x0640000 | 768 KiB | a newer U-Boot FIT, delivered over ssh and started by the first (below) | read-only |
+| `system` | 0x0700000 | 35 MiB | UBI: `ubootenv`, `ubootenv2`, `fit`, `rootfs` | attached read-only |
 | `durable` | 0x2a00000 | 28 MiB | UBI: `durable`, a UBIFS for persistent files, and for a root update on its way in (below) | detached; `durable-open` |
 | `stock` | 0x4600000 | 376 MiB | stock's second firmware slot (`tclinux_slave`, a whole copy of the stock firmware) and stock's own UBI behind it, as the factory left them | read-only |
 | `reserved-bmt` | 0x1be00000 | 66 MiB | vendor bad-block reserve pool | read-only |
@@ -111,7 +112,8 @@ use (UBI keeps its free blocks erased across boots). One program per page, one
 erase per block reused. The BMT layer replaces a block only when a program or
 erase fails (journalled in the block after the BBT, so an interrupted
 replacement recovers on the next boot), and only ever writes inside
-`system`..`durable` (the restorer: `uenv`..`stock`, except `calibration`). It
+`system`..`durable` (the loader also `loader-b`, never `loader`; the restorer:
+`uenv`..`stock`, except `calibration`). It
 writes only while the BBT is the reserve's first good block, as the vendor
 places it: otherwise the pool it computed is not the one stock computes. A set
 factory marker is read twice in the pool scan (the byte has no ECC). Before
@@ -204,6 +206,44 @@ shell with U-Boot's commands modelled.
 
 The loader's FIT description carries `staged-update 1`; `system-update` reads
 it from the `loader` partition and refuses to stage for a loader without it.
+
+### Updating the loader without a console
+
+Stock U-Boot's boot command reads 256 KiB at 0x600000 and boots it. It cannot
+choose between copies or count attempts, and it is the last thing below us
+that we do not control, so a loader that rewrote itself would have nothing to
+fall back on. The megabyte for loaders is therefore two partitions. `loader`
+is what stock boots, and it is outside the range the BMT layer lets the loader
+write: only stock U-Boot, over the serial console, writes it. `loader-b` takes
+a second loader, which the first one starts.
+
+One build makes both images (`loader/build.py`): `w1700k-loader.itb` and
+`w1700k-loader-b.itb` differ in two bytes of the built-in environment
+(`loader_slot=a` or `b`, by which each knows which it is, and a boot delay of
+five seconds or one) and in the FIT's description, by which the first
+recognises a second loader. The boot command begins with `run loader_next`:
+
+- In the first loader, a request in `durable` that names a loader
+  (`loader_new=` and the file `update/loader.new`, left by
+  `system-update stage-loader`) is checked against its digest and its kind,
+  written to `loader-b`, read back, and noted as `loader_tried`. Then, request
+  or not: if `loader-b` holds a second loader whose hashes verify, it is
+  started with `bootm`; otherwise the first loader boots the system itself.
+- A request still there at the next boot with `loader_tried` set was never
+  confirmed: `loader-b` is erased and the image noted as `loader_failed`.
+- The second loader, when it finds `loader_tried`, notes `loader_booted`,
+  which is what `system-update confirm` asks for, together with the digest of
+  what `loader-b` holds. It then applies a staged root as above and boots.
+
+The three notes join the two of the root update in the saved environment's
+short list, and are erased with it when no request is left. A request can
+name a loader and a root at once (`init/flash --ssh`, `--bundle`): the first
+loader installs the second, and the second writes the root. `init/flash
+--loader` over the console erases `loader-b` after writing `loader`. The
+first loader's description carries `second-loader 1` for `system-update`.
+`tests/test_loader_update.py` runs all of it against the flash model; one of
+its cases comes from a unit, where a property was looked up in an image of
+which only the first page had been read.
 
 ## Checks in the build
 

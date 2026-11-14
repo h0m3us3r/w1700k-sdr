@@ -146,17 +146,29 @@ what was asked, skips a volume that already holds the new bytes, reads every
 write back, and boots the result. `--rootfs` and `--fit` update one volume of
 the system each. With more than one installed unit, name it with `--unit SERIAL`.
 
-### The root over the network alone
+### Over the network alone
 
 ```sh
 make
-init/flash --rootfs --ssh     # no serial console: ssh to the unit, and its loader does the writing
+init/flash --ssh              # the loader and the root from this build, with one reboot
+init/flash --bundle FILE      # the same from an update archive (w1700k-update.tar)
+init/flash --rootfs --ssh     # the root alone
+init/flash --loader --ssh     # the loader alone
 ```
 
-The root holds the driver, the unit's programs and its start-up scripts, which
-is what most updates change; it can be replaced with nothing but the Ethernet
-cable to `lan3`. The kernel image (`--fit`), the loader and durable storage
+No serial console: ssh to the unit, and its loader does the writing. The root
+holds the driver, the unit's programs and its start-up scripts, which is what
+most updates change; both it and the loader can be replaced with nothing but
+the Ethernet cable to `lan3`. The kernel image (`--fit`) and durable storage
 still take the serial console.
+
+`make` writes the archive beside the other images
+(`platform/build/images/w1700k-update.tar`): the second loader, the root as
+built, and a manifest of their SHA-256 digests and of the flash layout they
+are for. `--bundle` checks all of that, gives the root this unit's keys as an
+update from the build does, and refuses an archive made for another layout.
+
+#### The root
 
 What happens:
 
@@ -184,26 +196,56 @@ unit holds that nothing has written flash since the boot: the tool runs it
 before confirming, and confirming, which removes the staged files, is itself
 such a write, so run by hand afterwards it objects until the next boot.)
 
-It needs a loader that applies staged updates. A unit installed before this
+#### The loader
+
+Stock U-Boot reads 256 KiB at one fixed place and boots it: the `loader`
+partition. Whatever is there has to work, and nothing below it is ours, so
+that copy is written over the serial console only (`init/flash --loader`,
+through stock U-Boot) and by nothing we run on the unit. A loader that comes
+over ssh goes into the 768 KiB beside it, `loader-b`:
+
+1. The second loader (`w1700k-loader-b.itb`, the same build as the first) is
+   left in durable storage (`system-update stage-loader`).
+2. At the reboot the first loader checks it against the digest left with it
+   and that it is a second loader, writes it to `loader-b`, reads it back,
+   notes that it is being tried, and starts it. From then on the first loader
+   starts the second at every boot, after checking its hashes; the second
+   boots the system (and writes a staged root, when there is one).
+3. The second loader notes that it ran, and the tool confirms the update when
+   the system is up under it.
+
+A boot that finds the update still unconfirmed removes the second loader and
+does not try that image again: a loader that hangs, or under which the system
+does not come up, costs a power cycle. So does a `loader-b` that fails its
+hashes at any later boot: the first loader then boots the system itself. A
+countdown of five seconds on the console belongs to the first loader, and one
+of a second to the second; `init/flash --loader` over the console also clears
+`loader-b`, so that what was just written is the loader.
+
+Both updates need a loader that knows them. A unit installed before they
 existed says so before anything is sent; give it the new loader once, over the
 serial console: `init/flash --loader`.
 
-### A unit installed before the second slot was left alone
+### A unit installed from an earlier version
 
-Until November 2026 our `durable` storage reached 18 MiB into stock's second
-firmware slot, the copy of the stock firmware that stock keeps beside the one
-it boots. Everything of ours now lies in the first slot (`platform/README.md`
-has the table), and a unit installed before is moved in two steps, both over
-the serial console:
+The flash layout changed twice in November 2026. Until then our `durable`
+storage reached 18 MiB into stock's second firmware slot, the copy of the
+stock firmware that stock keeps beside the one it boots; everything of ours
+now lies in the first slot. And the megabyte for loaders was divided in two
+for the second loader, which moved `system` down by one (`platform/README.md`
+has the table). The network tools compare a unit's partitions with the build's
+and stop before sending anything to one laid out differently. Such a unit is
+moved in two steps, both over the serial console:
 
 ```sh
 init/install --force       # the same backup is kept; `system` and `durable` are made again, smaller
 init/restore --stock-slot  # stock's second slot and data, from the backup; our system stays
 ```
 
-The first takes a minute and a half and empties `durable`. The second sends
-the backup to the unit, compares stock's part of the chip with it block by
-block, and rewrites what differs: on the unit this was done with, the 144
+The first takes a minute and a half and empties `durable`. The second is
+needed only for a unit installed before the second slot was left alone: it
+sends the backup to the unit, compares stock's part of the chip with it block
+by block, and rewrites what differs: on the unit this was done with, the 144
 blocks the old `durable` had covered and nothing else. It then boots the
 installed system again.
 

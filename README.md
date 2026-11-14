@@ -176,17 +176,41 @@ Then open `http://HOST:8073/` and press ▶. The first start loads the radio
 firmware and brings the radio up (about 2 s). Without the browser, the same
 operations are `host/bin/w1700k load|start|band|tune|gain|filter|stop|status`.
 
-To update an installed unit after a `git pull`, over the network alone:
+## Updating over ssh
+
+Once installed, a unit takes its updates over the Ethernet cable to `lan3`
+alone, no serial console:
 
 ```sh
 make
-init/flash --rootfs --ssh              # the driver, the unit's programs and its start-up
+init/flash --ssh                                           # this build: the loader and the root, one reboot
+init/flash --bundle platform/build/images/w1700k-update.tar   # the same from an update archive
 ```
 
-The unit's loader writes the new root at its next boot, and puts the previous
-one back if the new one is never confirmed; see
-[init/README.md](init/README.md#updates) for that, and for the kernel and the
-loader, which take the serial console.
+`make` also writes the archive, `w1700k-update.tar` (3 MiB): the loader, the
+root and a list of their digests, in one file that can be handed to someone
+who has the tools but does not build. Either command takes about a minute.
+`init/flash --rootfs --ssh` and `--loader --ssh` update one of the two.
+
+- **The root** holds the radio driver, the unit's programs and its start-up:
+  most updates. Linux never writes the system flash. It leaves the new root
+  in the unit's durable storage, and the loader writes it at the next boot.
+- **The loader** is updated beside itself. The loader that stock U-Boot boots
+  is written over the serial console only; one that comes over ssh goes into
+  a second partition, and the first starts it. A unit is therefore never
+  without a loader that is known to work.
+- **Nothing stays that was not confirmed.** The tool confirms an update when
+  the unit answers again on it and its storage check passes. A root or a
+  loader that is never confirmed is undone by the next boot: the previous
+  root is written back, the second loader is removed. A unit that does not
+  come back from an update is recovered by a power cycle.
+- **An archive built for another flash layout is not sent**, nor is this
+  build to a unit installed under an older one: the tool compares the unit's
+  partitions first, and says how such a unit is moved.
+
+The kernel image and a unit's first installation still take the serial
+console. [init/README.md](init/README.md#updates) has the details, and what to
+do with a unit installed from an earlier version.
 
 Build requirements: a C/C++ compiler, make, git, Python 3.10+, the usual
 Buildroot prerequisites, clang, ld.lld, llvm-objcopy and llvm-readobj (RISC-V

@@ -62,13 +62,18 @@
 
 		loader@600000 {
 			label = "loader";
-			reg = <0x00600000 0x00200000>;
+			reg = <0x00600000 0x00040000>;
 			read-only;
 		};
 
-		system@800000 {
+		loader-b@640000 {
+			label = "loader-b";
+			reg = <0x00640000 0x000c0000>;
+		};
+
+		system@700000 {
 			label = "system";
-			reg = <0x00800000 0x02200000>;
+			reg = <0x00700000 0x02300000>;
 		};
 
 		durable@2a00000 {

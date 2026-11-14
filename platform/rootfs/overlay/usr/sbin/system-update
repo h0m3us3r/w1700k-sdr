@@ -1,14 +1,22 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# The root's update without a serial console: Linux never writes `system`, so it
-# leaves the new root in durable storage and the loader writes it at the next
-# boot (update_apply in the loader's environment). init/flash --ssh drives this.
+# Updates without a serial console: Linux never writes `system` or a loader, so
+# it leaves the new root, or a new loader, in durable storage and the loader
+# writes it at the next boot (update_apply and loader_next in the loader's
+# environment). init/flash --ssh drives this.
 #
 #   system-update status                what runs, what is staged, what the loader made of it
 #   system-update stage IMAGE SHA256    leave IMAGE (a SquashFS root, e.g. in /work) for the
 #                                       loader, with the running root beside it to go back to
-#   system-update confirm               the staged root runs and is wanted: settle on it
-#   system-update cancel                forget a staged root
+#   system-update stage-loader IMAGE SHA256
+#                                       leave IMAGE (a second loader, w1700k-loader-b.itb) for
+#                                       the first loader to put in `loader-b` and start
+#   system-update confirm               what was staged runs and is wanted: settle on it
+#   system-update cancel                forget what is staged
+#
+# The loader stock boots, in `loader`, is written over the serial console only.
+# A loader that comes this way goes beside it and is started by it; one that is
+# never confirmed is removed again by the first loader, at the next boot.
 #
 # After `stage`, reboot. The loader writes the new root, reads it back and boots
 # it; `confirm` then keeps it. A boot that finds it still unconfirmed puts the
@@ -17,6 +25,8 @@ set -eu
 . /etc/w1700k/storage.conf
 STAGED=/durable/update
 MARK='staged-update 1'		# in the description of a loader that applies updates
+SECOND_MARK='second-loader 1'	# and of one that starts a second loader from `loader-b`
+SECOND_KIND='W1700K SDR second ARM loader'	# the description of such a second loader
 
 fail() { echo "system-update: $*" >&2; exit 1; }
 
@@ -41,6 +51,16 @@ digest() { sha256sum | cut -d' ' -f1; }
 running() { digest < "$(volume rootfs)"; }
 installed() { grep -Eq '^/dev/ubiblock0_[0-9]+ /\.lower squashfs ' /proc/mounts; }
 loader_applies() { grep -q "$MARK" "$(partition loader)"; }
+loader_starts_second() { grep -q "$SECOND_MARK" "$(partition loader)"; }
+
+second_loader()	# the digest of the image in `loader-b`; nothing when it holds no image
+{
+	node=$(partition loader-b)
+	[ "$(dd if="$node" bs=4 count=1 2>/dev/null | hexdump -v -e '4/1 "%02x"')" = d00dfeed ] || return 0
+	size=$((0x$(dd if="$node" bs=4 skip=1 count=1 2>/dev/null | hexdump -v -e '4/1 "%02x"')))
+	[ "$size" -le "$(cat "/sys/class/mtd/$(basename "${node%ro}")/size")" ] || return 0
+	head -c "$size" "$node" | digest
+}
 
 # What the loader keeps while an update is neither confirmed nor undone.
 loader_note() { fw_printenv -n "$1" 2>/dev/null || :; }
@@ -49,6 +69,13 @@ staged()	# the staged request's two digests, new then old; nothing when none is 
 {
 	/usr/sbin/durable-run sh -c '
 		[ ! -f "$1/request" ] || echo "request: $(sed -n "s/^update_new=//p; s/^update_old=//p" "$1/request" | tr "\n" " ")"
+	' sh "$STAGED" | sed -n 's/^request: //p'
+}
+
+staged_loader()	# the staged second loader's digest; nothing when none is staged
+{
+	/usr/sbin/durable-run sh -c '
+		[ ! -f "$1/request" ] || echo "request: $(sed -n "s/^loader_new=//p" "$1/request")"
 	' sh "$STAGED" | sed -n 's/^request: //p'
 }
 
@@ -67,6 +94,11 @@ status)
 	echo "previous=${2:-}"
 	echo "tried=$(loader_note update_tried)"
 	echo "failed=$(loader_note update_failed)"
+	loader_starts_second && echo "second_loader=$(second_loader)" || echo "second_loader=unsupported"
+	echo "loader_staged=$(staged_loader)"
+	echo "loader_tried=$(loader_note loader_tried)"
+	echo "loader_booted=$(loader_note loader_booted)"
+	echo "loader_failed=$(loader_note loader_failed)"
 	;;
 stage)
 	image=${2:-} want=${3:-}
@@ -84,8 +116,11 @@ stage)
 	[ "$old" != "$want" ] || { echo "system-update: this root already runs"; exit 0; }
 	/usr/sbin/durable-run sh -eu -c '
 		staged=$1 image=$2 want=$3 root=$4 old=$5 size=$6
-		rm -rf "$staged"
 		mkdir -p "$staged"
+		# A loader staged beside it stays; the request goes first, so nothing half is acted on.
+		keep=$(sed -n "/^loader_new=/p" "$staged/request" 2>/dev/null || :)
+		rm -f "$staged/request" "$staged/request.part" "$staged/rootfs.new" "$staged/rootfs.old"
+		sync
 		free=$(($(df -k /durable | sed -n 2p | tr -s " " | cut -d" " -f4) * 1024))
 		[ "$free" -gt $((2 * size + 1048576)) ] || { echo "durable storage has $free bytes free" >&2; exit 1; }
 		cp "$image" "$staged/rootfs.new"
@@ -94,27 +129,65 @@ stage)
 		[ "$(sha256sum < "$staged/rootfs.new" | cut -d" " -f1)" = "$want" ]
 		[ "$(sha256sum < "$staged/rootfs.old" | cut -d" " -f1)" = "$old" ]
 		# The request last and whole: the loader acts on it alone.
-		printf "update_new=%s\nupdate_old=%s\n" "$want" "$old" > "$staged/request.part"
+		{ printf "update_new=%s\nupdate_old=%s\n" "$want" "$old"; [ -z "$keep" ] || echo "$keep"; } > "$staged/request.part"
 		sync
 		mv "$staged/request.part" "$staged/request"
 		sync
 	' sh "$STAGED" "$image" "$want" "$root" "$old" "$size" || fail "nothing is staged"
 	echo "system-update: staged $want over $old; reboot to have the loader write it"
 	;;
+stage-loader)
+	image=${2:-} want=${3:-}
+	[ -f "$image" ] && [ -n "$want" ] || fail "usage: system-update stage-loader IMAGE SHA256"
+	installed || fail "this boot runs from RAM, not from the installed root"
+	loader_starts_second || fail "the loader on this unit starts no second loader: " \
+		"flash it once over the serial console (init/flash --loader)"
+	[ "$(digest < "$image")" = "$want" ] || fail "$image is not $want"
+	head -c 512 "$image" | grep -q "$SECOND_KIND" ||
+		fail "$image is not a second loader (w1700k-loader-b.itb)"
+	node=$(partition loader-b)
+	room=$(cat "/sys/class/mtd/$(basename "${node%ro}")/size")
+	size=$(wc -c < "$image")
+	[ "$size" -le "$room" ] || fail "$image ($size bytes) does not fit loader-b ($room)"
+	[ "$(second_loader)" != "$want" ] || { echo "system-update: this loader is already in place"; exit 0; }
+	/usr/sbin/durable-run sh -eu -c '
+		staged=$1 image=$2 want=$3 size=$4
+		mkdir -p "$staged"
+		keep=$(sed -n "/^update_/p" "$staged/request" 2>/dev/null || :)
+		rm -f "$staged/request" "$staged/request.part" "$staged/loader.new"
+		sync
+		free=$(($(df -k /durable | sed -n 2p | tr -s " " | cut -d" " -f4) * 1024))
+		[ "$free" -gt $((size + 1048576)) ] || { echo "durable storage has $free bytes free" >&2; exit 1; }
+		cp "$image" "$staged/loader.new"
+		sync
+		[ "$(sha256sum < "$staged/loader.new" | cut -d" " -f1)" = "$want" ]
+		{ [ -z "$keep" ] || echo "$keep"; printf "loader_new=%s\n" "$want"; } > "$staged/request.part"
+		sync
+		mv "$staged/request.part" "$staged/request"
+		sync
+	' sh "$STAGED" "$image" "$want" "$size" || fail "no loader is staged"
+	echo "system-update: staged the loader $want; reboot to have the first loader write and start it"
+	;;
 confirm)
 	now=$(running)
 	set -- $(staged)
-	[ -n "${1:-}" ] || fail "nothing is staged"
-	[ "$now" = "$1" ] || fail "the staged root is $1, and $now runs"
+	loader=$(staged_loader)
+	[ -n "${1:-}" ] || [ -n "$loader" ] || fail "nothing is staged"
+	[ -z "${1:-}" ] || [ "$now" = "$1" ] || fail "the staged root is $1, and $now runs"
+	if [ -n "$loader" ]; then
+		[ "$(loader_note loader_booted)" = "$loader" ] ||
+			fail "the staged loader $loader did not start this boot"
+		[ "$(second_loader)" = "$loader" ] || fail "loader-b does not hold the staged loader $loader"
+	fi
 	forget
-	echo "system-update: settled on $now"
+	echo "system-update: settled on root $now${loader:+ and loader $loader}"
 	;;
 cancel)
 	forget
 	echo "system-update: nothing is staged"
 	;;
 *)
-	echo "usage: system-update status | stage IMAGE SHA256 | confirm | cancel" >&2
+	echo "usage: system-update status | stage IMAGE SHA256 | stage-loader IMAGE SHA256 | confirm | cancel" >&2
 	exit 2
 	;;
 esac

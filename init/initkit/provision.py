@@ -208,13 +208,16 @@ def build(unit_directory, public_key, dropbear_key, generic=config.ROOTFS,
     return output
 
 
-def provision(unit_directory, authorized_key_path=None, import_host_key=None, address='192.168.1.1'):
-    """Build the unit's root; returns (image path, host public key line). Also writes
-    `known_hosts` in the unit's directory, for the host tools' `unit.known_hosts`."""
+def provision(unit_directory, authorized_key_path=None, import_host_key=None, address='192.168.1.1',
+              generic=None):
+    """Build the unit's root (from `generic`, default this build's); returns (image path, host
+    public key line). Also writes `known_hosts` in the unit's directory, for the host tools'
+    `unit.known_hosts`."""
     unit_directory = Path(unit_directory)
     unit_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     dropbear_key = host_key(unit_directory, import_host_key)
-    image = build(unit_directory, authorized_key(authorized_key_path), dropbear_key)
+    image = build(unit_directory, authorized_key(authorized_key_path), dropbear_key,
+                  **({'generic': generic} if generic else {}))
     public = host_public_key(dropbear_key).decode()
     (unit_directory / KNOWN_HOSTS).write_text(f'{address} {public}\n')
     return image, public

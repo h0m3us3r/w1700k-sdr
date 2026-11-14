@@ -11,16 +11,31 @@ bootpart=system
 bootvol=fit
 bootconf=conf-sdr
 bootlimit=1
-bootcmd=run update_apply; ubi part.ro ${bootpart} && ubi read ${loadaddr} ${bootvol} && iminfo ${loadaddr} && bootm ${loadaddr}#${bootconf}
+bootcmd=run loader_next; run update_apply; ubi part.ro ${bootpart} && ubi read ${loadaddr} ${bootvol} && iminfo ${loadaddr} && bootm ${loadaddr}#${bootconf}
 update_spare=0x94000000
 update_check=hash sha256 ${loadaddr} ${filesize} update_got && test "${update_got}" = "${update_want}"
 update_fetch=ubi part.ro durable && ubifsmount ubi0:durable && ubifsload ${loadaddr} update/${update_file} && run update_check
 update_store=ubifsumount; ubi part.rw ${bootpart} && ubi write ${loadaddr} rootfs ${filesize} && ubi read ${update_spare} rootfs ${filesize} && hash sha256 ${update_spare} ${filesize} update_got && test "${update_got}" = "${update_want}"
-update_done=setenv update_new; setenv update_old; setenv update_file; setenv update_want; setenv update_got; saveenv
+update_done=setenv update_new; setenv update_old; setenv loader_new; setenv update_file; setenv update_want; setenv update_got; saveenv
 update_back=echo "update: putting the previous root back"; setenv update_file rootfs.old; setenv update_want ${update_old}; if run update_fetch && run update_store; then setenv update_failed ${update_new}; setenv update_tried; run update_done; echo "update: the previous root is back"; else echo "update: the previous root could not be put back"; fi
 update_try=echo "update: writing the staged root"; setenv update_file rootfs.new; setenv update_want ${update_new}; if run update_fetch; then if run update_store; then setenv update_tried ${update_new}; setenv update_failed; run update_done; echo "update: written; it stays once confirmed"; else echo "update: the write failed"; run update_back; fi; else echo "update: the staged root is unreadable or not the one announced; nothing written"; fi
 update_decide=if test "${update_tried}" = "${update_new}"; then echo "update: the new root was not confirmed"; run update_back; else if test "${update_failed}" = "${update_new}"; then echo "update: this one failed before; left alone"; else run update_try; fi; fi
-update_apply=if ubi part.ro durable && ubifsmount ubi0:durable; then setenv update_new; setenv update_old; if ubifsload ${update_spare} update/request; then env import -t ${update_spare} ${filesize} update_new update_old; fi; if test -n "${update_new}" && test -n "${update_old}"; then run update_decide; else if env exists update_tried || env exists update_failed; then echo "update: settled"; env erase; setenv update_tried; setenv update_failed; fi; fi; ubifsumount; fi
+update_apply=if ubi part.ro durable && ubifsmount ubi0:durable; then setenv update_new; setenv update_old; setenv loader_new; if ubifsload ${update_spare} update/request; then env import -t ${update_spare} ${filesize} update_new update_old loader_new; fi; if test -n "${update_new}" && test -n "${update_old}"; then run update_decide; else if test -z "${loader_new}"; then run update_settle; fi; fi; ubifsumount; fi
+update_settle=if env exists update_tried || env exists update_failed || env exists loader_tried || env exists loader_failed || env exists loader_booted; then echo "update: settled"; env erase; setenv update_tried; setenv update_failed; setenv loader_tried; setenv loader_failed; setenv loader_booted; fi
+loader_slot=a
+bootdelay=5
+loader_b_at=0x8e000000
+loader_b_kind=W1700K SDR second ARM loader
+loader_next=if test "${loader_slot}" = "b"; then echo "loader: this is the second loader"; run loader_seen; else run loader_first; fi
+loader_seen=if env exists loader_tried; then if test "${loader_booted}" != "${loader_tried}"; then setenv loader_booted ${loader_tried}; saveenv; fi; fi
+loader_first=setenv loader_new; if ubi part.ro durable && ubifsmount ubi0:durable; then if ubifsload ${update_spare} update/request; then env import -t ${update_spare} ${filesize} loader_new; fi; if test -n "${loader_new}"; then run loader_decide; fi; ubifsumount; fi; run loader_start
+loader_decide=if test "${loader_tried}" = "${loader_new}"; then echo "loader: the new loader was not confirmed; removing it"; run loader_drop; setenv loader_failed ${loader_new}; setenv loader_tried; setenv loader_booted; run loader_save; else if test "${loader_failed}" = "${loader_new}"; then echo "loader: this one failed before; left alone"; else run loader_try; fi; fi
+loader_try=echo "loader: writing the staged loader"; setenv update_file loader.new; setenv update_want ${loader_new}; if run update_fetch && run loader_is_b; then if run loader_store; then setenv loader_tried ${update_want}; setenv loader_failed; setenv loader_booted; run loader_save; echo "loader: written; it stays once confirmed"; else echo "loader: the write failed; removing it"; run loader_drop; fi; else echo "loader: the staged loader is unreadable, not the one announced or not a second loader; nothing written"; fi
+loader_is_b=setenv loader_kind; fdt addr ${loadaddr} && fdt get value loader_kind / description && test "${loader_kind}" = "${loader_b_kind}"
+loader_store=ubifsumount; mtd erase loader-b && mtd write loader-b ${loadaddr} 0 ${filesize} && mtd read loader-b ${update_spare} 0 ${filesize} && hash sha256 ${update_spare} ${filesize} update_got && test "${update_got}" = "${update_want}"
+loader_drop=ubifsumount; mtd erase loader-b
+loader_save=setenv update_file; setenv update_want; setenv update_got; setenv loader_new; setenv loader_kind; saveenv
+loader_start=setenv loader_kind; if mtd read loader-b ${loader_b_at} 0 0x1000 && fdt addr ${loader_b_at} && mtd read loader-b ${loader_b_at}; then if fdt get value loader_kind / description && test "${loader_kind}" = "${loader_b_kind}" && iminfo ${loader_b_at}; then echo "loader: starting the second loader"; bootm ${loader_b_at}; echo "loader: the second loader did not start"; else echo "loader: what is in loader-b is not a whole second loader; not started"; fi; fi; setenv loader_kind
 altbootcmd=echo *** boot limit exceeded, stopping at prompt ***
 boot_tftp=tftpboot ${loadaddr} ${bootfile} && iminfo ${loadaddr} && bootm ${loadaddr}#${bootconf}
 update_fit=tftpboot ${loadaddr} ${fitfile} && ubi part.rw ${bootpart} && ubi write ${loadaddr} fit ${filesize}

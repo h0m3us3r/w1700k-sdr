@@ -66,7 +66,7 @@ static int driver_write(struct mtd_info *dev,loff_t to,struct mtd_oob_ops *ops)
 	struct block *s=storage(b);
 	unsigned char main_page[T_PS], spare[T_OS];
 	(void)dev;
-	assert(b>=64 && b!=65 && b!=T_SYSTEM); /* physical protected/factory storage */
+	assert(b>=T_FIRST && b!=65 && b!=T_SYSTEM); /* physical protected/factory storage */
 	assert(!((u64)to%PS) && ops->len<=PS && ops->ooboffs+ops->ooblen<=per);
 	ops->retlen=ops->oobretlen=0; mutations++;
 #ifndef TEST_LINUX

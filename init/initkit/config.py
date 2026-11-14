@@ -17,6 +17,8 @@ import partitions  # noqa: E402  the NAND layout shared with the platform build
 
 IMAGES = ROOT / 'platform/build/images'
 LOADER = IMAGES / 'w1700k-loader.itb'
+LOADER_B = IMAGES / 'w1700k-loader-b.itb'      # the same build, for `loader-b` (updates over ssh)
+UPDATE = IMAGES / 'w1700k-update.tar'           # the second loader and the root, for init/flash --bundle
 DUMPER = IMAGES / 'w1700k-dumper.itb'
 SYSTEM_FIT = IMAGES / 'w1700k-system.itb'
 RECOVERY_FIT = IMAGES / 'w1700k-recovery.itb'

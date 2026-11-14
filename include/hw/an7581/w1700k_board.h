@@ -269,10 +269,12 @@
  * read-only; the chainloaded U-Boot occupies the start of stock tclinux, and
  * everything of ours ends where stock tclinux does, so tclinux_slave and
  * stock's UBI behind it are never written. */
-#define W1700K_NAND_LOADER              0x00600000u /* 2 MiB */
-#define W1700K_NAND_LOADER_SIZE         0x00200000u
-#define W1700K_NAND_SYSTEM              0x00800000u /* UBI: FIT, rootfs, env */
-#define W1700K_NAND_SYSTEM_SIZE         0x02200000u
+#define W1700K_NAND_LOADER              0x00600000u /* 256 KiB: what stock reads and boots */
+#define W1700K_NAND_LOADER_SIZE         0x00040000u
+#define W1700K_NAND_LOADER_B            0x00640000u /* 768 KiB: a newer loader, started by the first */
+#define W1700K_NAND_LOADER_B_SIZE       0x000c0000u
+#define W1700K_NAND_SYSTEM              0x00700000u /* UBI: FIT, rootfs, env */
+#define W1700K_NAND_SYSTEM_SIZE         0x02300000u
 #define W1700K_NAND_DURABLE             0x02a00000u /* UBI, writable */
 #define W1700K_NAND_DURABLE_SIZE        0x01c00000u
 #define W1700K_NAND_STOCK               0x04600000u /* tclinux_slave and stock's UBI */
