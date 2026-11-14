@@ -232,6 +232,39 @@ class Refused(Exception):
     """A command this session will not transmit."""
 
 
+class BinaryPort:
+    """The session's port as a file-transfer protocol needs it: bytes out at the
+    line's own speed and bytes in as they come. The reader thread still owns the
+    port and logs every received byte; this reads its mirror from where it began."""
+
+    def __init__(self, session):
+        self.session = session
+        self.position = session.mark()
+
+    def write(self, data):
+        self.session.check()
+        with self.session.write_lock:
+            written = self.session.uart.write(data)
+            self.session.uart.flush()
+        if written != len(data):
+            raise RuntimeError('partial UART write; inspect the transcript before retry')
+
+    def read(self, timeout):
+        """What has arrived since the last read, waiting up to `timeout` for any."""
+        session = self.session
+        deadline = time.monotonic() + timeout
+        with session.changed:
+            while len(session.buffer) <= self.position:
+                session.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return b''
+                session.changed.wait(min(remaining, 0.2))
+            data = bytes(session.buffer[self.position:])
+            self.position = len(session.buffer)
+            return data
+
+
 class ConsoleSession:
     """The UART for a whole run: raw log, boot catcher, operator FIFO, commands.
 
@@ -387,6 +420,32 @@ class ConsoleSession:
                 self.changed.wait(min(remaining, 0.2))
         self.event('wait_timeout', waiting_for=description, seconds=round(timeout, 1))
         return False
+
+    def binary(self, quiet=QUIET_SETTLE, limit=5.0):
+        """A raw channel for a file-transfer protocol, once the unit is silent.
+
+        A typed command goes a character a millisecond with its echo compared; a
+        protocol with its own checks and retries needs neither and would take ten
+        times as long. But stock U-Boot loses what arrives while it prints, so
+        the first packet must not meet the end of the line that announced the
+        transfer: this returns when nothing has arrived for `quiet` seconds.
+        """
+        self.check()
+        deadline = time.monotonic() + limit
+        with self.changed:
+            while True:
+                now = time.monotonic()
+                idle = now - self.last_rx if self.last_rx is not None else quiet
+                if idle >= quiet or now >= deadline:
+                    break
+                self.changed.wait(max(0.005, quiet - idle))
+        try:
+            # A USB adapter otherwise holds each short reply for 16 ms.
+            self.uart.set_low_latency_mode(True)
+        except Exception:                   # one that cannot is only slower
+            pass
+        self.event('binary')
+        return BinaryPort(self)
 
     def arm(self):
         """Watch the next boot for stock U-Boot's countdown and stop it there.

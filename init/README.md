@@ -24,6 +24,8 @@ sudo init/host/link up IFACE                  # 192.168.1.10/24 on the NIC cable
 sudo init/host/tftp-forward enable IFACE      # stock U-Boot's UDP 69 -> port 7071
 ```
 
+The second line is not needed with `--stock-transport serial` (below).
+
 Stock U-Boot fetches files only from UDP port 69. `tftp-forward` redirects
 exactly that traffic (from 192.168.1.1 to 192.168.1.10 on IFACE) to the
 installer's unprivileged port, so the tools run as a normal user. Without it,
@@ -53,6 +55,33 @@ The redirect is one rule and a systemd unit that loads it at every boot:
 The fallback and the status are owed to vampjaz's report in
 [issue 10](https://github.com/h0m3us3r/w1700k-sdr/issues/10): a host whose
 nftables was installed but did not work, and a status that misled.
+
+### Without port 69: the serial line
+
+Stock U-Boot only ever takes two small images from the host, the dumper and our
+loader; everything after them is fetched by our own U-Boot from an unprivileged
+port. `--stock-transport serial` on any of the console tools (or
+`"stock_transport": "serial"` in `install.json`) sends those two over the console
+itself, with stock's `loadb` (Kermit). The tools then listen on UDP 69 nowhere,
+so there is no redirect to set up and no need for root.
+
+| | TFTP (the default) | Serial |
+| --- | --- | --- |
+| The host needs | the redirect above, or root | nothing more than the console |
+| Time for the dumper (179 KiB), measured | 5 s | 21 s |
+| Checked in RAM before use | `crc32`, then stock's `iminfo` | the same |
+
+TFTP stays the default because it is the path every install so far has taken and
+an Ethernet cable is the better link. Serial is for a host where the redirect
+cannot be had or is not wanted. Kermit's own check is six bits a packet, so over
+serial it is the `crc32` in RAM that vouches for the image; a load that fails it
+stops the run before anything is written.
+
+Measured on a W1700K2 (stock U-Boot "AXON 2.3"): both images loaded, verified
+and booted, with no packet sent twice. A stock loader without `loadb`, or a line
+that carries nothing, stops the run with a pointer back to TFTP. The command is
+named on [OpenWrt's page for this unit](https://openwrt.org/toh/gemtek/mxf-w1700k),
+which is where the idea came from.
 
 For the 10 GbE IQ link (unit `eth1`, 10.77.0.1), give the host side its
 address and jumbo frames: `sudo init/host/link keep IFACE10G 10.77.0.10/24 9216`.

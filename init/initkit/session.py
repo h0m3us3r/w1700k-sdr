@@ -67,8 +67,10 @@ def preflight(settings, network=True):
         if local_interface(settings.host_ip) is None:
             problems.append(f'{settings.host_ip} is not configured on any interface '
                             '(see init/README.md, "Host setup")')
-        for name, port in (('stock', settings.stock_port),
-                           ('transfer', settings.transfer_port)):
+        ports = [('transfer', settings.transfer_port)]
+        if settings.stock_transport == 'tftp':
+            ports.insert(0, ('stock', settings.stock_port))
+        for name, port in ports:
             reason = port_free(settings.host_ip, port)
             if reason:
                 problems.append(f'cannot listen on {settings.host_ip}:{port} ({name}): {reason}')
@@ -93,15 +95,18 @@ def open_session(settings, tool, write=False, passive=False):
     servers = []
     if not passive:
         servers = [
-            # Stock's budget-limited TFTP client needs a fast, retransmitting server.
-            tftp.ServerThread(served, settings.host_ip, settings.stock_port,
-                              timeout=1.0, retries=30, priority=True, name='tftp-stock',
-                              log=lambda line: log.event('tftp', line=line)),
             tftp.ServerThread(served, settings.host_ip, settings.transfer_port,
                               allow_write=True, timeout=5.0, retries=5,
                               name='tftp-transfer',
                               log=lambda line: log.event('tftp', line=line)),
         ]
+        if settings.stock_transport == 'tftp':
+            # Stock's budget-limited TFTP client needs a fast, retransmitting server.
+            # With the serial transport nothing listens for stock at all.
+            servers.insert(0, tftp.ServerThread(
+                served, settings.host_ip, settings.stock_port, timeout=1.0, retries=30,
+                priority=True, name='tftp-stock',
+                log=lambda line: log.event('tftp', line=line)))
     console = uart.ConsoleSession(settings.uart, log.dir, log.event, passive=passive,
                                   allow_mutating=write)
     print(f'{tool}: run log in {log.dir}')
@@ -121,5 +126,6 @@ def settings_from(args):
     """The connection settings of a parsed command line."""
     return argparse.Namespace(uart=args.uart, host_ip=args.host_ip,
                               device_ip=args.device_ip, stock_port=args.stock_port,
+                              stock_transport=args.stock_transport,
                               transfer_port=args.transfer_port,
                               data_dir=args.data_dir.expanduser())

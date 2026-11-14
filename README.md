@@ -170,7 +170,7 @@ make                                   # everything, from public sources (~10 mi
 make check                             # the test suite; its report: tests/build/report.html
 
 sudo init/host/link up IFACE           # 192.168.1.10/24 on the NIC cabled to lan3
-sudo init/host/tftp-forward enable IFACE
+sudo init/host/tftp-forward enable IFACE   # or skip it and pass --stock-transport serial to init/install
 init/install                           # back up the NAND, install, save the radio calibration
 
 sudo init/host/link keep IFACE10G 10.77.0.10/24 9216  # the 10 GbE stream link: address, jumbo frames

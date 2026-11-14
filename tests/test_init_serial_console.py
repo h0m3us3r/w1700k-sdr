@@ -4,7 +4,9 @@ import importlib.util
 import os
 from pathlib import Path
 import pty
+import random
 import select
+import sys
 import tempfile
 import threading
 import time
@@ -17,6 +19,10 @@ except ImportError:
     serial = None
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT / 'init'), str(Path(__file__).resolve().parent)]
+from initkit import kermit  # noqa: E402
+import init_fake_loadb  # noqa: E402
+
 SPEC = importlib.util.spec_from_file_location('init_uart', ROOT / 'init/initkit/uart.py')
 console = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(console)
@@ -420,6 +426,59 @@ class SessionTests(SessionFixture):
         with self.assertRaisesRegex(RuntimeError, 'UART reader stopped'):
             self.session.check()
         self.assertEqual((Path(self.tmp.name) / 'rx.bin').read_bytes(), b'partial boot log\r\n')
+
+
+class BinaryTests(SessionFixture):
+    """The raw channel a file transfer uses, with U-Boot's `loadb` at the far end."""
+
+    def test_a_file_goes_through_whole_at_the_lines_own_speed(self):
+        receiver = init_fake_loadb.Receiver()
+
+        def unit():
+            while not receiver.done and select.select([self.master], [], [], 3)[0]:
+                reply = receiver.feed(os.read(self.master, 4096))
+                if reply:
+                    os.write(self.master, reply)
+        thread = threading.Thread(target=unit, daemon=True)
+        thread.start()
+        data = random.Random(3).randbytes(60000)
+        port = self.session.binary(quiet=.02)
+        began = time.monotonic()
+        stats = kermit.Sender(port.write, port.read).send(data, b'image')
+        thread.join(3)
+        self.assertEqual(bytes(receiver.memory), data)
+        self.assertEqual(stats['resent'], 0)
+        # A character a millisecond, as commands are typed, would take over a minute.
+        self.assertLess(time.monotonic() - began, 60000 * console.TX_GAP / 4)
+
+    def test_it_opens_only_once_the_unit_has_stopped_printing(self):
+        """Stock U-Boot loses what arrives while it prints; a first packet sent
+        into the end of `loadb`'s own announcement was cut short on a unit."""
+        written = []
+
+        def unit():
+            for _ in range(6):
+                os.write(self.master, b'## Ready ')
+                written.append(time.monotonic())
+                time.sleep(.05)
+        thread = threading.Thread(target=unit, daemon=True)
+        thread.start()
+        time.sleep(.02)
+        port = self.session.binary(quiet=.15)
+        opened = time.monotonic()
+        thread.join(2)
+        self.assertEqual(len(written), 6)
+        self.assertGreaterEqual(opened - written[-1], .12)
+        self.assertEqual(port.read(0), b'')         # the announcement is behind it
+
+    def test_a_dead_reader_stops_a_transfer_at_once(self):
+        port = self.session.binary(quiet=.02)
+        self.close_master()
+        until = time.monotonic() + 2
+        while self.session.failure is None and time.monotonic() < until:
+            time.sleep(.01)
+        with self.assertRaisesRegex(RuntimeError, 'UART reader stopped'):
+            kermit.Sender(port.write, port.read, timeout=.05, tries=50).send(b'data')
 
 
 class PassiveSessionTests(SessionFixture):

@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'init'), str(Path(__file__).resolve().parent)]
-from initkit import backup, config, install, layout, provision, session, update  # noqa: E402
+from initkit import backup, config, install, layout, provision, session, stock, update  # noqa: E402
 from initkit import nand as parts  # noqa: E402
 from initkit.config import partitions  # noqa: E402
 from initkit.console import StepFailed  # noqa: E402
@@ -50,6 +50,7 @@ class Bench(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.settings = argparse.Namespace(uart='/dev/null', host_ip='192.168.1.10',
                                            device_ip='192.168.1.1', stock_port=7071,
+                                           stock_transport='tftp',
                                            transfer_port=7070, data_dir=self.work / 'data')
         self.unit_root = self.work / 'unit-root.squashfs'
         self.unit_root.write_bytes(fake.fit('hsqs-unit', 0x31000))
@@ -256,6 +257,146 @@ class Install(Bench):
         self.make_unit(installed=True)
         with self.assertRaisesRegex(StepFailed, 'already boots our loader'):
             self.install()
+
+
+class StockTransport(Bench):
+    """How the first image reaches stock U-Boot: its TFTP client, or `loadb`."""
+
+    def serial(self, **options):
+        self.settings.stock_transport = 'serial'
+        return self.make_unit(**options)
+
+    def untouched(self, unit):
+        self.assertFalse(any(line.startswith(('flash', 'saveenv', 'mtd', 'bootm'))
+                             for line in self.commands()))
+        self.assertEqual(unit.saved.get('bootcmd'), fake.STOCK_BOOTCMD)
+
+    def test_tftp_is_the_default(self):
+        self.assertEqual(config.DEFAULTS['stock_transport'], 'tftp')
+        self.make_unit()
+        self.install()
+        self.assertTrue(any(line.startswith('tftpboot ') for line in self.commands('stock')))
+        self.assertFalse(any(line.startswith('loadb') for line in self.commands()))
+
+    def test_over_serial_a_unit_is_installed_and_stock_fetches_nothing(self):
+        unit = self.serial()
+        self.assertEqual(self.install(), 0)
+        stock_commands = self.commands('stock')
+        self.assertIn(f'loadb {stock.STAGE_ADDRESS:#x}', stock_commands)
+        self.assertFalse(any(line.startswith(('tftpboot', 'setenv serverip', 'setenv ipaddr'))
+                             for line in stock_commands), stock_commands)
+        self.assertEqual(unit.state, 'linux')
+
+    def test_over_serial_the_image_is_still_checked_in_ram_before_it_is_booted(self):
+        self.serial()
+        self.install()
+        order = [self.index(pattern) for pattern in (r'^loadb ', r'^crc32 0x89000000 ',
+                                                     r'^iminfo 0x89000000', r'^bootm ')]
+        self.assertEqual(order, sorted(order))
+
+    def test_a_loader_update_goes_over_serial_too(self):
+        unit = self.serial(installed=True)
+        self.flash(loader=True)
+        self.assertIn(f'loadb {stock.STAGE_ADDRESS:#x}', self.commands('stock'))
+        self.assertFalse(any(line.startswith('tftpboot') for line in self.commands('stock')))
+        self.assertTrue(unit.loader_slot.startswith(config.LOADER.read_bytes()))
+
+    def test_an_image_kermit_let_through_wrong_is_caught_by_the_crc(self):
+        unit = self.serial(line='corrupting')
+        with self.assertRaisesRegex(StepFailed, 'corrupt in RAM'):
+            self.install()
+        self.untouched(unit)
+
+    def test_a_size_stock_reports_wrong_stops_the_run(self):
+        unit = self.serial(line='short')
+        with self.assertRaisesRegex(StepFailed, 'not 176128 bytes'):
+            self.install()
+        self.untouched(unit)
+
+    def test_a_line_that_carries_nothing_stops_the_run_and_frees_the_prompt(self):
+        unit = self.serial(line='dead')
+        with mock.patch.object(stock, 'PACKET_SECONDS', 0.002), \
+                mock.patch.object(stock, 'PACKET_TRIES', 3), \
+                self.assertRaisesRegex(StepFailed, 'did not go over the serial line.*'
+                                                   '--stock-transport tftp'):
+            self.install()
+        # Ctrl-C, so stock is back at its prompt and not waiting for a packet.
+        self.assertEqual(self.commands('stock')[-2:], [f'loadb {stock.STAGE_ADDRESS:#x}',
+                                                       '<ctrl-c>'])
+        self.untouched(unit)
+
+    def test_a_stock_loader_without_loadb_says_to_use_tftp(self):
+        unit = self.serial(loadb=False)
+        with self.assertRaisesRegex(StepFailed, 'did not start `loadb`.*--stock-transport tftp'):
+            self.install()
+        self.untouched(unit)
+
+    def test_a_tftp_piece_that_does_not_arrive_names_the_serial_way(self):
+        self.make_unit()
+        with mock.patch.object(stock, 'split', return_value=[('missing.p00', 100)]), \
+                self.assertRaisesRegex(StepFailed, '--stock-transport serial'):
+            self.install()
+
+
+class Listeners(unittest.TestCase):
+    """With the serial transport the tools listen for stock U-Boot nowhere."""
+
+    def settings(self, transport):
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        return argparse.Namespace(uart='/dev/null', host_ip='192.0.2.1',
+                                  device_ip='192.0.2.2', stock_port=69, transfer_port=7070,
+                                  stock_transport=transport, data_dir=Path(work.name))
+
+    def test_only_tftp_needs_the_stock_port(self):
+        for transport, ports in (('tftp', [69, 7070]), ('serial', [7070])):
+            with self.subTest(transport):
+                asked = []
+                with mock.patch.object(session, 'local_interface', return_value='eth0'), \
+                        mock.patch.object(session, 'uart_free', return_value=None), \
+                        mock.patch.object(session, 'port_free',
+                                          side_effect=lambda address, port: asked.append(port)):
+                    session.preflight(self.settings(transport))
+                self.assertEqual(asked, ports)
+
+    def test_only_tftp_starts_a_server_for_stock(self):
+        for transport, names in (('tftp', ['tftp-stock', 'tftp-transfer']),
+                                 ('serial', ['tftp-transfer'])):
+            with self.subTest(transport):
+                started = []
+
+                class Server:
+                    def __init__(self, root, address, port, **options):
+                        self.name = options['name']
+
+                    def start(self):
+                        started.append(self.name)
+
+                    def stop(self):
+                        pass
+
+                console = mock.Mock()
+                with mock.patch.object(session, 'preflight'), \
+                        mock.patch.object(session.tftp, 'ServerThread', Server), \
+                        mock.patch.object(session.uart, 'ConsoleSession', return_value=console), \
+                        mock.patch('builtins.print'), \
+                        session.open_session(self.settings(transport), 'test'):
+                    pass
+                self.assertEqual(started, names)
+
+    def test_the_setting_is_one_of_the_two(self):
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / 'install.json'
+            path.write_text('{"stock_transport": "serial"}')
+            self.assertEqual(config.load(path)['stock_transport'], 'serial')
+            path.write_text('{"stock_transport": "xmodem"}')
+            with self.assertRaisesRegex(SystemExit, 'stock_transport is "tftp" or "serial"'):
+                config.load(path)
+
+    def test_every_console_tool_offers_the_flag(self):
+        for tool in ('install', 'flash', 'restore', 'rawdump'):
+            with self.subTest(tool):
+                self.assertIn('config.add_arguments', (ROOT / 'init' / tool).read_text())
 
 
 class Flash(Bench):

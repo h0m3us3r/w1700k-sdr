@@ -43,6 +43,10 @@ DEFAULTS = {
     # port behind the redirect that init/host/tftp-forward installs; runs as root
     # listen on 69 itself.
     'stock_port': 7071,
+    # How stock U-Boot gets our first image: 'tftp' (it fetches from UDP 69), or
+    # 'serial' (its `loadb` over the console: slower, but no port 69, no root and
+    # no redirect).
+    'stock_transport': 'tftp',
     # Our U-Boot fetches from this unprivileged port (its `tftpdstp`).
     'transfer_port': 7070,
     # The public key allowed to log in as root over SSH.
@@ -59,6 +63,9 @@ def load(path=CONFIG_FILE):
         if unknown:
             raise SystemExit(f'{path}: unknown setting(s): {", ".join(unknown)}')
         settings.update(loaded)
+        if settings['stock_transport'] not in ('tftp', 'serial'):
+            raise SystemExit(f'{path}: stock_transport is "tftp" or "serial", not '
+                             f'{settings["stock_transport"]!r}')
     if os.geteuid() == 0:
         settings['stock_port'] = 69
     return settings
@@ -74,6 +81,12 @@ def add_arguments(parser, settings):
                         help='address the unit uses in U-Boot (default: %(default)s)')
     parser.add_argument('--stock-port', type=int, default=settings['stock_port'],
                         help='UDP port serving stock U-Boot (default: %(default)s)')
+    parser.add_argument('--stock-transport', choices=('tftp', 'serial'),
+                        default=settings['stock_transport'],
+                        help='how stock U-Boot gets our first image: tftp, which it '
+                             'fetches from UDP 69, or serial, its loadb over the console '
+                             '(slower; needs neither port 69 nor root) '
+                             '(default: %(default)s)')
     parser.add_argument('--transfer-port', type=int, default=settings['transfer_port'],
                         help='UDP port serving our U-Boot (default: %(default)s)')
     parser.add_argument('--data-dir', type=Path, default=Path(settings['data_dir']),

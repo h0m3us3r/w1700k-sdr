@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'init'))
 from initkit.config import partitions  # noqa: E402
 from initkit.uart import MUTATING  # noqa: E402
+import init_fake_loadb  # noqa: E402
 
 PROMPTS = {'stock': 'ECNT> ', 'dumper': 'dumper> ', 'loader': 'SDR loader> ',
            'restorer': 'restore> ', 'linux': '/ # '}
@@ -53,10 +54,47 @@ class Refused(Exception):
     """The simulated console refused a write, as the real one does."""
 
 
+class FakeLine:
+    """The console as `loadb` has it: what is written goes to U-Boot's receiver,
+    and when the transfer ends the image is in RAM and the prompt is back."""
+
+    def __init__(self, unit):
+        self.unit = unit
+        self.receiver = init_fake_loadb.Receiver()
+        self.replies = []
+
+    def write(self, data):
+        unit = self.unit
+        if unit.loading is None or unit.line == 'dead':
+            return
+        reply = self.receiver.feed(data)
+        if reply:
+            self.replies.append(reply)
+        if self.receiver.done:
+            data = bytes(self.receiver.memory)
+            if unit.line == 'corrupting' and data:      # past Kermit's six-bit check
+                data = data[:100] + bytes((data[100] ^ 0x20,)) + data[101:]
+            size = len(data) - (1 if unit.line == 'short' else 0)
+            unit.write_ram(unit.loading, data)
+            unit.buffer += (f'## Total Size      = {size:#010x} = {size} Bytes\r\n'
+                            f'## Start Addr      = {unit.loading:#010x}\r\n' + PROMPTS['stock'])
+            unit.loading = None
+
+    def read(self, timeout):
+        return self.replies.pop(0) if self.replies else b''
+
+
 class FakeUnit:
     def __init__(self, served, chip_bytes=0x420000, installed=False,
-                 translation='vendor BBT/BMT', part=partitions.KV, stock_pool=None):
+                 translation='vendor BBT/BMT', part=partitions.KV, stock_pool=None,
+                 loadb=True, line='clean'):
         self.served = Path(served)
+        # Stock's `loadb`: whether it has the command, the address a transfer is
+        # going to, and what the serial line does to one ('clean', 'dead',
+        # 'corrupting', 'short').
+        self.loadb = loadb
+        self.loading = None
+        self.line = line
         self.part = part
         # The vendor pool our U-Boots compute, and the one stock prints at boot.
         self.pool = min(250, part.blocks * 8 // 100)
@@ -134,6 +172,10 @@ class FakeUnit:
 
     def wake(self):
         self.log.append((self.state, '<ctrl-c>'))
+        self.loading = None                 # Ctrl-C ends loadb's wait
+
+    def binary(self):
+        return FakeLine(self)
 
     def send_async(self, line):
         self.check_command(line)
@@ -144,6 +186,13 @@ class FakeUnit:
             self.bootm(int(line.split()[1].split('#')[0], 16), line)
         elif line == 'run bootcmd':
             self.run_bootcmd()
+        elif line.startswith('loadb ') and self.state == 'stock':
+            if self.loadb:
+                self.loading = int(line.split()[1], 16)
+                self.buffer += (f'{line}\r\n## Ready for binary (kermit) download to '
+                                f'{self.loading:#010x} at 115200 bps...\r\n')
+            else:
+                self.buffer += f"{line}\r\nUnknown command 'loadb' - try 'help'\r\nECNT> "
         else:
             raise AssertionError(f'unexpected async command {line!r}')
 
