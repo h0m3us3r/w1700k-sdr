@@ -72,6 +72,17 @@ installation, the first loader and the kernel image.
   A signature over the archive's manifest, checked by `init/flash --bundle`.
 - **The kernel image over ssh.** It is a volume beside the root and could be
   staged and confirmed the same way; today it takes the console.
+- **The first loader over ssh.** It is the one part a unit in the field can
+  never have replaced. Two things would change that, and both have to be in
+  place before a unit leaves, since stock's boot command and the first loader
+  are written from the console:
+  - Stock U-Boot carries on after a `bootm` that fails (measured: an image with
+    a wrong hash, and erased flash, both return to the script, and `bootm
+    damaged; bootm good` boots the good one). A boot command that tries
+    `loader` and then `loader-b` would therefore survive a first loader torn by
+    a power cut, and a confirmed second loader could then rewrite the first.
+  - A watchdog armed by the first loader before it starts the second, so that
+    one that hangs is reset without a hand on the plug.
 - **The paths not yet run on a unit:** a console install with
   `--no-login-key`, and an RSA key handed over by the loader (both pass the
   tests and the loader's model).
@@ -136,8 +147,12 @@ installation, the first loader and the kernel image.
 - **Links not yet run.** The 2.5 and 1 Gbit/s rows of the link table are
   arithmetic; 10 Gbit/s was run into a second unit as the far end, not into a
   host.
-- **What only the loader's model has shown:** a second loader that hangs, and
-  a `loader-b` damaged at rest.
+- **The second loader's failures** have now happened on a unit and recovered
+  as the loader's model said: one that hangs, one that never boots the system,
+  and a `loader-b` damaged at rest in four ways, each repaired over ssh
+  afterwards (`init/README.md`, "The loader"). Still only in the model: power
+  lost while the first loader writes or removes `loader-b`. And a loader that
+  hangs for good waits for someone to cut the power; nothing resets the unit.
 - **One test that fails now and then under load** (the spectrum server's
   `tuning_steady`).
 

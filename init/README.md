@@ -268,9 +268,32 @@ over ssh goes into the 768 KiB beside it, `loader-b`:
 
 A boot that finds the update still unconfirmed removes the second loader and
 does not try that image again: a loader that hangs, or under which the system
-does not come up, costs a power cycle. So does a `loader-b` that fails its
-hashes at any later boot: the first loader then boots the system itself. A
-countdown of five seconds on the console belongs to the first loader, and one
+does not come up, costs a power cycle. A `loader-b` that fails its hashes at
+any later boot costs nothing: the first loader boots the system itself, in
+that same boot, and the next update over ssh writes `loader-b` afresh.
+
+All of that has been made to happen on a unit (a W1700K2), each time through
+`init/flash --loader --ssh` with the console only watched:
+
+| What was done to it | What the unit did |
+| --- | --- |
+| A second loader that hangs for good: it prints nothing, and the power is cut and restored by hand three minutes later | Next boot: "the new loader was not confirmed; removing it", and the system comes up on the first loader. The tool, which had asked for the power cycle, reports that the loader was written but not kept. |
+| The same, the unit reset 15 s into the hang instead | The same. |
+| A second loader that runs, notes that it ran, and never boots the system | The same. |
+| A second loader that is no image U-Boot can start (its hashes verify) | The first loader faults at the hand-over and resets itself; the next boot removes it as above. |
+| Installed and confirmed, then two bytes changed in flash | "what is in loader-b is not a whole second loader; not started"; the system boots on the first loader in that boot. |
+| ... then its second block erased (a torn write) | The same. |
+| ... then its first block erased | Not taken for a loader at all; the system boots. |
+| ... then a byte changed in the image tree's own structure | As for two bytes changed. |
+
+After each of the four kinds of damage the same command put a good second
+loader back and confirmed it. Two things to know from these runs. A loader that
+hangs for good needs someone to cut the power: nothing on the unit resets it.
+And `system-update status` gives a damaged `loader-b` a digest like any other;
+it is the next `init/flash --loader --ssh` that sees it is not the loader it
+should be and replaces it.
+
+A countdown of five seconds on the console belongs to the first loader, and one
 of a second to the second; `init/flash --loader` over the console also clears
 `loader-b`, so that what was just written is the loader.
 
