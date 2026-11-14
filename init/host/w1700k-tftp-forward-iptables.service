@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# Installed by init/host/tftp-forward, as w1700k-tftp-forward.service, on a
+# host whose nftables cannot load the redirect; loads it at boot with iptables.
+[Unit]
+Description=Redirect W1700K stock U-Boot TFTP to the unprivileged installer port
+After=network.target
+ConditionPathExists=/etc/w1700k-tftp-forward.iptables
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/iptables -w -t nat -D PREROUTING -p udp --dport 69 -j W1700K_TFTP
+ExecStart=/usr/sbin/iptables-restore -w --noflush /etc/w1700k-tftp-forward.iptables
+ExecStop=-/usr/sbin/iptables -w -t nat -D PREROUTING -p udp --dport 69 -j W1700K_TFTP
+ExecStop=-/usr/sbin/iptables -w -t nat -F W1700K_TFTP
+ExecStop=-/usr/sbin/iptables -w -t nat -X W1700K_TFTP
+# iptables needs a raw socket where it is the older kind, and its lock in /run.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_NETLINK AF_INET AF_UNIX
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -24,17 +24,35 @@ sudo init/host/link up IFACE                  # 192.168.1.10/24 on the NIC cable
 sudo init/host/tftp-forward enable IFACE      # stock U-Boot's UDP 69 -> port 7071
 ```
 
-Stock U-Boot fetches files only from UDP port 69. `tftp-forward` installs a
-systemd unit with one nftables rule that redirects exactly that traffic (from
-192.168.1.1 to 192.168.1.10 on IFACE) to the installer's unprivileged port, so
-the tools run as a normal user. Without it, the tools must run as root to listen
-on port 69 themselves; root then also owns the files they write, under root's
-home unless `--data-dir` and `--authorized-key` say otherwise.
-`sudo init/host/tftp-forward disable` removes the unit and the rule again.
-`init/host/tftp-forward status` shows the unit's state to anyone and the rule
-itself to root only; without root it used to say the redirect was not loaded
-when it was, as vampjaz reported in
-[issue 10](https://github.com/h0m3us3r/w1700k-sdr/issues/10).
+Stock U-Boot fetches files only from UDP port 69. `tftp-forward` redirects
+exactly that traffic (from 192.168.1.1 to 192.168.1.10 on IFACE) to the
+installer's unprivileged port, so the tools run as a normal user. Without it,
+the tools must run as root to listen on port 69 themselves; root then also owns
+the files they write, under root's home unless `--data-dir` and
+`--authorized-key` say otherwise.
+
+The redirect is one rule and a systemd unit that loads it at every boot:
+
+- **Checked first.** `enable` changes nothing until its checks pass: the
+  arguments, the interface, that the tool it will use accepts this very rule
+  on this host's kernel, and that systemd is there to load it again.
+- **nftables, or iptables.** The rule is an nftables rule in a table of its
+  own. Where nftables cannot load it, `enable` says why and uses iptables: the
+  same match in a chain of its own. `--backend nft` or `--backend iptables`
+  names one, and then the other is not tried.
+- **`--once`** loads the rule and installs nothing; it is gone at the next
+  reboot. A host without systemd is offered only this.
+- **`disable`** unloads the rule and removes the unit and the rule file,
+  whichever way they were installed. With iptables' nftables variant an empty
+  `nat` table of iptables' own may remain, as after any iptables rule.
+- **`status`** says what is installed to anyone and lists the loaded rule to
+  root. Without root it used to say the redirect was not loaded when it was.
+- **A firewall of the host's own** (ufw, firewalld) is not changed. `enable`
+  points one out, because it may drop what the redirect sends on to port 7071.
+
+The fallback and the status are owed to vampjaz's report in
+[issue 10](https://github.com/h0m3us3r/w1700k-sdr/issues/10): a host whose
+nftables was installed but did not work, and a status that misled.
 
 For the 10 GbE IQ link (unit `eth1`, 10.77.0.1), give the host side its
 address and jumbo frames: `sudo init/host/link keep IFACE10G 10.77.0.10/24 9216`.
