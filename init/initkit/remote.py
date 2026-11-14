@@ -274,9 +274,9 @@ def confirm_joint(link, root, loader, storage=None):
     code, text = tool(link, 'confirm')
     if code:
         raise StepFailed(f'the update runs but could not be confirmed: {text.strip()[-300:]}')
-    print('flash: done; ' + ' and '.join(f'{name} {digest[:12]}' for name, digest in
-                                         (('loader', loader), ('root', root)) if digest)
-          + ' run and are confirmed')
+    parts = [f'{name} {digest[:12]}' for name, digest in (('loader', loader), ('root', root)) if digest]
+    print('flash: done; ' + ' and '.join(parts)
+          + (' run and are confirmed' if len(parts) > 1 else ' runs and is confirmed'))
     return 0
 
 
