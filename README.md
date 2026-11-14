@@ -64,9 +64,10 @@ refused with the rate the link would need.
   a test tone at the same level and phase in the chunks from both. (That is
   the unit and the stream service. With the spectrum server and a browser
   also running on that host, an 8-core N350 behind a USB adapter, the
-  adapter itself missed 1 datagram in 2400, and between 1 in 25,000 and 1 in
-  100,000 once its packets were spread over the CPUs, as `init/host/link` now
-  does: the host, not the link.) The radio's chunks follow the level with a second's memory, so
+  adapter itself missed 1 datagram in 2400. With its packets spread over the
+  CPUs, as `init/host/link` now does, and the host's power limit at 15 W, a
+  27-minute run with the spectrum page open lost 1 slice in 440,000
+  ([the measurements](tools/r8152-rtl8159/README.md)): the host, not the link.) The radio's chunks follow the level with a second's memory, so
   in a band with strong bursts they are quantised for the bursts.
 - **No jumbo frames?** `"export": {"piece": 1456}` in the configuration sends
   every slice as datagrams a 1500-byte MTU carries (each costs 82 bytes of the

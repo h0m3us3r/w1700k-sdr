@@ -141,7 +141,10 @@ class HostBench(unittest.TestCase):
         self.assertEqual((t['slices'], t['lost'], t['adapter_missed']), (7 * 156250, 14, 7))
         self.assertEqual(t['msps'], 320.0)
         self.assertAlmostEqual(t['lost_percent'], 100 * 14 / (7 * 156250), places=5)
-        self.assertEqual((t['seconds_with_loss'], t['worst_second'], t['longest_clean_seconds']), (2, 10, 3))
+        self.assertEqual((t['samples'], t['samples_with_loss'], t['worst_sample']), (7, 2, 10))
+        self.assertEqual(t['longest_clean_seconds'], 3.0)
+        slow = [self.sample(dt=1.04), self.sample(dt=1.04), self.sample(lost=2, dt=1.04), self.sample(dt=1.04)]
+        self.assertEqual(self.bench.summarise(slow, 4.16)['longest_clean_seconds'], 2.1, 'in seconds, not samples')
         self.assertEqual((t['clock_ghz'], t['celsius_max']), (2.0, 75))
 
     def test_nothing_measured_and_an_adapter_that_does_not_count(self):
@@ -199,7 +202,8 @@ class HostBench(unittest.TestCase):
         for part in ('interrupt on CPU 7, steering mask 7f', 'long-term 200 W, short-term 15 W',
                      '320 Msps, packing split, 2 s watched: 320.0 Msps arrived', 'no stream arrived in 1 of those',
                      'lost 4 (0.00128 %)', 'the adapter missed 2 datagrams (1.00 a second)',
-                     'seconds with any loss: 1 of 3', '0:50(10) 7:95(82)', 'w1700k-stream 259 %'):
+                     'with any loss: 1 of 2; the worst lost 4 slices', '0:50(10) 7:95(82)',
+                     'w1700k-stream 259 %'):
             self.assertIn(part, text)
         self.assertIn('  10 s', self.bench.progress_line([self.sample()] * 10, 10.2))
 

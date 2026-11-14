@@ -176,12 +176,12 @@ def summarise(samples, seconds):
     out = {'seconds': round(seconds, 1), **total,
            'msps': round(total['slices'] * stream_shm.SLICE / seconds / 1e6, 1) if seconds else 0.0,
            'lost_percent': round(100 * total['lost'] / total['slices'], 5) if total['slices'] else None,
-           'seconds_with_loss': len(with_loss), 'worst_second': lost[-1] if lost else 0,
-           'longest_clean_seconds': 0}
-    run = 0
+           'samples': len(samples), 'samples_with_loss': len(with_loss), 'worst_sample': lost[-1] if lost else 0,
+           'longest_clean_seconds': 0.0}
+    run = 0.0                                       # a sample is a second and the time it took to read
     for s in samples:
-        run = 0 if s['lost'] else run + 1
-        out['longest_clean_seconds'] = max(out['longest_clean_seconds'], run)
+        run = 0.0 if s['lost'] else run + s.get('dt', 1.0)
+        out['longest_clean_seconds'] = round(max(out['longest_clean_seconds'], run), 1)
     known = [s['missed'] for s in samples if s['missed'] is not None]
     out['adapter_missed'] = sum(known) if known else None
     clocks = [s['clock_ghz'] for s in samples if s['clock_ghz']]
@@ -252,8 +252,9 @@ def text_report(report):
                   f"dropped at the sockets {t['socket_drops']}, bad datagrams {t['bad']}",
                   f"    the adapter missed {t['adapter_missed']} datagrams"
                   + (f" ({t['adapter_missed'] / t['seconds']:.2f} a second)" if t['adapter_missed'] is not None else ''),
-                  f"    seconds with any loss: {t['seconds_with_loss']} of {len(run['samples'])}; worst second "
-                  f"{t['worst_second']} slices; longest stretch without loss {t['longest_clean_seconds']} s",
+                  f"    samples (about a second each) with any loss: {t['samples_with_loss']} of {t['samples']}; "
+                  f"the worst lost {t['worst_sample']} slices; longest stretch without loss "
+                  f"{t['longest_clean_seconds']:.0f} s",
                   f"    clock {t['clock_ghz']} GHz mean, package up to {t['celsius_max']} C",
                   '    CPUs, percent busy (of it softirq): '
                   + ' '.join(f"{cpu}:{busy}({soft})" for cpu, (busy, soft) in sorted(run['cpus'].items())),

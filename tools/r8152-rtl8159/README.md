@@ -16,7 +16,7 @@ adapter on a 10 Gbit/s USB port (USB 3.2 Gen 2, one lane), cabled to a W1700K2's
 | Jumbo frames | MTU 9216 with this driver; the stream needs at least 8236. |
 | 40 and 80 Msps | raw 14-bit samples, nothing lost |
 | 160 Msps | every slice packed to 28 bits, lossless (4.5 Gbit/s), nothing lost |
-| 320 Msps | the `split` packing, 14 bits per sample pair (4.6 Gbit/s): about 0.005 % of slices lost on this host once the link is set up as below (0.04 % before), and 0.0008 % with the host's power limit raised from 13 to 15 W |
+| 320 Msps | the `split` packing, 14 bits per sample pair (4.6 Gbit/s): **0.00023 % of slices lost** over 27 minutes with the spectrum page open in a browser, the link set up as below and the host at 15 W (0.04 % before any of it) |
 | Reduced formats | 16, 14, 8 and 7 bits per sample pair, up to 160 Msps |
 | 10 Gbit/s | not reached; see "The missing firmware" |
 
@@ -92,6 +92,14 @@ All three matter with this adapter:
   ```
 
   Whether that is wise is a question of the machine's cooling, not of the stream.
+- **A longer run, as the receiver is used.** `tools/host_bench.py` watched 320 Msps for 1599 s at
+  15 W with the spectrum page open in a browser and nothing else heavy running:
+  249.8 million slices, 566 lost (0.00023 %, 1 in 440,000), every one of them a datagram the
+  adapter missed (284, or 0.18 a second) and none late or dropped in the host. Of 1539 samples
+  of about a second, 131 had any loss, 100 of those a single datagram; one sample lost 76
+  slices; the longest stretch with none was 79 s. Every core was still 92 to 95 % busy at
+  2.05 GHz (the spectrum server 287 % of a CPU, the stream service 269 %), and the adapter's
+  CPU 93 %, 81 % of it in the network stack.
 
 Two things not to do while a stream is arriving: change the driver's ring (`ethtool -G`), which
 left the adapter receiving nothing until the interface was taken down and up; and expect the
