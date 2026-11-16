@@ -251,6 +251,33 @@ first loader's description carries `second-loader 1` for `system-update`.
 its cases comes from a unit, where a property was looked up in an image of
 which only the first page had been read.
 
+### The GPS receiver
+
+The board carries an Airoha AG3352 GNSS receiver, which the stock firmware
+used to report where the unit is for 6 GHz power control. Nothing of ours
+uses it, and it is held off.
+
+- **Its power** is line 43 of the pin controller, high for on. The board pulls
+  the line high, so left alone the receiver runs from power-on and sends a
+  position every second, whether or not anything listens.
+- **The loader switches it off** at the start of every boot, before a second
+  loader is started or any root runs (`gps_off`, first in `bootcmd`): it makes
+  line 43 an output and then sets it low, in that order, since a level written
+  to a line that is not yet an output is lost on this chip. So every root has
+  the receiver off without having to remember to.
+- **`w1700k-gps on`, `off` and `status`**, in the root, drive and read the same
+  line. `on` lasts until the unit next starts.
+- **Its data** comes out of the SoC's high-speed UART (`serial@1fbe1000`, pin
+  group `hsuart`), which is disabled in our device tree: no program can open
+  it. Where a unit is stays with its owner.
+
+What is known of it, for when it is taken up
+([the roadmap](../docs/roadmap.md)): it talks NMEA at 460800 baud, though the
+stock firmware's own settings say 921600; the kernel's driver for the port
+reads 460800 as it is and reaches no higher. Seen on a unit indoors: a 3D fix
+from four constellations, a position a second, its time equal to the host's
+to the second. Stock's line 14 ("notify") is not driven.
+
 ### The paperclip key's slot
 
 The reset button (line 0 of the pin controller, low when pressed; not in the

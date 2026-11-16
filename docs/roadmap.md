@@ -87,6 +87,25 @@ installation, the first loader and the kernel image.
   `--no-login-key`, and an RSA key handed over by the loader (both pass the
   tests and the loader's model).
 
+### The GPS receiver
+
+Decided and deferred: the receiver is off by default, switched off by the
+loader at every boot, and `w1700k-gps on` runs it until the next start
+(`platform/README.md`). Nothing reads it. To take up later:
+
+- **An owner's switch that stays.** A setting in the unit's durable storage,
+  read by the loader like its others, for a receiver that is on from boot.
+- **Reading it.** The port enabled in the device tree, and a small reader on
+  the unit. The driver should take both speeds, the 460800 the receiver uses
+  and the 921600 the stock settings name, so that neither number is a guess;
+  today it reaches 460800 and no higher.
+- **What it is for.** Telling the units of a fleet apart and saying where each
+  is; handing position and time to the host with the samples; time-stamping
+  captures. There is no pulse-per-second line to the SoC that we know of.
+- **What it is never for.** It is not a trust input: nothing a unit accepts
+  is judged by GPS time, which anyone nearby can transmit. And where a unit
+  is leaves the unit only by its owner's choice.
+
 ### The control plane
 
 - **Unit-side control daemon.** The control plane is small (load, configure,

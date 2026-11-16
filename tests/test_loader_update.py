@@ -31,7 +31,7 @@ saveenv() {
     for name in update_tried update_failed loader_tried loader_failed loader_booted; do
         eval "[ -z \"\${$name+x}\" ]" || eval "echo \"$name=\$$name\""
     done > "$M/saved"
-    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on; do
+    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on gps_v; do
         eval "[ -z \"\${$name+x}\" ]" || { echo "saved a scratch variable: $name" >> "$M/log"; }
     done
 }
@@ -80,6 +80,30 @@ ubifsload() {
         head -c 160 /dev/zero > "$M/ram/$1"
     fi
     filesize=$(printf %x "$(wc -c < "$M/ram/$1")")
+}
+# Registers, one file each in mem/ (hex, as `mw` was given it); one that was never written reads 0.
+# setexpr NAME *ADDR OP VALUE, with the result in hex and no 0x, as U-Boot leaves it.
+setexpr() {
+    [ $# = 4 ] || { echo "setexpr $*: not modelled" >&2; return 1; }
+    case $2 in \**) seen=$(cat "$M/mem/${2#\*}" 2>/dev/null || echo 0) ;; *) echo "setexpr $*: not modelled" >&2; return 1 ;; esac
+    case $3 in
+    '&') eval "$1=\$(printf %x \$(( 0x$seen & $4 )))" ;;
+    '|') eval "$1=\$(printf %x \$(( 0x$seen | $4 )))" ;;
+    *) echo "setexpr $*: not modelled" >&2; return 1 ;;
+    esac
+}
+# The level register of GPIO 32 to 63 keeps a written bit only for a line that is an output; the
+# others go on reading their pins (seen on a unit: a level written before the line was enabled
+# was lost, and the line then drove what its pin had read).
+mw() {
+    [ $# = 2 ] || return 1
+    mkdir -p "$M/mem"
+    if [ "$1" = 0x1fbf0270 ]; then
+        was=$(cat "$M/mem/$1" 2>/dev/null || echo 0) enabled=$(cat "$M/mem/0x1fbf0278" 2>/dev/null || echo 0)
+        printf '%x\n' $(( (0x$2 & 0x$enabled) | (0x$was & ~0x$enabled & 0xffffffff) )) > "$M/mem/$1"
+    else
+        echo "$2" > "$M/mem/$1"
+    fi
 }
 hash() {
     [ "$1" = sha256 ] || return 1
@@ -131,10 +155,11 @@ mkdir -p "$M/ram"
 . "$M/defaults"
 [ ! -f "$M/saved" ] || . "$M/saved"
 [ -z "$SLOT" ] || loader_slot=$SLOT
+run gps_off
 run loader_next
 run update_apply
 run key_pass
-for name in key_line key_on; do
+for name in key_line key_on gps_v; do
     eval "[ -z \"\${$name+x}\" ]" || note "left a scratch variable: $name"
 done
 echo "$bootargs" >> "$M/bootargs"
@@ -203,7 +228,7 @@ class Model(unittest.TestCase):
 class LoaderUpdate(Model):
     def test_the_boot_command_applies_updates_first_and_then_boots_as_before(self):
         bootcmd = (self.model / 'env' / 'bootcmd').read_text()
-        self.assertTrue(bootcmd.startswith('run loader_next; run update_apply; run key_pass; '
+        self.assertTrue(bootcmd.startswith('run gps_off; run loader_next; run update_apply; run key_pass; '
                                            'ubi part.ro ${bootpart} && ubi read'))
         self.assertTrue(bootcmd.endswith('bootm ${loadaddr}#${bootconf}'))
 
@@ -421,6 +446,61 @@ class SecondLoader(LoaderUpdate):
         self.assertEqual(self.boot(), ['the second loader starts', 'write rootfs', 'saveenv', self.by_second(self.OLD)],
                          'never confirmed: the second loader puts the previous root back')
         self.assertEqual(self.second(), self.B1)
+
+
+class GpsReceiver(Model):
+    """The board's GPS receiver runs from power-on unless its power line is held low, and nothing
+    of ours listens to it. The loader holds it off at the start of every boot, before any root
+    runs, so every root has it off: line 43 of the pin controller, driven low."""
+    DATA, ENABLE, DIRECTION = '0x1fbf0270', '0x1fbf0278', '0x1fbf0260'
+
+    def registers(self, **values):
+        (self.model / 'mem').mkdir(exist_ok=True)
+        for name, value in values.items():
+            (self.model / 'mem' / getattr(self, name)).write_text(f'{value:x}\n')
+
+    def register(self, name):
+        return int((self.model / 'mem' / getattr(self, name)).read_text(), 16)
+
+    def test_the_line_is_driven_low_and_no_other_line_is_touched(self):
+        # As the board comes up: line 43 high (bit 11), and line 46, the PHY's reset, driven high.
+        self.registers(DATA=0x00004800, ENABLE=0x00004000, DIRECTION=0x10000000)
+        self.boot()
+        self.assertEqual(self.register('DATA'), 0x00004000, 'bit 11 low, bit 14 as it was')
+        self.assertEqual(self.register('ENABLE'), 0x00004800, 'line 43 is an output')
+        self.assertEqual(self.register('DIRECTION'), 0x10400000, 'two bits a line: bit 22 is line 43')
+        self.assertIn(f'booted {digest(self.OLD)}', self.lines)
+
+    def test_it_is_done_again_at_every_boot_and_by_the_second_loader(self):
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
+        self.boot()
+        self.assertIn('the second loader starts', self.lines)
+        self.assertEqual((self.register('DATA'), self.register('ENABLE'), self.register('DIRECTION')),
+                         (0xfffff7ff, 0x800, 0x400000))
+        self.registers(DATA=0xffffffff, ENABLE=0x800, DIRECTION=0x400000)      # switched on since, by its owner
+        self.boot()
+        self.assertEqual(self.register('DATA'), 0xfffff7ff, 'on lasts until the unit next starts')
+
+    def test_the_line_is_made_an_output_before_its_level_is_set(self):
+        """A level written to a line that is not yet an output is lost on this chip, and the line
+        then drives what its pin read, which for this one is high: the receiver, held on."""
+        script = (self.model / 'env' / 'gps_off').read_text()
+        self.assertLess(script.index('0x1fbf0278'), script.index('0x1fbf0270'))
+        self.assertLess(script.index('0x1fbf0260'), script.index('0x1fbf0270'))
+        wrong = ' && '.join(sorted(script.split('; setenv')[0].split(' && '), key=lambda step: '0x1fbf0270' not in step))
+        (self.model / 'env' / 'gps_off').write_text(wrong + '; setenv gps_v')
+        self.registers(DATA=0x00005ff9, ENABLE=0, DIRECTION=0)                # as read on a unit at its loader
+        self.boot()
+        self.assertEqual(self.register('DATA') & 0x800, 0x800, 'the other order leaves the line high, as it did on a unit')
+
+    def test_it_comes_first_and_nothing_of_it_is_saved(self):
+        bootcmd = (self.model / 'env' / 'bootcmd').read_text()
+        self.assertTrue(bootcmd.startswith('run gps_off; '), 'before a second loader is started or an update applied')
+        self.stage(self.NEW, self.OLD)
+        self.boot()
+        self.assertIn('saveenv', self.lines)
+        self.assertNotIn('gps', ' '.join(self.saved()))
 
 
 class KeySlot(Model):
