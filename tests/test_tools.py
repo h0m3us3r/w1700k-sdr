@@ -120,6 +120,27 @@ class SweepModes(unittest.TestCase):
         ten = {rate // 10**6: packing for _, _, _, rate, _, packing in self.modes(10000) if packing}
         self.assertIn(320, ten, 'on 10 GbE there is a second packing to try at 320 Msps')
 
+    def test_a_rate_the_link_cannot_carry_is_a_mode_that_must_be_refused(self):
+        """320 Msps needs 4.59 Gbit/s at the least: below that the sweep still runs, and holds the
+        controller to refusing it."""
+        import unit_sweep
+        for link in (2500, 1000):
+            modes = self.modes(link)
+            refused = [(band, rate // 10**6, capture // 10**6) for _, _, band, rate, capture, packing in modes
+                       if packing == unit_sweep.REFUSED]
+            self.assertEqual([m for m in refused if m[1] == 320], [(0, 320, 320), (1, 320, 320), (2, 320, 320), (2, 320, 640)],
+                             f'{link}: every band at 320 Msps, and the 640 capture')
+            for name, what, _, rate, _, packing in modes:
+                if packing == unit_sweep.REFUSED:
+                    self.assertEqual(what, unit_sweep.TOO_MUCH)
+                    self.assertGreaterEqual(rate, 160_000_000 if link == 1000 else 320_000_000, name)
+                elif packing:
+                    self.assertTrue(unit_sweep.packing_fits(packing, rate, link, None), name)
+        self.assertEqual([m for m in self.modes(5000) if m[5] == unit_sweep.REFUSED], [], 'everything fits 5 Gbit/s')
+        at_2500 = {rate // 10**6: packing for _, _, band, rate, capture, packing in self.modes(2500)
+                   if band == 1 and capture == rate}
+        self.assertEqual((at_2500[40], at_2500[80], at_2500[160]), (None, None, None), 'the lower rates still run')
+
 
 class HostBench(unittest.TestCase):
     """tools/host_bench.py: what it makes of the counters it reads each second."""

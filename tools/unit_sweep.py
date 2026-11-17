@@ -8,7 +8,9 @@ Needs the unit reachable and w1700k-stream running on this host (host/stream). F
 configures the band and sample rate, starts the stream under one packing, reads S seconds of it
 from the host's ring, and stops it. The modes: every band at every sample rate with the packing
 the controller picks for the link; on one band, every other packing that fits the link at each
-rate; and the 6 GHz band's 640/2 capture. A mode passes when
+rate; and the 6 GHz band's 640/2 capture. A rate that no packing fits on the link (320 Msps
+below 5 Gbit/s) is a mode too: it passes when the controller refuses it and says what the link
+would have to carry. Any other mode passes when
 
   - the stream arrives at the sample rate that was set (within 1.5 %, or the 0.15 s by which
     the stream service's counters may trail the stream, whichever is more of the time read),
@@ -35,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'host'), str(ROOT / 'tests'), str(ROOT / 'tools')]
 
 from w1700k import config as host_config  # noqa: E402
-from w1700k.controller import PACKINGS, REDUCED, SPLIT, Controller, packing_fits, packing_for  # noqa: E402
+from w1700k.controller import PACKINGS, REDUCED, SPLIT, Controller, Refused, packing_fits, packing_for  # noqa: E402
 import stream_shm  # noqa: E402
 import test_report  # noqa: E402
 
@@ -52,21 +54,36 @@ def reduced(packing):
     return packing in REDUCED or packing == SPLIT
 
 
+REFUSED = 'refused'     # in place of a packing: a rate the link cannot carry, which must be refused
+TOO_MUCH = 'more than the link carries: to be refused'
+
+
+def chosen_for(rate, link_mbps, piece):
+    """The packing the controller picks, or None where it refuses the rate on this link."""
+    try:
+        return packing_for(rate, link_mbps, piece)
+    except Refused:
+        return None
+
+
 def modes(link_mbps, piece):
-    """(name, what, band, rate, capture rate, packing or None for the controller's choice)."""
+    """(name, what, band, rate, capture rate, packing: None for the controller's choice, or REFUSED
+    for a rate that nothing fits on the link)."""
     out = []
+    chosen = {rate: chosen_for(rate, link_mbps, piece) for rate in RATES}
     for band in (0, 1, 2):
         for rate in RATES:
-            out.append((f'{BAND_NAME[band]} at {rate // 10**6} Msps', 'the packing the link gives',
-                        band, rate, rate, None))
+            fits = chosen[rate] is not None
+            out.append((f'{BAND_NAME[band]} at {rate // 10**6} Msps', 'the packing the link gives' if fits else TOO_MUCH,
+                        band, rate, rate, None if fits else REFUSED))
     for rate in RATES:
-        chosen = packing_for(rate, link_mbps, piece)
         for packing in PACKINGS:
-            if packing != chosen and packing_fits(packing, rate, link_mbps, piece):
+            if packing != chosen[rate] and packing_fits(packing, rate, link_mbps, piece):
                 out.append((f'{BAND_NAME[0]} at {rate // 10**6} Msps, packing {packing}', 'set by hand',
                             0, rate, rate, packing))
-    out.append((f'{BAND_NAME[2]} at 320 Msps, captured at 640', 'every other sample kept', 2, 320_000_000,
-                640_000_000, None))
+    fits = chosen[320_000_000] is not None
+    out.append((f'{BAND_NAME[2]} at 320 Msps, captured at 640', 'every other sample kept' if fits else TOO_MUCH,
+                2, 320_000_000, 640_000_000, None if fits else REFUSED))
     return out
 
 
@@ -86,8 +103,37 @@ def level_dbfs(shm, newest, slices=6):
     return 10 * math.log10(total / count / 8192 ** 2), len(values)
 
 
+def run_refused(ctl, events, mode):
+    """A rate the link cannot carry: the controller refuses it, saying what the link would need,
+    and no stream starts."""
+    name, what, band, rate, capture, _ = mode
+    result = {'name': name, 'what': what, 'ok': False, 'packing': REFUSED, 'msps': 0.0, 'lost': 0,
+              'level_dbfs': 0.0, 'led': '', 'problem': ''}
+    del events[:]
+    try:
+        ctl.configure(band, rate, None, capture if capture != rate else None)
+        ctl.start()
+        result['problem'] = (f'a stream started ({ctl.state()["stream"]["packing"]}) at a rate the link '
+                             'cannot carry')
+    except Refused as refusal:
+        if 'on the link' in str(refusal):
+            result['ok'], result['what'] = True, f'refused: {refusal}'
+        else:
+            result['problem'] = f'refused, but not for the link: {refusal}'
+    except Exception as error:
+        result['problem'] = f'{type(error).__name__}: {error}'
+    finally:
+        try:
+            ctl.stop()
+        except Exception as error:
+            result['ok'], result['problem'] = False, (result['problem'] + f'; stop: {error}').lstrip('; ')
+    return result
+
+
 def run_mode(ctl, shm, events, mode, seconds):
     name, what, band, rate, capture, packing = mode
+    if packing == REFUSED:
+        return run_refused(ctl, events, mode)
     result = {'name': name, 'what': what, 'ok': False, 'packing': packing or '', 'msps': 0.0, 'lost': 0,
               'level_dbfs': 0.0, 'led': ''}
     problems = []
@@ -183,7 +229,8 @@ def main():
             print(f'  {number:2}/{len(todo)} {"ok  " if result["ok"] else "FAIL"} {result["name"]:44} '
                   f'{result["packing"]:6} {result["msps"]:6.1f} Msps  lost {result["lost"]:<4} '
                   f'{result["level_dbfs"]:6.1f} dBFS  {result["led"]}'
-                  + (f'\n        {result["problem"]}' if result['problem'] else ''), flush=True)
+                  + (f'\n        {result["problem"]}' if result['problem'] else '')
+                  + (f'\n        {result["what"]}' if result['ok'] and result['packing'] == REFUSED else ''), flush=True)
     finally:
         try:                                        # as it was found
             band, rate, lo, capture, running = was
