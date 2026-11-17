@@ -51,15 +51,22 @@ look returns when that is over.
 | After letting go | **Green, twice up** and staying a moment | Switched on |
 | | **Red, sinking** into the dark | Switched off |
 | | **Blue, breathing** | Waiting for a key (`init/key`), up to three minutes; a press ends it |
-| | A flash, then **blue turning through cyan to green** | The key is in |
+| A key has come | **Magenta, two flashes and a rest** | The unit holds a key and has not kept it: hold the button 3 s to keep it, tap to discard it. A minute without a press discards it |
+| Held for that key, first 3 s | **Green, rising** out of the dark | Letting go at 3 s will keep the key; letting go before discards it |
+| Held 3 s | A white flash, then **green pulsing** | Let go now and the key is kept |
+| Held 5 s, or let go after 3 s | A white flash, then **green, steady** for two seconds | The key is in. At 5 s it is kept without waiting for you to let go |
+| A tap, or a minute | **Red, twice up and down**, then out | The key that came was discarded |
 | | The blue goes out | The wait ended without a key |
 | | The red pales to white as it sinks | Erased |
 | | **Red, three times** | The key could not be kept |
 
 Which way the key will be switched is said twice, by colour and by direction (rising or sinking),
 because red against green is the colour blindness most people with one have. Green and red keep
-their meaning here (go, stop); blue is the colour of waiting to be paired. `w1700k-led DEVICE
---demo` walks through these after the receiver's looks.
+their meaning here (go, stop); blue is the colour of waiting to be paired, and magenta, which
+the button says nothing else in, of a key that is here and not yet taken. A key that waits is
+told from the wait for one by its rhythm as well: two flashes, lit and dark, and a rest, not a
+slow breath. A key discarded is two soft red pulses; three hard ones are a fault. `w1700k-led DEVICE --demo` walks
+through these after the receiver's looks.
 
 ## How it decides
 

@@ -7,7 +7,13 @@
 Run it, then hold the unit's reset button with a paperclip. After ten seconds the LED flashes and
 pulses blue: let go then. (Until then it rises white if the unit has no such key yet; with one, it
 shows green or red and pulses from five seconds.) The unit waits three minutes for a key
-(blue, breathing); this sends it, and the LED turns from blue to green when the unit has it.
+(blue, breathing); this sends it.
+
+The unit then holds the key and has not kept it (magenta, two flashes and a rest), and this says
+whether the key it holds is yours. When it is, hold the button three seconds, until the LED
+flashes and pulses green, and let go: the key is kept, the LED flashes and stays green, and this
+logs in with it. When it is not, tap the button: that discards the key (red, twice). So does a
+minute without a press.
 
 The unit keeps one such key. Sending another replaces it. Holding the button five seconds (let go
 while the LED pulses red) switches the key off without forgetting it, and five seconds again

@@ -2,16 +2,28 @@
 /*
  * w1700k-key [--chip DEV] [--line N] [--state FILE] [--slot-state FILE] [--slot PROGRAM]
  *            [--listen ADDRESS] [--port N] [--toggle S] [--program S] [--purge S] [--window S]
- *            [--buttons FILE]
+ *            [--confirm S] [--apply S] [--pending S] [--buttons FILE]
  *
  * The paperclip key (keyd.h): watches the reset button and does what a press means.
  *
  *   held 5 s, released    the slot's key is switched off, or on again
  *   held 10 s, released   for three minutes the unit takes one public key, a line of text, on TCP
- *                         port 7722 of ADDRESS (the management address; default: every address),
- *                         checks it, keeps it in the slot and answers "ok ..." or "error: ...".
+ *                         port 7722 of ADDRESS (the management address; default: every address).
  *                         A press ends the wait.
  *   held 15 s, released   the slot's key is erased
+ *
+ * A key that arrives is checked and held, and its sender is told "pending key=TYPE:BASE64 hold=S
+ * within=S": nothing is written and nothing logs in with it. The button decides:
+ *
+ *   held 3 s, released    the key goes into the slot; its sender is told "ok ..."
+ *   held 5 s              the same, without waiting for the button to be let go
+ *   a shorter press       it is discarded; "error: ..."
+ *   a minute, no press    it is discarded; "error: ..."
+ *
+ * That was the one key of this wait, kept or not. Whoever else sends a line while it is held is
+ * told "busy key=TYPE:BASE64", the key the unit holds, so that a host whose own key came second
+ * can say so to the hand on the button. A line that is not a key is answered "error: ..." and the
+ * wait goes on.
  *
  * It keeps no key itself. PROGRAM (default /usr/sbin/w1700k-keyslot) does: `toggle`, `purge`, and
  * `program` with the key on its input; it prints what the slot then is, and what a host is told. The slot's
@@ -23,7 +35,7 @@
  *
  * The button is line N (default 0) of the GPIO chip DEV (default /dev/gpiochip0), low when
  * pressed. --buttons reads presses from FILE instead (a FIFO: `d` down, `u` up), and --toggle,
- * --program, --purge and --window shorten the times: both for tests.
+ * --program, --purge, --window, --confirm, --apply and --pending shorten the times: both for tests.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -43,7 +55,8 @@
 #include "keyd.h"
 
 #define DEBOUNCE_US 20000
-#define KEY_TRIES 5		/* lines that were not keys, before the wait is ended */
+#define KEY_SENDERS 4		/* connections heard at once */
+#define KEY_SENDER_SECONDS 3.0	/* a sender's line has to be whole within this, all told */
 
 static const char *state_path = "/run/w1700k-key";
 static const char *slot_state_path = "/run/w1700k-keyslot";
@@ -184,7 +197,7 @@ static int listen_on(const char *address, int port)
 		return -1;
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 	if ((address && inet_pton(AF_INET, address, &at.sin_addr) != 1) ||
-	    bind(fd, (struct sockaddr *)&at, sizeof(at)) || listen(fd, 1)) {
+	    bind(fd, (struct sockaddr *)&at, sizeof(at)) || listen(fd, KEY_SENDERS)) {
 		fprintf(stderr, "w1700k-key: cannot listen on %s port %d: %s\n", address ? address : "any address",
 			port, strerror(errno));
 		close(fd);
@@ -199,49 +212,150 @@ static void reply(int fd, const char *text)
 		perror("w1700k-key: reply");
 }
 
-/* One connection of the wait: a line, taken as a key or refused. 1: the key is in the slot;
- * 0: it was not a key, the wait goes on; -1: a key, but the slot did not keep it. */
-static int take_key(int listener)
+struct sender {
+	int fd;			/* -1: free */
+	double until;		/* its line has to be whole by then */
+	size_t used;
+	char line[KEY_LINE_MAX + 1];
+};
+
+/* The wait for a key, and the key that came. */
+struct wait {
+	int listener;		/* -1: the slot is not open */
+	double until;		/* the wait ends then, if no key has come */
+	struct sender senders[KEY_SENDERS];
+	int pending;		/* a key is held, for the button to keep or discard */
+	char key[KEY_LINE_MAX];	/* that key, as the slot would hold it */
+	double key_until;	/* it is discarded then */
+	int holder;		/* its sender, kept open for the outcome; -1 when there is none */
+	double confirm, apply, patience;
+};
+
+static struct sender *sender_free(struct wait *w)
 {
-	char line[KEY_LINE_MAX + 1], slot[KEY_LINE_MAX], answer[1200], text[1300];
-	struct timeval patience = { .tv_sec = 5 };
-	int fd = accept(listener, NULL, NULL), result = 0;
-	const char *wrong;
-	size_t used = 0;
+	int i;
+
+	for (i = 0; i < KEY_SENDERS; i++)
+		if (w->senders[i].fd < 0)
+			return &w->senders[i];
+	return NULL;
+}
+
+/* The wait is over: `outcome`, if any, to the sender of the held key, and everything closed. */
+static void wait_end(struct wait *w, const char *outcome)
+{
+	int i;
+
+	if (w->holder >= 0) {
+		if (outcome)
+			reply(w->holder, outcome);
+		close(w->holder);
+	}
+	for (i = 0; i < KEY_SENDERS; i++)
+		if (w->senders[i].fd >= 0) {
+			close(w->senders[i].fd);
+			w->senders[i].fd = -1;
+		}
+	if (w->listener >= 0)
+		close(w->listener);
+	w->listener = w->holder = -1;
+	w->pending = 0;
+}
+
+static void wait_accept(struct wait *w, double t)
+{
+	struct sender *s = sender_free(w);
+	int fd;
+
+	if (!s)
+		return;
+	fd = accept4(w->listener, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+	if (fd < 0)
+		return;
+	s->fd = fd;
+	s->until = t + KEY_SENDER_SECONDS;
+	s->used = 0;
+}
+
+/* What has come of a sender's line: 1 all of it, 0 not yet, -1 it ended without one. Nothing
+ * here waits: a sender that trickles is cut off at its deadline, not followed. */
+static int sender_line(struct sender *s)
+{
 	ssize_t n;
 
-	if (fd < 0)
-		return 0;
-	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &patience, sizeof(patience));
-	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &patience, sizeof(patience));
-	while (used < KEY_LINE_MAX && !memchr(line, '\n', used) && (n = read(fd, line + used, KEY_LINE_MAX - used)) > 0)
-		used += (size_t)n;
-	line[used] = 0;
-	if (!memchr(line, '\n', used)) {
-		reply(fd, "error: send one line, a public key, ended by a newline");
-	} else if ((wrong = key_line_check(line, slot, sizeof(slot) - 1))) {
-		snprintf(text, sizeof(text), "error: %s", wrong);
-		reply(fd, text);
-	} else {
-		strcat(slot, "\n");
-		if (slot_run("program", slot, answer, sizeof(answer))) {
-			reply(fd, "error: the unit could not keep the key (its storage is in use or failed); try again");
-			result = -1;
-		} else {
-			snprintf(text, sizeof(text), "ok %s", answer);
-			reply(fd, text);
-			result = 1;
+	while (s->used < KEY_LINE_MAX && !memchr(s->line, '\n', s->used)) {
+		n = read(s->fd, s->line + s->used, KEY_LINE_MAX - s->used);
+		if (n > 0) {
+			s->used += (size_t)n;
+			continue;
 		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			return 0;
+		break;
 	}
-	close(fd);
-	return result;
+	s->line[s->used] = 0;
+	return memchr(s->line, '\n', s->used) ? 1 : -1;
+}
+
+/* A sender's whole line, or the lack of one: answered, and unless its key is now the held one,
+ * closed. A key is only ever held here: the button keeps it (wait_keep). */
+static void sender_judge(struct wait *w, struct sender *s, int whole, double t)
+{
+	char slot[KEY_LINE_MAX], text[KEY_LINE_MAX + 100];
+	const char *wrong;
+	int keep = 0;
+
+	if (!whole) {
+		reply(s->fd, "error: send one line, a public key, ended by a newline");
+	} else if ((wrong = key_line_check(s->line, slot, sizeof(slot)))) {
+		snprintf(text, sizeof(text), "error: %s", wrong);
+		reply(s->fd, text);
+	} else if (w->pending && strcmp(slot, w->key)) {
+		snprintf(text, sizeof(text), "busy key=%s", w->key);
+		reply(s->fd, text);
+	} else {
+		if (!w->pending) {
+			w->pending = 1;
+			memcpy(w->key, slot, sizeof(slot));
+			w->key_until = t + w->patience;
+			say("pending", t, "-");
+		} else if (w->holder >= 0) {	/* the same key again: its newest sender hears the outcome */
+			close(w->holder);
+		}
+		w->holder = s->fd;
+		snprintf(text, sizeof(text), "pending key=%s hold=%g within=%g", w->key, w->confirm,
+			 w->key_until - t > 0 ? w->key_until - t : 0.0);
+		reply(s->fd, text);
+		keep = 1;
+	}
+	if (!keep)
+		close(s->fd);
+	s->fd = -1;
+}
+
+/* The hand said yes: the held key goes into the slot. */
+static void wait_keep(struct wait *w)
+{
+	char line[KEY_LINE_MAX + 1], answer[1200], text[1300];
+
+	snprintf(line, sizeof(line), "%s\n", w->key);
+	if (slot_run("program", line, answer, sizeof(answer))) {
+		wait_end(w, "error: the unit could not keep the key (its storage is in use or failed); try again");
+		say("failed", now(), "-");
+	} else {
+		snprintf(text, sizeof(text), "ok %s", answer);
+		wait_end(w, text);
+		say("taken", now(), "-");
+	}
 }
 
 static int usage(void)
 {
 	fprintf(stderr, "usage: w1700k-key [--chip DEV] [--line N] [--state FILE] [--slot-state FILE] [--slot PROGRAM]\n"
 		"       [--listen ADDRESS] [--port N] [--toggle S] [--program S] [--purge S] [--window S]\n"
-		"       [--buttons FILE]\n");
+		"       [--confirm S] [--apply S] [--pending S] [--buttons FILE]\n");
 	return 2;
 }
 
@@ -251,11 +365,14 @@ int main(int argc, char **argv)
 	const char *chip = "/dev/gpiochip0", *address = NULL, *buttons = NULL;
 	double toggle = KEY_TOGGLE_SECONDS, program = KEY_PROGRAM_SECONDS, purge = KEY_PURGE_SECONDS;
 	double window = KEY_WINDOW_SECONDS;
-	double pressed = 0, until = 0, t;
-	int line = 0, port = KEY_PORT, button, listener = -1, down = 0, ignore, tries = 0, i, change, got;
+	struct wait w = { .listener = -1, .holder = -1, .confirm = KEY_CONFIRM_SECONDS,
+			  .apply = KEY_APPLY_SECONDS, .patience = KEY_PENDING_SECONDS };
+	double pressed = 0, t;
+	int line = 0, port = KEY_PORT, button, down = 0, ignore, i, change, got;
 	char word[16] = "empty", answer[64];
-	struct pollfd fds[2];
 
+	for (i = 0; i < KEY_SENDERS; i++)
+		w.senders[i].fd = -1;
 	for (i = 1; i < argc; i++) {
 		const char *value = i + 1 < argc ? argv[i + 1] : NULL;
 
@@ -272,12 +389,15 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--program")) program = atof(value);
 		else if (!strcmp(argv[i], "--purge")) purge = atof(value);
 		else if (!strcmp(argv[i], "--window")) window = atof(value);
+		else if (!strcmp(argv[i], "--confirm")) w.confirm = atof(value);
+		else if (!strcmp(argv[i], "--apply")) w.apply = atof(value);
+		else if (!strcmp(argv[i], "--pending")) w.patience = atof(value);
 		else if (!strcmp(argv[i], "--buttons")) buttons = value;
 		else return usage();
 		i++;
 	}
 	if (line < 0 || port <= 0 || port > 65535 || toggle <= 0 || program <= toggle || purge <= program ||
-	    window <= 0)
+	    window <= 0 || w.confirm <= 0 || w.apply <= w.confirm || w.patience <= 0)
 		return usage();
 	button = buttons ? open(buttons, O_RDWR | O_CLOEXEC) : button_open(chip, (unsigned int)line);
 	if (button < 0) {
@@ -293,9 +413,22 @@ int main(int argc, char **argv)
 	say("none", now(), "-");
 
 	while (!stopping) {
+		struct pollfd fds[2 + KEY_SENDERS];
+		int at[KEY_SENDERS], listening = -1, count = 1, open_before = w.listener >= 0;
+
 		fds[0] = (struct pollfd){ .fd = button, .events = POLLIN };
-		fds[1] = (struct pollfd){ .fd = listener, .events = POLLIN };
-		got = poll(fds, listener >= 0 ? 2 : 1, listener >= 0 ? 250 : -1);
+		if (open_before) {
+			if (sender_free(&w)) {
+				listening = count;
+				fds[count++] = (struct pollfd){ .fd = w.listener, .events = POLLIN };
+			}
+			for (i = 0; i < KEY_SENDERS; i++) {
+				at[i] = w.senders[i].fd >= 0 ? count : -1;
+				if (at[i] >= 0)
+					fds[count++] = (struct pollfd){ .fd = w.senders[i].fd, .events = POLLIN };
+			}
+		}
+		got = poll(fds, (nfds_t)count, open_before ? 100 : -1);
 		t = now();
 		if (got < 0 && errno != EINTR)
 			break;
@@ -306,14 +439,23 @@ int main(int argc, char **argv)
 			if (change == 1 && !down) {
 				down = 1;
 				pressed = t;
-				if (listener >= 0) {		/* a press ends the wait, and means no more */
-					close(listener);
-					listener = -1;
+				if (w.pending) {		/* the hand answers for the key that came */
+					say("confirm", t, "-");
+				} else if (w.listener >= 0) {	/* a press ends the wait, and means no more */
+					wait_end(&w, NULL);
 					ignore = 1;
 					say("closed", t, "-");
 				} else if (!ignore) {
 					slot_state(word, sizeof(word));
 					say("held", t, word);
+				}
+			} else if (change == 0 && down && w.pending) {
+				down = 0;
+				if (t - pressed >= w.confirm) {
+					wait_keep(&w);
+				} else {
+					wait_end(&w, "error: the key was discarded: the button was pressed, not held");
+					say("discarded", t, "-");
 				}
 			} else if (change == 0 && down) {
 				down = 0;
@@ -343,13 +485,12 @@ int main(int argc, char **argv)
 						say(!strncmp(answer, "purged", 6) ? "purged" : "empty", now(), "-");
 					break;
 				case KEY_ACT_PROGRAM:
-					listener = listen_on(address, port);
-					if (listener < 0) {
+					w.listener = listen_on(address, port);
+					if (w.listener < 0) {
 						say("failed", t, "-");
 						break;
 					}
-					until = t + window;
-					tries = 0;
+					w.until = t + window;
 					say("window", t, "-");
 					break;
 				}
@@ -357,20 +498,33 @@ int main(int argc, char **argv)
 				break;	/* the test's presses are over */
 			}
 		}
-		if (listener >= 0 && got > 0 && (fds[1].revents & POLLIN)) {
-			got = take_key(listener);
-			if (got || ++tries >= KEY_TRIES) {
-				close(listener);
-				listener = -1;
-				say(got > 0 ? "taken" : "failed", now(), "-");
-			}
+		if (!open_before || w.listener < 0)	/* what was polled beside the button is gone, or was not there */
+			continue;
+		if (got > 0 && listening >= 0 && (fds[listening].revents & POLLIN))
+			wait_accept(&w, t);
+		for (i = 0; i < KEY_SENDERS; i++) {
+			struct sender *s = &w.senders[i];
+			int whole = 0;
+
+			if (s->fd < 0)
+				continue;
+			if (got > 0 && at[i] >= 0 && fds[at[i]].revents)
+				whole = sender_line(s);
+			if (whole || t >= s->until)
+				sender_judge(&w, s, whole > 0, t);
 		}
-		if (listener >= 0 && now() >= until) {
-			close(listener);
-			listener = -1;
+		if (w.pending && down && t - pressed >= w.apply) {	/* held long enough: no need to let go */
+			wait_keep(&w);
+			ignore = 1;
+		} else if (w.pending && !down && t >= w.key_until) {
+			wait_end(&w, "error: the key was discarded: nobody held the button for it in time");
+			say("discarded", now(), "-");
+		} else if (!w.pending && now() >= w.until) {
+			wait_end(&w, NULL);
 			say("closed", now(), "-");
 		}
 	}
+	wait_end(&w, NULL);
 	say("none", now(), "-");
 	return 0;
 }
