@@ -52,7 +52,12 @@ RADIO_RESULTS = {0: 'ok', 1: 'unknown op', 2: 'bad argument', 3: 'a prerequisite
                  4: 'hardware access failed'}
 RADIO_SELFTEST_MAGIC = 0x52414449
 RADIO_FAILS = {1: 'poll timed out at', 2: 'A-die poll timed out at', 3: 'A-die transaction failed at',
-               4: 'bad argument', 5: 'unexpected hardware state', 6: 'eFuse read failed at'}
+               4: 'bad argument', 5: 'unexpected hardware state', 6: 'eFuse read failed at',
+               7: 'a register access faulted at'}
+# STREAM's results that are no producer status (radio_cmd.h RADIO_STREAM_*): refusals, at once.
+STREAM_REFUSALS = {0x200: 'not a packing schedule',
+                   0x300: 'the radio is not up, or no band is selected whose capture path is set up'}
+STATE_SELECTED = {band: 1 << (28 + band) for band in range(3)}
 EEPROM_BYTES = 7680
 
 

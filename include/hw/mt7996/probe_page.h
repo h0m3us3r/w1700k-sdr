@@ -287,6 +287,10 @@
 #define   MT7996_PROBE_CTL_RF_UNLOCKED    8u
 /* A raw op at a register the guard keeps from a host's programs, on a WM that is locked. */
 #define   MT7996_PROBE_CTL_DENIED         9u
+/* The program was acknowledged without being run, or without being run to its end: it was
+ * posted while the WM was at something else that serves the mailbox afresh afterwards (a radio
+ * command, a call, a stream's start or end). Its results are not this program's. Post it again. */
+#define   MT7996_PROBE_CTL_NOT_RUN        10u
 /* Measured cost: a full LO retune is about 1.5 ms of SPI; with packing the
  * WM has about 18% of its time to spare for control. [measured] */
 

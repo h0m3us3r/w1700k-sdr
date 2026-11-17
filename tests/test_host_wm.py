@@ -226,6 +226,7 @@ class RadioCommands(unittest.TestCase):
 
     def test_one_at_a_time(self):
         """A STREAM is acknowledged when the stream ends; nothing else is posted meanwhile."""
+        self.dev.ready()
         req = self.w.radio_post('stream', wm.RADIO_PACKING['raw'])
         with self.assertRaisesRegex(wm.WmError, 'still running'):
             self.w.radio_post('select', 1)
@@ -235,7 +236,34 @@ class RadioCommands(unittest.TestCase):
         self.unit.end_stream(7)
         self.assertEqual(self.w.radio_wait(req, 'stream')['res'], 7)
 
+    def test_a_stream_is_refused_at_once_unless_the_radio_is_ready_for_one(self):
+        """Up, and the band ICAP listens to with its capture path: a stream of nothing has no end,
+        and a WA started on an unconfigured radio leaves it deaf. The refusals are no producer
+        status."""
+        h = host_fake.header_defines(*HEADERS)
+        self.assertEqual(wm.STREAM_REFUSALS.keys(), {h['RADIO_STREAM_BAD_PACKING'], h['RADIO_STREAM_NOT_READY']})
+        self.assertEqual(wm.STATE_SELECTED, {b: h['RADIO_STATE_SELECTED'](b) for b in range(3)})
+        self.assertTrue(all(code >= 0x100 for code in wm.STREAM_REFUSALS), 'above every producer status')
+        ready = self.dev.st('radio_state')
+        for what, state, packing, res in (
+                ('nothing brought up', 0, 'raw', h['RADIO_STREAM_NOT_READY']),
+                ('up, no band selected', host_fake.BROUGHT_UP | host_fake.CHAN(1) | host_fake.CAPTURE(1), 'half', h['RADIO_STREAM_NOT_READY']),
+                ('the selected band without its capture path (after a RATE)',
+                 host_fake.BROUGHT_UP | host_fake.CHAN(1) | host_fake.CAPTURE(0) | wm.STATE_SELECTED[1], 'raw',
+                 h['RADIO_STREAM_NOT_READY']),
+                ('not a packing', None, 9, h['RADIO_STREAM_BAD_PACKING'])):
+            with self.subTest(what):
+                if state is None:
+                    self.dev.ready()
+                else:
+                    self.dev.set_st('radio_state', state)
+                req = self.w.radio_post('stream', wm.RADIO_PACKING.get(packing, packing))
+                self.assertEqual(self.w.radio_wait(req, 'stream', timeout=1)['res'], res)
+                self.assertFalse(self.dev.wa_up, 'and the WA was not started for it')
+        self.dev.set_st('radio_state', ready)
+
     def test_trap_while_waiting(self):
+        self.dev.ready()
         req = self.w.radio_post('stream', wm.RADIO_PACKING['half'])
         self.dev.set_st('state', wm.STATE_TRAPPED)
         with self.assertRaisesRegex(wm.WmError, 'trapped during radio stream'):

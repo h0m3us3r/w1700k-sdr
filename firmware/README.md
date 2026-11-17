@@ -135,8 +135,8 @@ status block is at `0x0090f3e0`.
 ## Containers (`own.py`, `container.py`, `aes.py`)
 
 `container.py` seals code into the RAM container format (one AES-128-CBC region per memory, an
-empty release envelope, the outer CRC32). The WM container holds four regions (ULM1 entry, the
-two producers, CRAM), the WA container two (entry, packer).
+empty release envelope, the outer CRC32). The WM container holds three regions (ULM1 entry, the
+producer, CRAM), the WA container two (entry, packer).
 
 ## Hazards
 

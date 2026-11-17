@@ -324,7 +324,12 @@ static void ctl_step(struct ctl *c)
 }
 
 /* Programs posted before the stream are not run: whatever REQ holds at the start is taken as
- * already served, so a stale request from an earlier run cannot replay. */
+ * already served, so a stale request from an earlier run cannot replay.
+ *
+ * A request that had not been acknowledged is one this passes over, or one that was left
+ * part-way (the producer's, at a stream's end). The host waits for ACK = REQ and then reads
+ * STATUS: so STATUS says that it was not run, before the ACK. It used to keep the status of
+ * the program before, which as a rule was OK. */
 static void ctl_init(struct ctl *c)
 {
 	c->req = R32(MT7996_PROBE_CTL_REQ);
@@ -332,5 +337,9 @@ static void ctl_init(struct ctl *c)
 	c->rf = 0;
 	c->served = 0;
 	c->calls = 0;
+	if (R32(MT7996_PROBE_CTL_ACK) != c->req) {
+		R32(MT7996_PROBE_CTL_STATUS) = MT7996_PROBE_CTL_NOT_RUN;
+		asm volatile("fence" ::: "memory");
+	}
 	R32(MT7996_PROBE_CTL_ACK) = c->req;
 }

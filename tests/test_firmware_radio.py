@@ -127,7 +127,8 @@ class RadioCode(unittest.TestCase):
         states = {(r['name'], r['arg']): r['state'] for r in self.commands['results']}
         self.assertEqual(states[('bringup', 0)], BROUGHT_UP)
         self.assertEqual(states[('setup', 2)], BROUGHT_UP | sum(CHAN(b) for b in range(3)) | CAPTURE(0) | CAPTURE(1))
-        self.assertEqual(states[('select', 1)], BROUGHT_UP | sum(CHAN(b) | CAPTURE(b) for b in range(3)))
+        self.assertEqual(states[('select', 1)], BROUGHT_UP | sum(CHAN(b) | CAPTURE(b) for b in range(3)) | 1 << 29,
+                         'and which band ICAP listens to (RADIO_STATE_SELECTED), for STREAM to hold to')
         self.assertEqual([r['name'] for r in self.steps['results'][:10]],
                          ['patch_init', 'pool', 'common', 'band', 'band', 'band', 'rf_init', 'rf_init', 'rf_init',
                           'post'])

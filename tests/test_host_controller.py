@@ -254,6 +254,17 @@ class Streaming(ControllerTest):
         self.assertIsNone(self.ctl.state()['stream']['packing'])
         self.assertIn('stream stopped: 1000 chunks in 1.0 s', self.logs())
 
+    def test_a_stream_our_wm_refuses_is_reported_and_no_pump_is_started_on_it(self):
+        self.loaded(1)
+        self.dev.set_st('radio_state', self.dev.st('radio_state') & ~host_fake.CAPTURE(1))    # as after a RATE
+        with self.assertRaisesRegex(StreamError, 'our WM refused the stream: the radio is not up, or no band is '
+                                                 'selected whose capture path is set up'):
+            self.ctl.start()
+        self.assertEqual([name for name, _ in self.dev.radio_commands], ['stream'])
+        self.assertFalse(self.dev.streaming or self.dev.route_armed or self.dev.wa_up)
+        self.assertIsNone(getattr(self.dev, 'pump_argv', None), 'the pump would wait for a producer that is not there')
+        self.assertFalse(self.ctl.state()['stream']['running'])
+
     def test_a_stream_this_host_would_drop_is_not_started(self):
         """With no destination MAC configured the stream comes to this host, whose interface must
         take its packets: one with a 1500-byte MTU drops 8 KiB slices and says nothing."""

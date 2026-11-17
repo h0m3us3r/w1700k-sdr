@@ -56,6 +56,7 @@ EE_BUFFER = 0xE0100000            # where our WM's radio_ee lands in CRAM (any a
 RF_BUILD = 0xE0050000             # its RF command builder
 # probe_page.h CTL status codes
 CTL_OK, CTL_BAD_OP, CTL_TIMEOUT, CTL_TOO_MANY, CTL_BAD_ARG, CTL_DENIED = 0, 1, 2, 3, 7, 9
+STREAM_BAD_PACKING, STREAM_NOT_READY = 0x200, 0x300       # radio_cmd.h RADIO_STREAM_*: STREAM refused
 OWN_IMAGE = (0x00916400, 0x00938000)                      # our WM in ULM1 (firmware/wm/wm.h)
 GUARDED_MMIO = {0x70021008, 0x7C070030}                   # read or written: the eFuse control word, semaphore 12
 GUARDED_MMIO_WRITES = {0x820F3000}                        # written: band 1's ARB_SCR
@@ -125,6 +126,12 @@ class FakeDevice:
         state (sx_status)."""
         self.mem, self.wm_up, self.wa_up = {}, False, False
         self.stream_packing, self.route_armed, self.icap_band = None, False, None
+
+    def ready(self, band=1):
+        """The radio as a load leaves it: up, every band set up with its capture path, ICAP
+        listening to `band`. What a STREAM wants to find."""
+        self.set_st('radio_state', BROUGHT_UP | sum(CHAN(b) | CAPTURE(b) for b in range(3)) | wm.STATE_SELECTED[band])
+        self.icap_band = band
 
     def boot_wm(self):
         """Our WM after the set's download (wm_main): status block, mailbox served."""
@@ -254,6 +261,7 @@ class FakeDevice:
             if a[0] > 2:
                 return RADIO_ERR_ARG
             self.icap_band = a[0]
+            state = state & ~sum(wm.STATE_SELECTED.values()) | wm.STATE_SELECTED[a[0]]
         else:
             return RADIO_ERR_OP
         self.set_st('radio_state', state)
@@ -266,7 +274,11 @@ class FakeDevice:
         producer waiting for the go word; None while it runs."""
         names = {code: name for name, code in wm.RADIO_PACKING.items()}
         if packing not in names:
-            return RADIO_ERR_ARG
+            return STREAM_BAD_PACKING
+        state = self.st('radio_state')
+        band = next((b for b in range(3) if state & wm.STATE_SELECTED[b]), None)
+        if not state & UP or band is None or not state & CAPTURE(band):
+            return STREAM_NOT_READY
         self.stream_packing = names[packing]
         if self.stream_packing != 'raw':
             self._start_wa()

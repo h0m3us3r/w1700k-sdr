@@ -202,7 +202,10 @@ uint32_t radio_command(uint32_t op, const uint32_t *arg, uint32_t *state)
 		if (arg[0] >= RADIO_BANDS)
 			return RADIO_ERR_ARG;
 		capture_select(arg[0]);
-		return done(state, 0);
+		if (radio_failed())
+			return RADIO_ERR_HW;
+		*state = (*state & ~RADIO_STATE_SELECTED_ANY) | RADIO_STATE_SELECTED(arg[0]);
+		return RADIO_OK;
 	}
 	return RADIO_ERR_OP;
 }

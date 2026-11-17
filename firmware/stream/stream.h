@@ -125,7 +125,7 @@ static inline uint64_t rdcycle64(void)
 }
 
 /* Bytes ICAP has written since its start, from CR9 (the last beat, 4-byte units). A lap is
- * 410 us at 1.28 GB/s; both cores read it far more often than that.
+ * 819 us at 1.28 GB/s (the 1 MiB ring at 320 Msps); both cores read it far more often than that.
  */
 static inline uint64_t icap_written(uint64_t *lap, uint32_t *prev)
 {
