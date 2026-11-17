@@ -13,7 +13,7 @@
 #
 # The page `make check` writes, every test with its outcome, time and reason if skipped, is kept
 # with each run as an artifact.
-name: tests
+name: CI
 
 on:
   push:
@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   tests:
-    name: make check (Python ${{ matrix.python }})
+    name: Build and test (Python ${{ matrix.python }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 30
