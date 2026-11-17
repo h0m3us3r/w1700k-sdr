@@ -148,7 +148,8 @@ public:
           stream_(options.stream),
           web_(options.listen, options.web_dir,
                {[this](unsigned c) { on_open(c); }, [this](unsigned c, const std::string &m) { on_text(c, m); },
-                [this](unsigned c) { on_close(c); }, [this] { on_wake(); }, [this] { on_tick(); }}),
+                [this](unsigned c) { on_close(c); }, [this] { on_wake(); }, [this] { on_tick(); }},
+               WebServer::Access{options.hosts, options.origins, options.behind_proxy, options.token, options.token_value}),
           engine_(stream_, Tuning{options.center_hz, options.sample_rate}, options.fft_threads,
                   [this](std::shared_ptr<const SpectrumFrame> frame) {
                       {
@@ -174,6 +175,7 @@ public:
     }
 
     const std::string &address() const { return web_.address(); }
+    WebServer &web() { return web_; }
     void run(const std::atomic<bool> &stop) { web_.run(stop); }
 
 private:
@@ -947,6 +949,18 @@ int command_serve(const ServeOptions &options)
     std::fprintf(stderr, "serving on http://%s/, stream from w1700k-stream %s, controller %s  (Ctrl-C to stop)\n",
                  service.address().c_str(), options.stream.c_str(),
                  options.controller.empty() ? "off" : ("`" + options.controller + "`").c_str());
+    // Who is answered: under which names, and with or without the token.
+    std::string names;
+    for (const auto &name : service.web().names()) names += (names.empty() ? "" : ", ") + name;
+    std::fprintf(stderr, "answers to %s%s\n", names.c_str(),
+                 options.behind_proxy ? " (as a proxy's X-Forwarded-Host, on any port)" : "; --host NAME adds a name");
+    const bool beyond = service.address().compare(0, 4, "127.") != 0 && service.address().compare(0, 5, "[::1]") != 0;
+    if (!service.web().token().empty())
+        std::fprintf(stderr, "open %s\n(the token is wanted with every request: whoever has this link has the receiver)\n",
+                     service.web().link().c_str());
+    else if (beyond)
+        std::fprintf(stderr, "open %s\nNO TOKEN IS WANTED (--no-token): whoever reaches this port has the receiver\n",
+                     service.web().link().c_str());
     stop_requested = false;
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);

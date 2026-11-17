@@ -33,6 +33,10 @@ The stream service may start before or after the server, and restart: the server
 | option | default | |
 |---|---|---|
 | `--listen ADDR:PORT` | `127.0.0.1:8073` | the page; `PORT` alone listens on every address |
+| `--host NAME` | | a name the server answers to beside its own (below); may be repeated |
+| `--allow-origin URL` | | another origin whose pages may open the socket, `scheme://host[:port]`; may be repeated |
+| `--behind-proxy` | | a reverse proxy passes requests on: the name is its `X-Forwarded-Host` |
+| `--no-token` | | listening beyond this machine, want no access token (below) |
 | `--web DIR` | built in | serve the page from DIR, read on every request (development) |
 | `--stream NAME` | `/w1700k-stream` | the stream service's shared memory |
 | `--fft-threads N` | 4 | FFT workers |
@@ -45,6 +49,37 @@ The stream service may start before or after the server, and restart: the server
 
 One browser is served at a time: opening the page elsewhere takes over (the previous one is
 closed with code 4001 and offers to take it back).
+
+### Who is answered
+
+The page drives a receiver, so the server answers a request only when it was meant for it,
+and beyond its own machine only from someone it gave its link to.
+
+- **By name.** A request's `Host` has to be a name the server knows itself by: an address it
+  listens on, this machine's name (also with `.local`), `localhost`, or a name given with
+  `--host` (a DNS name, say). Anything else gets `421`. This is what stops a web page on some
+  other site from reaching the server through your browser under a name of its own that was
+  made to resolve to your machine; such a page's `Origin` equals its `Host`, so comparing the
+  two, as the server once did, does not tell it apart. The socket's `Origin` has to be the
+  server under one of those names as well, or an origin given with `--allow-origin` (a front
+  end served from somewhere else). The server lists the names it answers to when it starts.
+- **By token.** Listening on more than loopback (`--listen 0.0.0.0:8073`, to watch from another
+  machine), the server makes an access token and prints the link that carries it,
+  `http://ADDRESS:8073/?token=...`. Open that link: the token moves into a cookie and leaves
+  the address bar. Every request wants it, the socket included; a client that is not a browser
+  gives it as `?token=` or as `Authorization: Bearer`. The token is new at every start. For one
+  that stays, put your own in `W1700K_SPECTRUM_TOKEN` (16 or more of `A-Z a-z 0-9 _ -`); a token
+  given that way is wanted on loopback too. `--no-token` wants none: anybody who reaches the
+  port then has the receiver.
+- **Behind a reverse proxy** (TLS, a name of its own): `--behind-proxy --host NAME`. The name
+  is then taken from the proxy's `X-Forwarded-Host`, on whatever port; without the option that
+  header is ignored.
+
+The traffic is not encrypted: on a network you do not trust, the token can be read off the
+wire. Use an ssh tunnel to a server on loopback there, or a proxy that speaks TLS.
+
+A connection that asks for more while a megabyte of what it asked for is still unsent gets
+what is queued and is closed, and the server keeps 64 connections at most.
 
 The FFT workers take the CPU that is left: they run at nice 15, so the stream service's receive
 threads, this server's web thread and a browser on the same host come first. With "every sample"
