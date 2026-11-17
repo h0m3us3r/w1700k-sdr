@@ -115,12 +115,14 @@ def check_layout(session):
     listing = session.console.must_run('mtd list', limit=30)
     session.log.text('mtd-list.txt', listing)
     found = layout.listed(listing)
+    waiting = ("Nothing was written. The unit is at its loader's prompt: a power cycle starts the "
+               'system it has')
     if not found:
         raise StepFailed('the loader listed no partitions (`mtd list`), so how this unit is laid out '
-                         'cannot be told; nothing was written')
+                         f'cannot be told. {waiting}')
     differ = layout.differing(found, config.partitions.GEOMETRY)
     if differ:
-        raise StepFailed(layout.laid_out_differently(differ))
+        raise StepFailed(f'{layout.laid_out_differently(differ)}. {waiting}')
 
 
 def loader_nand(session):

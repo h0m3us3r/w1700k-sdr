@@ -468,7 +468,8 @@ class Flash(Bench):
                     unit = self.make_unit(installed=True, layout=self.OLDER)
                     unit.state = state
                     with self.assertRaisesRegex(StepFailed, r'not laid out as these images expect \(durable, loader, '
-                                                            r'loader-b, scratch, stock, system\).*init/install --force'):
+                                                            r'loader-b, scratch, stock, system\).*init/install --force'
+                                                            r'.*Nothing was written.*power cycle'):
                         self.flash(**what)
                     self.assertFalse(any(re.match(self.WRITES, line) for line in self.commands()))
 
