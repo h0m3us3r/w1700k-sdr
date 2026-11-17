@@ -12,7 +12,7 @@
 #                                       leave IMAGE (a second loader, w1700k-loader-b.itb) for
 #                                       the first loader to put in `loader-b` and start
 #   system-update confirm               what was staged runs and is wanted: settle on it
-#   system-update cancel                forget what is staged
+#   system-update cancel                forget what is staged and not yet written
 #
 # The loader stock boots, in `loader`, is written over the serial console only.
 # A loader that comes this way goes beside it and is started by it; one that is
@@ -21,6 +21,10 @@
 # After `stage`, reboot. The loader writes the new root, reads it back and boots
 # it; `confirm` then keeps it. A boot that finds it still unconfirmed puts the
 # previous root back, so a root that does not come up is undone by a power cycle.
+#
+# What is staged is one file in durable storage, the request: the loader acts on
+# it and on nothing else. Whatever is decided here is decided on a request that
+# was read; when durable storage cannot be read, nothing is decided.
 set -eu
 . /etc/w1700k/storage.conf
 STAGED=/durable/update
@@ -65,23 +69,55 @@ second_loader()	# the digest of the image in `loader-b`; nothing when it holds n
 # What the loader keeps while an update is neither confirmed nor undone.
 loader_note() { fw_printenv -n "$1" 2>/dev/null || :; }
 
-staged()	# the staged request's two digests, new then old; nothing when none is staged
+# The staged request as it is kept, a line a field (update_new, update_old, loader_new);
+# nothing when none is staged.
+#
+# Durable storage is opened for the read and may be open already: the reset button's service
+# and the tools that keep a login key or the network's settings open it too, each for a
+# moment. That is waited for. A read that still cannot be made ends the run here, and so
+# every caller's (call it as `x=$(request)`, which passes the failure on; in a pipeline or
+# as a word of another command it would be lost, and no answer taken for "nothing staged",
+# which is how a confirm once settled on a root it had not compared).
+request()
 {
-	/usr/sbin/durable-run sh -c '
-		[ ! -f "$1/request" ] || echo "request: $(sed -n "s/^update_new=//p; s/^update_old=//p" "$1/request" | tr "\n" " ")"
-	' sh "$STAGED" | sed -n 's/^request: //p'
+	tries=5
+	until said=$(/usr/sbin/durable-run sh -c '[ ! -f "$1/request" ] || sed "s/^/request: /" "$1/request"' sh "$STAGED" 2>&1); do
+		tries=$((tries - 1))
+		[ "$tries" -gt 0 ] || fail "durable storage could not be read ($(printf '%s' "$said" | tail -n 1)); nothing was decided"
+		sleep 1
+	done
+	printf '%s\n' "$said" | sed -n 's/^request: //p'
 }
 
-staged_loader()	# the staged second loader's digest; nothing when none is staged
+field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }	# the field $2 of the request $1
+
+# The staged root or loader of the request $1 is one the loader has written already, and
+# nobody has confirmed it. It is then not to be forgotten, and not to be staged over. With
+# its request gone the loader takes what is in place for settled; with another root staged
+# over it, it becomes the root to go back to. Either way it would be kept, or fallen back
+# on, with nothing of what `confirm` checks having been checked. `$2`: what was asked for;
+# `$3`: which of the two matters to it (root, loader, or either). A loader staged beside a
+# root that runs unconfirmed leaves that root as unconfirmed as it was, and the other way.
+# (Its variables are its own: a shell function's are the caller's too.)
+unwritten()
 {
-	/usr/sbin/durable-run sh -c '
-		[ ! -f "$1/request" ] || echo "request: $(sed -n "s/^loader_new=//p" "$1/request")"
-	' sh "$STAGED" | sed -n 's/^request: //p'
+	was_root=$(field "$1" update_new)
+	was_loader=$(field "$1" loader_new)
+	[ "$3" = loader ] || [ -z "$was_root" ] || [ "$(running)" != "$was_root" ] ||
+		fail "$2: the staged root $was_root is written and runs, unconfirmed. Restart the unit and" \
+			"the previous root is put back, or confirm it"
+	[ "$3" = root ] || [ -z "$was_loader" ] || [ "$(second_loader)" != "$was_loader" ] ||
+		fail "$2: the staged loader $was_loader is written to loader-b, unconfirmed. Restart the" \
+			"unit and the first loader removes it, or confirm it"
 }
 
+# The request first, written out, and only then the images: the request is what the loader
+# acts on. Removed in whatever order the directory gave them, a power cut could leave the
+# request with a root already confirmed, and the next boot put the old root back.
 forget()
 {
-	/usr/sbin/durable-run rm -rf "$STAGED" > /dev/null || fail "the staged files are still there"
+	/usr/sbin/durable-run sh -c 'rm -f "$1/request" && sync && rm -rf "$1"' sh "$STAGED" > /dev/null ||
+		fail "what was staged could not be forgotten; run this again"
 }
 
 case ${1:-} in
@@ -89,13 +125,13 @@ status)
 	echo "running=$(running)"
 	installed && echo "boot=installed" || echo "boot=ram"
 	loader_applies && echo "loader=applies" || echo "loader=serial-only"
-	set -- $(staged)
-	echo "staged=${1:-}"
-	echo "previous=${2:-}"
+	request=$(request)
+	echo "staged=$(field "$request" update_new)"
+	echo "previous=$(field "$request" update_old)"
 	echo "tried=$(loader_note update_tried)"
 	echo "failed=$(loader_note update_failed)"
 	loader_starts_second && echo "second_loader=$(second_loader)" || echo "second_loader=unsupported"
-	echo "loader_staged=$(staged_loader)"
+	echo "loader_staged=$(field "$request" loader_new)"
 	echo "loader_tried=$(loader_note loader_tried)"
 	echo "loader_booted=$(loader_note loader_booted)"
 	echo "loader_failed=$(loader_note loader_failed)"
@@ -107,6 +143,7 @@ stage)
 	loader_applies || fail "the loader on this unit does not apply staged updates: " \
 		"flash it once over the serial console (init/flash --loader)"
 	[ "$(digest < "$image")" = "$want" ] || fail "$image is not $want"
+	[ "$(head -c 4 "$image")" = hsqs ] || fail "$image is not a SquashFS root"
 	root=$(volume rootfs)
 	sys=/sys/class/ubi/${root##*/}
 	room=$(($(cat "$sys/reserved_ebs") * $(cat "$sys/usable_eb_size")))
@@ -114,6 +151,8 @@ stage)
 	[ "$size" -le "$room" ] || fail "$image ($size bytes) does not fit the root volume ($room)"
 	old=$(running)
 	[ "$old" != "$want" ] || { echo "system-update: this root already runs"; exit 0; }
+	request=$(request)
+	unwritten "$request" "not staged" root
 	/usr/sbin/durable-run sh -eu -c '
 		staged=$1 image=$2 want=$3 root=$4 old=$5 size=$6
 		mkdir -p "$staged"
@@ -150,6 +189,8 @@ stage-loader)
 	size=$(wc -c < "$image")
 	[ "$size" -le "$room" ] || fail "$image ($size bytes) does not fit loader-b ($room)"
 	[ "$(second_loader)" != "$want" ] || { echo "system-update: this loader is already in place"; exit 0; }
+	request=$(request)
+	unwritten "$request" "not staged" loader
 	/usr/sbin/durable-run sh -eu -c '
 		staged=$1 image=$2 want=$3 size=$4
 		mkdir -p "$staged"
@@ -170,10 +211,11 @@ stage-loader)
 	;;
 confirm)
 	now=$(running)
-	set -- $(staged)
-	loader=$(staged_loader)
-	[ -n "${1:-}" ] || [ -n "$loader" ] || fail "nothing is staged"
-	[ -z "${1:-}" ] || [ "$now" = "$1" ] || fail "the staged root is $1, and $now runs"
+	request=$(request)
+	root=$(field "$request" update_new)
+	loader=$(field "$request" loader_new)
+	[ -n "$root" ] || [ -n "$loader" ] || fail "nothing is staged"
+	[ -z "$root" ] || [ "$now" = "$root" ] || fail "the staged root is $root, and $now runs"
 	if [ -n "$loader" ]; then
 		[ "$(loader_note loader_booted)" = "$loader" ] ||
 			fail "the staged loader $loader did not start this boot"
@@ -183,6 +225,8 @@ confirm)
 	echo "system-update: settled on root $now${loader:+ and loader $loader}"
 	;;
 cancel)
+	request=$(request)
+	unwritten "$request" "not cancelled" either
 	forget
 	echo "system-update: nothing is staged"
 	;;

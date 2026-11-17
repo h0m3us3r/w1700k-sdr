@@ -200,9 +200,13 @@ class Model(unittest.TestCase):
         if request:
             (staged / 'request').write_text(f'update_new={digest(new)}\nupdate_old={digest(old)}\n')
 
-    def settle(self):
-        """What system-update confirm and cancel do."""
-        shutil.rmtree(self.model / 'durable' / 'update')
+    def settle(self, cut=False):
+        """What system-update confirm does, and cancel before anything was written: the request
+        goes first, then the images. `cut`: the power went between the two."""
+        staged = self.model / 'durable' / 'update'
+        (staged / 'request').unlink(missing_ok=True)
+        if not cut:
+            shutil.rmtree(staged)
 
     def boot(self):
         """One boot of the loader: what it logged since the last."""
@@ -247,6 +251,17 @@ class LoaderUpdate(Model):
         self.assertEqual(self.boot(), ['env erase', f'booted {digest(self.NEW)}'])
         self.assertIsNone(self.saved(), 'the saved environment is gone again: the loader runs on its defaults')
         self.assertEqual(self.boot(), [f'booted {digest(self.NEW)}'], 'and nothing more is written')
+
+    def test_power_lost_while_a_confirmation_forgets_keeps_what_was_confirmed(self):
+        """system-update removes the request before the images (tests/test_system_update.py). With
+        the request gone the root is settled on, whatever of the images is still there."""
+        self.stage(self.NEW, self.OLD)
+        self.boot()
+        self.settle(cut=True)
+        self.assertTrue((self.model / 'durable' / 'update' / 'rootfs.old').exists())
+        self.assertEqual(self.boot(), ['env erase', f'booted {digest(self.NEW)}'])
+        self.assertEqual(self.root(), self.NEW)
+        self.assertEqual(self.boot(), [f'booted {digest(self.NEW)}'], 'and what was left over means nothing')
 
     def test_a_root_never_confirmed_is_undone_by_the_next_boot(self):
         self.stage(self.NEW, self.OLD)
