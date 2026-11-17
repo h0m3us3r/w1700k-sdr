@@ -13,6 +13,11 @@
 #
 # The page `make check` writes, every test with its outcome, time and reason if skipped, is kept
 # with each run as an artifact.
+#
+# What runs here that is not this repository's is named exactly: each action by the commit its
+# release tag pointed at when it was pinned (a tag can be moved, a commit cannot), and pyserial
+# by version and hash (.github/requirements.txt). To move one on, change the commit and the
+# version beside it together.
 name: CI
 
 on:
@@ -39,9 +44,9 @@ jobs:
         # The oldest Python the READMEs promise, and a current one.
         python: ['3.10', '3.14']
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
 
@@ -51,7 +56,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential clang lld llvm pkg-config \
             libfftw3-dev libsoapysdr-dev zlib1g-dev libssl-dev
-          python3 -m pip install pyserial
+          python3 -m pip install --require-hashes -r .github/requirements.txt
 
       - name: Build the firmware and the host programs
         run: make firmware host
@@ -70,7 +75,7 @@ jobs:
 
       - name: Keep the test report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: test-report-python-${{ matrix.python }}
           path: |

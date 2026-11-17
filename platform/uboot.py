@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Shared steps of the U-Boot builds (loader, dumper, restorer) and of mkimage."""
 from pathlib import Path
+import shutil
 import struct
 
 from buildlib import (BUILD, CROSS_COMPILE, LOGS, MKIMAGE, SRC, apply_patches, build_env,
@@ -47,10 +48,15 @@ def build(name, src, defconfig):
 
 
 def mkimage(src):
-    """mkimage and dtc from the pinned U-Boot, built once for the host."""
+    """mkimage and dtc from the pinned U-Boot, built for the host once for each U-Boot pinned:
+    the tools of an earlier pin are not the ones this build says it makes its images with."""
     out = MKIMAGE.parents[1]
     log = LOGS / 'mkimage.log'
-    if not MKIMAGE.is_file():
+    pin = sources()['u-boot']['sha256'] + '\n'
+    made_from = out / 'u-boot.pin'
+    if not MKIMAGE.is_file() or not made_from.is_file() or made_from.read_text() != pin:
+        if out.is_dir():
+            shutil.rmtree(out)
         make = ['make', '-C', src, f'O={out}']
         env = build_env()
         run(make + ['tools-only_defconfig'], env=env, log=log)
@@ -59,6 +65,7 @@ def mkimage(src):
              'TOOLS_KWBIMAGE'], env=env, log=log)
         run(make + ['olddefconfig'], env=env, log=log)
         run(make + [f'-j{jobs()}', 'tools-only'], env=env, log=log)
+        made_from.write_text(pin)
     return MKIMAGE
 
 

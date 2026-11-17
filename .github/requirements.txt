@@ -1,0 +1,2 @@
+# What the tests install from PyPI on GitHub (.github/workflows/tests.yml), by version and hash.
+pyserial==3.5 --hash=sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0
