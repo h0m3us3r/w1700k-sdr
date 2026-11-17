@@ -10,6 +10,7 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import time
 import unittest
 
@@ -89,7 +90,8 @@ def tone_amplitude(samples, cycles):
 
 
 @unittest.skipIf(build_problem(), build_problem())
-class StreamServiceTest(unittest.TestCase):
+class Service(unittest.TestCase):
+    """A w1700k-stream of the test's own, on a free port and under a name of its own."""
     counter = 0
 
     @classmethod
@@ -98,12 +100,15 @@ class StreamServiceTest(unittest.TestCase):
         if result.returncode:
             raise AssertionError("build failed:\n" + result.stdout + result.stderr)
 
+    RECEIVE_MIB, RX_THREADS = 64, 2
+
     def setUp(self):
-        StreamServiceTest.counter += 1
+        Service.counter += 1
         self.name = "/w1700k-test-%d-%d" % (os.getpid(), self.counter)
         self.port = free_udp_port()
         self.proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(self.port), "--name", self.name,
-                                      "--ring-mib", "16", "--receive-mib", "64", "--workers", "2", "--rx-threads", "2"],
+                                      "--ring-mib", "16", "--receive-mib", str(self.RECEIVE_MIB), "--workers", "2",
+                                      "--rx-threads", str(self.RX_THREADS)],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         deadline = time.monotonic() + 10
         while True:
@@ -156,6 +161,9 @@ class StreamServiceTest(unittest.TestCase):
                 raise AssertionError("published %d of %d" % (newest, n))
             time.sleep(0.02)
 
+
+@unittest.skipIf(build_problem(), build_problem())
+class StreamServiceTest(Service):
     def test_slices_unpacked_bit_exact_events_and_losses_tagged(self):
         words = {s: noise_words(s) for s in range(1200)}
         for s in range(1200):
@@ -367,6 +375,52 @@ class StreamServiceTest(unittest.TestCase):
         run2 = self.wait_newest(40)
         self.assertEqual(run2, run + 1)
         self.assertEqual(self.shm.samples(0), unpacked(noise_words(300)), "the new run counts from its first slice")
+
+
+@unittest.skipIf(build_problem() or not shutil.which("cc"), build_problem() or "no C compiler")
+class NewRunWhileReceiving(Service):
+    """A new run asked for while slices arrive on every receive thread at once, as the spectrum server
+    asks when it notices late that one stream ended and the next has begun."""
+    RECEIVE_MIB, RX_THREADS = 128, 4       # a reorder ring of 16384 slices
+    RATE, SECONDS, EVERY = 120_000, 5.0, 0.3
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.tools = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tools.cleanup)
+        cls.blast = os.path.join(cls.tools.name, "stream_blast")
+        result = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread", "-o", cls.blast,
+                                 os.path.join(ROOT, "tests", "stream_blast.c")], capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError("stream_blast did not build:\n" + result.stderr)
+
+    def test_a_slice_of_the_run_that_ended_does_not_move_the_new_runs_position(self):
+        """Each receive thread reads the run and then files its slice. One that read it just before
+        another began a new run files a slice of the old run, at the old run's index; that index must
+        not become the new run's newest slot, or everything the new run receives is older than the
+        ring holds and is dropped as late until its numbering has caught up: all of a 40 Msps stream
+        for a quarter of a minute, when this was found on a unit. Here a run is twice the ring long
+        when the next is asked for, so one such slice costs the new run some 20,000 slices."""
+        blaster = subprocess.Popen([self.blast, str(self.port), str(MAGIC), str(self.RX_THREADS), str(self.RATE),
+                                    str(self.SECONDS)], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(blaster.stdout.close)
+        asked, due = 0, time.monotonic() + self.EVERY
+        while blaster.poll() is None:
+            if time.monotonic() >= due:
+                self.shm.set("restart_requests", self.shm.get("restart_requests") + 1)
+                asked, due = asked + 1, due + self.EVERY
+            time.sleep(0.005)
+        self.assertEqual(blaster.returncode, 0)
+        sent = int(blaster.stdout.read())
+        time.sleep(0.6)                                 # the last slices are published, the counters refreshed
+        run, _ = self.shm.position()
+        self.assertGreaterEqual(run, asked, "every request began a run")
+        self.assertGreater(self.shm.get("slices"), sent // 2, "the slices were received, not dropped on the way in")
+        # A receive thread kept from running for longer than the ring is deep would file what it
+        # held as late too: tens of slices, where the fault files tens of thousands.
+        self.assertLess(self.shm.get("late"), 1000,
+                        "slices of the new run were dropped as late: a slice of the run before moved its position")
 
 
 if __name__ == "__main__":

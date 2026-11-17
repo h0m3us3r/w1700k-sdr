@@ -39,10 +39,30 @@ uint64_t now_ns()
                         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-void atomic_max(std::atomic<uint64_t> &a, uint64_t v)
+// A run's newest slot filled is kept in one word with the run it belongs to in the bits above
+// it, as a slot's tag has them (the slots of a run stay below kRunJumpForward). The receive
+// threads each read the run and then file a slice; one that read it just before another thread
+// began a new run is still filing a slice of the old one, at an index of the old one. Raising a
+// bare "newest" with that index made the new run look that far along: every slice of the new
+// stream was then older than the ring holds, and was dropped as late until its own numbering
+// caught up. With the run in the word, such a thread changes nothing.
+constexpr unsigned kNewestBits = 40;
+constexpr uint64_t kNewestMask = (uint64_t(1) << kNewestBits) - 1;
+
+uint64_t placed(uint64_t run, uint64_t newest) { return run << kNewestBits | newest; }
+
+// The newest slot of `run` as the word `position` has it: nothing, if it is of another run.
+uint64_t newest_of(uint64_t position, uint64_t run)
 {
+    return (position ^ placed(run, 0)) >> kNewestBits ? 0 : position & kNewestMask;
+}
+
+// Raises the newest slot to `newest`, while the word is still of `run`.
+void advance(std::atomic<uint64_t> &a, uint64_t run, uint64_t newest)
+{
+    const uint64_t v = placed(run, newest);
     uint64_t o = a.load(std::memory_order_relaxed);
-    while (v > o && !a.compare_exchange_weak(o, v, std::memory_order_acq_rel))
+    while (!((o ^ v) >> kNewestBits) && v > o && !a.compare_exchange_weak(o, v, std::memory_order_acq_rel))
         ;
 }
 
@@ -313,7 +333,7 @@ size_t Ingest::record(Worker &w, const uint8_t *data, size_t n, uint64_t t)
         std::lock_guard<std::mutex> lock(run_mutex);
         if (run_.load() == run && (new_run_.exchange(false) || !run || jumped(seq, base_.load()))) {
             base_.store(seq);
-            newest_.store(0);
+            newest_.store(placed(run + 1, 0));
             started_ns_.store(t);
             run_.store(run + 1, std::memory_order_release);
         }
@@ -327,7 +347,7 @@ size_t Ingest::record(Worker &w, const uint8_t *data, size_t n, uint64_t t)
         return taken;
     }
     const uint64_t index = seq - base;
-    if (index + ring_.capacity_slices() < newest_.load(std::memory_order_relaxed)) {
+    if (index + ring_.capacity_slices() < newest_of(newest_.load(std::memory_order_relaxed), run)) {
         w.late.fetch_add(1, std::memory_order_relaxed);
         return taken;
     }
@@ -363,7 +383,7 @@ size_t Ingest::record(Worker &w, const uint8_t *data, size_t n, uint64_t t)
         w.packed.fetch_add(1, std::memory_order_relaxed);
         check(w, run, index);
     }
-    atomic_max(newest_, index + 1);
+    advance(newest_, run, index + 1);
     return taken;
 }
 
@@ -391,8 +411,9 @@ void Ingest::check(Worker &w, uint64_t run, uint64_t index)
 Ingest::Position Ingest::position() const
 {
     for (;;) {
-        const uint64_t run = run_.load(std::memory_order_acquire), newest = newest_.load(std::memory_order_acquire);
-        if (run_.load(std::memory_order_acquire) == run) return {run, newest};
+        // The word is of the next run for a moment before the run itself is: read again then.
+        const uint64_t run = run_.load(std::memory_order_acquire), position = newest_.load(std::memory_order_acquire);
+        if (!((position ^ placed(run, 0)) >> kNewestBits)) return {run, position & kNewestMask};
     }
 }
 
@@ -419,8 +440,9 @@ Ingest::Stats Ingest::stats() const
         s.reduced += w->reduced.load(std::memory_order_relaxed);
         s.suspect += w->suspect.load(std::memory_order_relaxed);
     }
-    s.run = run_.load();
-    s.newest = newest_.load();
+    const Position at = position();
+    s.run = at.run;
+    s.newest = at.newest;
     s.run_started = started_ns_.load() / 1e9;
     s.last_any = last_ns_.load() / 1e9;
     return s;

@@ -92,7 +92,7 @@ public:
     void start();  // binds the sockets and starts receiving
     Stats stats() const;
     uint64_t run() const { return run_.load(std::memory_order_acquire); }
-    uint64_t newest() const { return newest_.load(std::memory_order_acquire); }
+    uint64_t newest() const { return position().newest; }
     Position position() const;  // run and newest, read consistently
     void restart_run();         // the next completion starts a new run (the stream was restarted)
 
@@ -109,7 +109,8 @@ private:
     std::atomic<bool> stopping_{false};
     std::vector<std::unique_ptr<Worker>> workers_;
 
-    // The run: its first sequence number, and the newest slot filled.
+    // The run: its first sequence number, and the newest slot filled, kept with the run it is of
+    // (ingest.cpp, `placed`).
     std::atomic<uint64_t> run_{0}, base_{0}, newest_{0};
     std::atomic<uint64_t> started_ns_{0}, last_ns_{0};
     std::atomic<bool> new_run_{false};
