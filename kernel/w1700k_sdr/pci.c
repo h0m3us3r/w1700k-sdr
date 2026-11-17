@@ -712,7 +712,7 @@ static int sdr_stream_check(const struct w1700k_sdr_stream_rx *req)
 {
 	if (req->reserved || (req->flags & ~W1700K_SDR_STREAM_FLAGS) ||
 	    req->timeout_ms > W1700K_SDR_STREAM_TIMEOUT_MAX ||
-	    req->export.drain_ms > W1700K_SDR_STREAM_TIMEOUT_MAX ||
+	    req->export.drain_ms > W1700K_SDR_EXPORT_DRAIN_MAX ||
 	    !sdr_stream_word_ok(req->go_address) ||
 	    !sdr_stream_word_ok(req->stop_address))
 		return -EINVAL;
@@ -830,7 +830,7 @@ static long sdr_do_stream_rx(struct sdr_device *sdr, void __user *user)
 		ret = sdr_pump_run(&sdr_pump_ops, &pump, &req);
 	}
 	req.end_ns = ktime_get_ns();
-	sdr_export_finish(&x, req.first_seq + req.buffers, &req);
+	sdr_export_finish(&x, req.first_seq + req.buffers, &req, &sdr->removing);
 	sdr_ctl_pumping(sdr, false);
 	sdr_ctl_service(sdr);
 end:

@@ -13,9 +13,20 @@
  * One generator per emitter, at the shortest period (4 ms, 250 Hz), so a level is a duty of
  * 0..255. The LED keeps what it was last given across a module reload. Nothing here touches
  * the MT7996: the LED works whatever the radio does.
+ *
+ * The block is the kernel's pin controller's too (pinctrl-airoha: a GPIO's direction and
+ * output enable are bits of GPIO_CTRL1 and GPIO_OE, words it shares with the LED's pins), so
+ * it is reached as that driver reaches it, through the system controller's register map and
+ * under its lock. Mapped a second time and written with a read and a write of our own, a
+ * change of ours could undo one the pin controller made in between: the reset button's line
+ * is asked for (w1700k-key) at about the moment the LED's pins are first taken.
  */
 #include <linux/bits.h>
+#include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/mfd/syscon.h>
+#include <linux/of.h>
+#include <linux/printk.h>
 #include "led.h"
 #include "hw/an7581/memmap.h"
 #include "hw/an7581/scu.h"
@@ -34,9 +45,26 @@ static const u8 led_gpio[4] = {		/* bucket k drives emitter k */
 	W1700K_GPIO_LED_STATUS_BLUE, W1700K_GPIO_LED_STATUS_WHITE,
 };
 
+/* The block's register map, found as the pin controller finds its own: it is the map of that
+ * driver's parent node. The parent has no name to look it up by that every device tree gives
+ * it (the kernel's own calls it "airoha,en7581-gpio-sysctl", the one this unit boots with only
+ * "syscon"); the pin controller's node is the same in both. */
+#define LED_PIN_CONTROLLER	"airoha,en7581-pinctrl"
+
+static struct regmap *led_block(void)
+{
+	struct device_node *pins = of_find_compatible_node(NULL, NULL, LED_PIN_CONTROLLER);
+	struct device_node *block = pins ? of_get_parent(pins) : NULL;
+	struct regmap *map = block ? device_node_to_regmap(block) : ERR_PTR(-ENODEV);
+
+	of_node_put(block);
+	of_node_put(pins);
+	return map;
+}
+
 static void led_update(struct sdr_led *led, u32 offset, u32 mask, u32 value)
 {
-	writel((readl(led->regs + offset) & ~mask) | (value & mask), led->regs + offset);
+	regmap_update_bits(led->map, offset, mask, value);
 }
 
 /* A generator's times for a brightness: the pin is low (lit) for level/255 of the period. */
@@ -69,24 +97,29 @@ int sdr_led_init(struct sdr_led *led)
 		     W1700K_GPIO_LED_STATUS_WHITE < 16 || W1700K_GPIO_LED_STATUS_WHITE > 31);
 	mutex_init(&led->lock);
 	led->taken = false;
-	led->regs = ioremap(AN7581_GPIO_BASE, AN7581_GPIO_SIZE);
-	return led->regs ? 0 : -ENOMEM;
+	led->map = led_block();
+	if (IS_ERR(led->map)) {
+		int ret = PTR_ERR(led->map);
+
+		led->map = NULL;
+		pr_warn("w1700k_sdr: no status LED: the GPIO block's register map was not found (%d)\n", ret);
+		return ret;
+	}
+	return 0;
 }
 
 void sdr_led_exit(struct sdr_led *led)
 {
-	if (led->regs)
-		iounmap(led->regs);
-	led->regs = NULL;
+	led->map = NULL;	/* the map is the system controller's, and stays */
 }
 
 int sdr_led_set(struct sdr_led *led, const struct w1700k_sdr_led *req)
 {
-	if (!led->regs)
+	if (!led->map)
 		return -ENODEV;
 	mutex_lock(&led->lock);
-	writel(led_times(req->green) << 16 | led_times(req->red), led->regs + LED_FLASH_PRD_SET(0));
-	writel(led_times(req->white) << 16 | led_times(req->blue), led->regs + LED_FLASH_PRD_SET(2));
+	regmap_write(led->map, LED_FLASH_PRD_SET(0), led_times(req->green) << 16 | led_times(req->red));
+	regmap_write(led->map, LED_FLASH_PRD_SET(2), led_times(req->white) << 16 | led_times(req->blue));
 	if (!led->taken) {
 		led_take_pins(led);
 		led->taken = true;

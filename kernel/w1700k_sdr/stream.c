@@ -185,9 +185,18 @@ static uint64_t completed(void)
 	return __atomic_load_n(&ring->completed, __ATOMIC_ACQUIRE);
 }
 
+/* A completion's length is the radio's word for it, a 14-bit field: up to 16383, of a slice that
+ * holds slice_bytes. Whoever reads the slice by it reads no further than the slice. */
+static uint32_t slice_len_of(uint32_t ctrl)
+{
+	uint32_t n = HW_GET(WFDMA_DESC_CTRL_SD_LEN0, ctrl);
+
+	return n < ring->slice_bytes ? n : ring->slice_bytes;
+}
+
 static uint32_t slice_len(uint64_t seq)
 {
-	return HW_GET(WFDMA_DESC_CTRL_SD_LEN0, ring->ctrl[seq % ring->slices]);
+	return slice_len_of(ring->ctrl[seq % ring->slices]);
 }
 
 static const uint8_t *slice_at(uint64_t seq)
@@ -314,7 +323,6 @@ static int send_slice(struct sender *s, struct batch *b, uint64_t seq, uint64_t 
 	uint32_t n = slice_len(seq), code, peak, seen;
 	const uint8_t *p = slice_at(seq);
 
-	n = n < ring->slice_bytes ? n : ring->slice_bytes;
 	if (sending.split && n != IQ_REDUCE_SAMPLES * 4)
 		return 1;	/* the driver's export sends what is not a raw slice */
 	if (reduced_bytes && n == IQ_REDUCE_SAMPLES * 4) {
@@ -645,7 +653,7 @@ static int dump(const struct options *o, uint64_t from, uint64_t end)
 		ret = -1;
 	for (seq = from; !ret && seq < end; seq++) {
 		ctrl = ring->ctrl[seq % ring->slices];
-		n = HW_GET(WFDMA_DESC_CTRL_SD_LEN0, ctrl);
+		n = slice_len_of(ctrl);	/* the descriptor is kept as it came; the data is the slice's */
 		if (d && written + n <= o->data_cap) {
 			if (fwrite(slice_at(seq), 1, n, d) != n)
 				ret = -1;
@@ -761,7 +769,8 @@ static int parse(int argc, char **argv, struct options *o)
 			    o->send.senders > SENDERS_MAX)
 				return -1;
 		} else if (!strcmp(a, "--drain-ms") && left >= 1) {
-			if (client_u32(argv[++i], &req->export.drain_ms))
+			if (client_u32(argv[++i], &req->export.drain_ms) ||
+			    req->export.drain_ms > W1700K_SDR_EXPORT_DRAIN_MAX)
 				return -1;
 			o->export_set = 1;
 		} else if (!strcmp(a, "--export-cpu") && left >= 1) {

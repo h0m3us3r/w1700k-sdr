@@ -187,6 +187,12 @@ case the driver then writes the stop word and keeps re-arming the ring until
 `max(idle_ms, 300 ms)` pass without a completion (at most 5 s), so the
 producer can drain its own TX ring. `kill -USR1` takes a `--snap` snapshot.
 
+The export then has `--drain-ms` to send what it had not yet sent, a minute at
+most (`W1700K_SDR_EXPORT_DRAIN_MAX`): the wait is made with the device held. A
+caller that is killed meanwhile, or a device being removed, does not sit it
+out. `mt7996-stream` reads a slice by the length its descriptor gives and
+never past the slice: a completion that claims more is read as a whole slice.
+
 ### Export datagrams
 
 One per completed slice, from `src_port + n % ports` to `dst_port`, IPv4 with
