@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: MIT
-# The test suite, on every pull request and on main.
+# The test suite, on every push and every pull request.
+#
+# A push runs it in the repository pushed to, so a fork shows its own result before a pull request
+# is opened. A pull request from a fork runs it here as well; one from a branch of this repository
+# does not, since the push to that branch already has.
 #
 # What runs: `make check`, after building the two things the tests cannot do without, the radio
 # firmware and the host programs (seconds each). That is every test that needs no unit and no
@@ -12,9 +16,8 @@
 name: tests
 
 on:
-  pull_request:
   push:
-    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -27,6 +30,7 @@ concurrency:
 jobs:
   tests:
     name: make check (Python ${{ matrix.python }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:

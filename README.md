@@ -241,8 +241,9 @@ installation and updates, the radio's packing kernels run from their machine
 code in an emulator, the loader's update script run against a model of the
 flash, and the host programs fed over loopback.
 
-Every pull request, and `main`, has it run on GitHub
-(`.github/workflows/tests.yml`): `make firmware host`, then `make check`, on
+Every push and every pull request has it run on GitHub
+(`.github/workflows/tests.yml`), a push in the repository pushed to, so a fork
+shows its own result first: `make firmware host`, then `make check`, on
 the oldest Python the project promises and on a current one, with the report
 page kept with each run. The tests that need the kernel, the root filesystem
 or the boot images built skip there and say so; they run where `make` has
