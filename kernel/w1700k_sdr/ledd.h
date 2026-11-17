@@ -342,12 +342,17 @@ static inline struct hsb led_engine_at(const struct led_engine *e, double t)
  *   drain     let go before anything: what had filled runs out, nothing happened
  *   on, off   switched: green, twice up and staying; red, sinking into the dark
  *   window    blue, breathing: the unit waits for a key
+ *   pending   a key has come and waits for the hand: cyan, two beats and a rest. Not the blue's
+ *             slow breath: the rhythm says it as well as the colour
+ *   confirm   the button is held for that key: green rises for KEY_CONFIRM_SECONDS, then a flash
+ *             and green pulsing: letting go now keeps the key. Let go before, it is discarded
  *   taken     the key is in: a flash, then the blue turns through cyan to green and stays a moment
- *   closed    the wait ended without a key: the blue goes out
+ *   closed    the wait ended without a key, or the key that came was discarded: the blue goes out
  *   purged    erased: the red pales to white as it sinks into the dark
  *   failed    red, three times: the key could not be kept
  *
- * Green and red keep their meaning (go, stop); blue is the colour of waiting to be paired.
+ * Green and red keep their meaning (go, stop); blue is the colour of waiting to be paired, and
+ * cyan, between blue and green, of a key that is here and not yet taken.
  */
 enum led_key_phase {
 	LED_KEY_NONE,
@@ -361,6 +366,8 @@ enum led_key_phase {
 	LED_KEY_CLOSED,
 	LED_KEY_FAILED,
 	LED_KEY_PURGED,
+	LED_KEY_PENDING,
+	LED_KEY_CONFIRM,
 };
 
 struct led_key {
@@ -373,6 +380,9 @@ struct led_key {
 #define LED_KEY_HUE_ON		120.0f
 #define LED_KEY_HUE_OFF		0.0f
 #define LED_KEY_HUE_PROGRAM	225.0f
+#define LED_KEY_HUE_PENDING	180.0f
+#define LED_KEY_BEAT		0.3	/* seconds: one beat of a pending key's two */
+#define LED_KEY_BEATS		1.4	/* seconds: the two beats and their rest */
 #define LED_KEY_FLASH		0.12	/* seconds of white where a threshold is crossed */
 #define LED_KEY_HELD_MOST	60.0	/* a button down for longer says nothing more */
 
@@ -380,7 +390,7 @@ struct led_key {
 static inline void led_key_parse(const char *text, struct led_key *k)
 {
 	static const char *const words[] = { "none", "held", "drain", "on", "off", "empty", "window",
-					     "taken", "closed", "failed", "purged" };
+					     "taken", "closed", "failed", "purged", "pending", "confirm" };
 	char word[16] = "", detail[16] = "", more[16] = "";
 	double since = 0;
 	unsigned int i;
@@ -510,6 +520,28 @@ static inline float led_key_at(const struct led_key *k, double t, struct hsb *c)
 		c->h = LED_KEY_HUE_PROGRAM;
 		c->s = 1;
 		c->b = 0.25f + 0.75f * led_key_pulse(z, 1.6);
+		return 1;
+	case LED_KEY_PENDING: {
+		double beat = fmod(z, LED_KEY_BEATS);
+
+		if (z > KEY_PENDING_SECONDS + 5)
+			return 0;
+		c->h = LED_KEY_HUE_PENDING;
+		c->s = 1;
+		c->b = 0.1f + (beat < 2 * LED_KEY_BEAT
+			       ? 0.9f * (0.5f - 0.5f * cosf(6.2831853f * (float)(beat / LED_KEY_BEAT))) : 0);
+		return 1;
+	}
+	case LED_KEY_CONFIRM:
+		if (z > LED_KEY_HELD_MOST)
+			return 0;
+		if (z < KEY_CONFIRM_SECONDS) {
+			c->h = LED_KEY_HUE_ON;
+			c->s = 1;
+			c->b = 0.06f + 0.94f * (float)(z / KEY_CONFIRM_SECONDS);
+			return 1;
+		}
+		*c = led_key_zone(LED_KEY_HUE_ON, 1, 0.3f, z - KEY_CONFIRM_SECONDS, 0.8);
 		return 1;
 	case LED_KEY_TAKEN:
 		if (z >= LED_KEY_FLASH) {

@@ -51,15 +51,20 @@ look returns when that is over.
 | After letting go | **Green, twice up** and staying a moment | Switched on |
 | | **Red, sinking** into the dark | Switched off |
 | | **Blue, breathing** | Waiting for a key (`init/key`), up to three minutes; a press ends it |
-| | A flash, then **blue turning through cyan to green** | The key is in |
-| | The blue goes out | The wait ended without a key |
+| A key has come | **Cyan, two beats and a rest** | The unit holds a key and has not kept it: hold the button 3 s to keep it, tap to discard it. A minute without a press discards it |
+| Held for that key, first 3 s | **Green, rising** out of the dark | Letting go at 3 s will keep the key; letting go before discards it |
+| Held 3 s | A white flash, then **green pulsing** | Let go now and the key is kept |
+| After letting go | A flash, then **blue turning through cyan to green** | The key is in |
+| | The blue goes out | The wait ended without a key, or the key that came was discarded |
 | | The red pales to white as it sinks | Erased |
 | | **Red, three times** | The key could not be kept |
 
 Which way the key will be switched is said twice, by colour and by direction (rising or sinking),
 because red against green is the colour blindness most people with one have. Green and red keep
-their meaning here (go, stop); blue is the colour of waiting to be paired. `w1700k-led DEVICE
---demo` walks through these after the receiver's looks.
+their meaning here (go, stop); blue is the colour of waiting to be paired, and cyan, between
+the two, of a key that is here and not yet taken. A key that waits is told from the wait for one
+by its rhythm as well: two beats and a rest, not a slow breath. `w1700k-led DEVICE --demo` walks
+through these after the receiver's looks.
 
 ## How it decides
 

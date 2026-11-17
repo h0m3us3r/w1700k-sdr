@@ -356,6 +356,13 @@ by how long you held it, and the LED says which stretch you are in
 | 10 s | a flash, then blue pulsing | opens the slot for a new key: three minutes, blue breathing |
 | 15 s | a flash, then red blinking hard | erases the slot's key |
 
+and once a key has come (cyan, two beats and a rest):
+
+| Held | The LED while held | Letting go |
+| --- | --- | --- |
+| under 3 s | green rising | discards the key |
+| 3 s | a flash, then green pulsing | keeps the key |
+
 The first five seconds already say which way the key would be switched, in
 colour and in direction: green rising out of the dark when it is off and would
 be switched on, red sinking from full when it is on and would be switched off.
@@ -364,10 +371,30 @@ seconds: white rises all that way, without the flash at five.
 
 While the slot is open the unit takes one line of text, a public key, on TCP
 port 7722 of its management address (`lan3`). It checks that the line is a
-whole public key of a type its ssh server takes, keeps it switched on, and
-answers; `init/key` then logs in with it. A line that is not a key is refused
-and the wait goes on; a press ends the wait. A new key replaces the one the
-slot held.
+whole public key of a type its ssh server takes. A line that is not a key is
+refused and the wait goes on; a press ends the wait.
+
+**A key that arrives is held, not kept.** Nothing is written and nothing logs
+in with it until you say so on the button:
+
+- The LED changes from blue breathing to cyan in two beats and a rest, and the
+  unit tells `init/key` which key it holds.
+- `init/key` says whether that is the key it sent. When it is, **hold the
+  button three seconds**, until the LED flashes and pulses green, and let go:
+  the key goes into the slot, switched on, and `init/key` logs in with it. A
+  new key replaces the one the slot held.
+- When it is not, somebody else's key reached the unit first. `init/key` says
+  so, with that key's fingerprint, and you **tap the button**: a press shorter
+  than three seconds discards the key. So does a minute without a press.
+- Either way that was the one key of this wait. Another needs the ten seconds
+  again.
+
+So the first key to arrive wins nothing by arriving. What you confirm is what
+`init/key` reports, and it reports what the unit told it over the cable:
+someone who can intercept and rewrite that traffic could make the two
+disagree. Program a key over a cable that runs from your machine to the unit,
+and if the login that `init/key` tries at the end fails, erase the slot
+(fifteen seconds) and look at who else is on that network.
 
 The unit's answer carries its ssh host key. `init/key` tries the login against
 exactly that key and prints the line for `known_hosts` (`--known-hosts FILE`
@@ -384,9 +411,10 @@ to, which is as good an introduction as a host key gets.
 - **It needs a loader that knows of the slot.** `init/key` says so when the
   unit's does not: the key then works until the unit restarts. `init/flash
   --ssh` brings the loader up to date.
-- **It is the button's, not the network's.** Nobody without a hand on the unit
-  can change the slot, and whoever has one could open the case and use the
-  serial console anyway. The slot holds what was last put in it: program your
+- **It is the button's, not the network's.** The network can offer a key; only
+  a hand on the unit puts one into the slot, switches it or erases it, and
+  whoever has a hand on the unit could open the case and use the serial
+  console anyway. The slot holds what was last put in it: program your
   own key into a unit that comes from someone else.
 - The key that `init/install` builds into the unit's root is separate and
   stays as it is; both log in.

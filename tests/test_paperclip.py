@@ -5,7 +5,10 @@ What is run here: the gestures and the key check (kernel/w1700k_sdr/keyd.h), the
 the button speaks (ledd.h), the service that watches the button (keyd.c, built for this host and
 given presses through a FIFO), the slot's program on the unit (w1700k-keyslot, over a directory
 standing in for durable storage), the loader handing the slot to the next boot (the model of
-tests/test_loader_update.py), and the host's end (init/key)."""
+tests/test_loader_update.py), and the host's end (init/key).
+
+A key that arrives is only held: the button keeps it (three seconds) or discards it (a tap, or a
+minute). The service's tests say that from the unit's side and the host's from the tool's."""
 import base64
 import os
 import shutil
@@ -224,6 +227,31 @@ class Led(Built):
         self.assertEqual(self.at('window 0', 179.0)[0], 1.0)
         self.assertEqual(self.at('window 0', 190.0)[0], 0.0, 'a record nobody ended')
 
+    def test_a_key_that_has_come_beats_cyan_in_pairs_until_the_hand_answers(self):
+        beats = self.at('pending 0 -', 0.15, 0.45, 0.3, 0.9, 1.2, 1.55, 28.15)
+        for own, hue, saturation, _ in beats:
+            self.assertEqual((own, hue, saturation), (1, 180, 1), 'cyan: neither the blue of waiting nor the green of kept')
+        first, second, between, rest, rest_again, next_first, later = (b[3] for b in beats)
+        self.assertGreater(first, 0.95)
+        self.assertGreater(second, 0.95, 'two beats')
+        self.assertLess(between, 0.15)
+        self.assertLess(rest, 0.15, 'and a rest as long as both')
+        self.assertLess(rest_again, 0.15)
+        self.assertGreater(next_first, 0.95)
+        self.assertAlmostEqual(later, first, places=2, msg='the same for as long as the key waits')
+        self.assertEqual(self.at('pending 0 -', 70)[0], 0, 'a record nobody ended: the LED is given back')
+
+    def test_held_for_that_key_green_rises_three_seconds_then_flashes_and_pulses(self):
+        rising = self.at('confirm 0 -', 0.1, 1.5, 2.9)
+        self.assertEqual([(own, hue, saturation) for own, hue, saturation, _ in rising], [(1, 120, 1)] * 3)
+        self.assertLess(rising[0][3], 0.15)
+        self.assertTrue(rising[0][3] < rising[1][3] < rising[2][3] > 0.9, rising)
+        own, _, saturation, brightness = self.at('confirm 0 -', 3.05)
+        self.assertEqual((own, saturation, brightness), (1, 0, 1), 'the flash: letting go now keeps the key')
+        own, hue, saturation, _ = self.at('confirm 0 -', 3.6)
+        self.assertEqual((own, hue, saturation), (1, 120, 1))
+        self.assertEqual(self.at('confirm 0 -', 70)[0], 0)
+
     def test_a_key_taken_turns_the_blue_through_cyan_to_green(self):
         self.assertEqual(self.at('taken 0', 0.05)[2:], (0.0, 1.0), 'a flash first')
         hues = [row[1] for row in self.at('taken 0', *[0.15 + k / 20 for k in range(22)])]
@@ -244,6 +272,8 @@ class Led(Built):
 class Service(Built):
     """w1700k-key with presses from a FIFO, short times, and a slot program that only takes notes."""
     TOGGLE, PROGRAM, PURGE, WINDOW = 0.3, 0.7, 1.2, 2.5
+    CONFIRM, PENDING = 0.4, 1.5
+    LONGER = {'test_a_sender_that_trickles_is_cut_off_and_holds_nothing_up': 6.0}       # where the times above are too short
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -270,7 +300,9 @@ esac
             [self.service, '--buttons', str(self.dir / 'buttons'), '--state', str(self.dir / 'state'),
              '--slot-state', str(self.dir / 'slot-state'), '--slot', str(slot), '--listen', '127.0.0.1',
              '--port', str(self.port), '--toggle', str(self.TOGGLE), '--program', str(self.PROGRAM),
-             '--purge', str(self.PURGE), '--window', str(self.WINDOW)], stderr=subprocess.PIPE, text=True)
+             '--purge', str(self.PURGE), '--window', str(self.LONGER.get(self._testMethodName, self.WINDOW)),
+             '--confirm', str(self.CONFIRM), '--pending', str(self.LONGER.get(self._testMethodName, self.PENDING))],
+            stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop)
         self.buttons = open(self.dir / 'buttons', 'w')
         self.addCleanup(self.buttons.close)
@@ -308,6 +340,19 @@ esac
         with socket.create_connection(('127.0.0.1', self.port), timeout=3) as link:
             link.sendall(line.encode() + b'\n')
             return link.makefile().readline().strip()
+
+    def sender(self, line):
+        """A sender that stays for the outcome: read its answers with .readline()."""
+        link = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        self.addCleanup(link.close)
+        link.sendall(line.encode() + b'\n')
+        reader = link.makefile()
+        self.addCleanup(reader.close)
+        return reader
+
+    def held(self, line):
+        kind, body = line.split()[:2]
+        return f'pending key={kind}:{body} hold={self.CONFIRM:g} within={self.PENDING:g}'
 
     def open_slot(self):
         self.press(self.PROGRAM + 0.15)
@@ -357,32 +402,108 @@ esac
         self.press(self.PURGE + 0.15)
         self.phase('empty')
 
-    def test_ten_seconds_open_the_slot_and_a_key_goes_in(self):
+    def test_ten_seconds_open_the_slot_and_a_key_is_held_until_the_button_keeps_it(self):
         with self.assertRaises(OSError, msg='closed until the button says so'):
             socket.create_connection(('127.0.0.1', self.port), timeout=1)
         self.open_slot()
-        self.assertEqual(self.offer(ed25519(7) + ' me@host'), 'ok persist=1 hostkey=ssh-ed25519:HOSTKEY')
+        sender = self.sender(ed25519(7) + ' me@host')
+        self.assertEqual(sender.readline().strip(), self.held(ed25519(7)), 'which key the unit holds, and what to do')
+        self.phase('pending')
+        time.sleep(0.2)
+        self.assertEqual(self.calls(), [], 'held, not kept: the slot was not touched')
+        self.assertFalse((self.dir / 'programmed').exists())
+        self.buttons.write('d'); self.buttons.flush()
+        self.phase('confirm')
+        time.sleep(self.CONFIRM + 0.15)
+        self.assertEqual(self.calls(), [], 'nothing until the button is let go')
+        self.buttons.write('u'); self.buttons.flush()
+        self.assertEqual(sender.readline().strip(), 'ok persist=1 hostkey=ssh-ed25519:HOSTKEY')
         self.phase('taken')
         kind, body = ed25519(7).split()
         self.assertEqual((self.dir / 'programmed').read_text(), f'{kind}:{body}\n')
+        self.assertEqual(self.calls(), ['program'])
         with self.assertRaises(OSError, msg='one key, and the slot is closed again'):
             socket.create_connection(('127.0.0.1', self.port), timeout=1)
+
+    def test_a_tap_discards_the_key_that_came(self):
+        self.open_slot()
+        sender = self.sender(ed25519(7))
+        self.assertTrue(sender.readline().startswith('pending '))
+        self.phase('pending')
+        self.press(0.1)
+        self.assertEqual(sender.readline().strip(), 'error: the key was discarded: the button was pressed, not held')
+        self.phase('closed')
+        self.assertEqual(self.calls(), [])
+        with self.assertRaises(OSError, msg='that was the one key of this wait'):
+            socket.create_connection(('127.0.0.1', self.port), timeout=1)
+        self.press(0.1)
+        self.phase('drain')
+
+    def test_a_key_nobody_holds_the_button_for_is_discarded(self):
+        self.open_slot()
+        sender = self.sender(ed25519(7))
+        self.assertTrue(sender.readline().startswith('pending '))
+        began = time.monotonic()
+        self.assertEqual(sender.readline().strip(), 'error: the key was discarded: nobody held the button for it in time')
+        self.assertAlmostEqual(time.monotonic() - began, self.PENDING, delta=0.5)
+        self.phase('closed')
+        self.assertEqual(self.calls(), [])
+        with self.assertRaises(OSError):
+            socket.create_connection(('127.0.0.1', self.port), timeout=1)
+
+    def test_one_key_a_wait_and_whoever_comes_second_is_told_whose_the_unit_holds(self):
+        self.open_slot()
+        first = self.sender(ed25519(7))
+        self.assertEqual(first.readline().strip(), self.held(ed25519(7)))
+        kind, body = ed25519(7).split()
+        for _ in range(3):
+            self.assertEqual(self.offer(ed25519(9)), f'busy key={kind}:{body}', 'the first key, for the second host to name')
+        self.press(self.CONFIRM + 0.15)
+        self.assertTrue(first.readline().startswith('ok '))
+        self.phase('taken')
+        self.assertEqual((self.dir / 'programmed').read_text(), f'{kind}:{body}\n', 'the first key, and only that')
+
+    def test_the_same_key_sent_again_is_still_the_held_one_and_its_newest_sender_hears(self):
+        self.open_slot()
+        first = self.sender(ed25519(7))
+        self.assertTrue(first.readline().startswith('pending '))
+        again = self.sender(ed25519(7) + ' the same, from a second run')
+        self.assertTrue(again.readline().startswith('pending key=ssh-ed25519:'))
+        self.assertEqual(first.readline(), '', 'the first run was let go')
+        self.press(self.CONFIRM + 0.15)
+        self.assertTrue(again.readline().startswith('ok '))
+        self.assertEqual(self.calls(), ['program'])
 
     def test_what_is_not_a_key_is_refused_and_the_wait_goes_on(self):
         self.open_slot()
         answer = self.offer(BAD['cut short'])
         self.assertTrue(answer.startswith('error: not a public key'), answer)
         self.assertEqual(self.calls(), [])
-        self.assertTrue(self.offer(ed25519()).startswith('ok '))
-        self.phase('taken')
+        self.assertTrue(self.offer(ed25519()).startswith('pending '))
+        self.phase('pending')
 
-    def test_five_lines_that_are_not_keys_end_the_wait(self):
+    def test_lines_that_are_not_keys_do_not_end_the_wait_however_many(self):
         self.open_slot()
-        for _ in range(5):
+        for _ in range(8):
             self.assertTrue(self.offer('nonsense').startswith('error:'))
-        self.phase('failed')
-        with self.assertRaises(OSError):
-            socket.create_connection(('127.0.0.1', self.port), timeout=1)
+        self.assertEqual(self.phase('window')[0], 'window', 'nobody on the network can close the slot')
+        self.assertTrue(self.offer(ed25519()).startswith('pending '))
+
+    def test_a_sender_that_trickles_is_cut_off_and_holds_nothing_up(self):
+        self.open_slot()
+        slow = socket.create_connection(('127.0.0.1', self.port), timeout=6)
+        self.addCleanup(slow.close)
+        began = time.monotonic()
+        slow.sendall(b'ssh-ed25519 AAAA')
+        time.sleep(0.3)
+        slow.sendall(b'C3Nz')
+        quick = self.sender(ed25519(7))
+        self.assertTrue(quick.readline().startswith('pending key=ssh-ed25519:'), 'heard beside the slow one')
+        self.assertLess(time.monotonic() - began, 1.5)
+        self.assertEqual(slow.makefile().readline().strip(), 'error: send one line, a public key, ended by a newline')
+        self.assertAlmostEqual(time.monotonic() - began, 3.0, delta=0.6, msg='three seconds all told, however it trickles')
+        self.press(self.CONFIRM + 0.15)
+        self.assertTrue(quick.readline().startswith('ok '), 'and the button was heard throughout')
 
     def test_a_press_ends_the_wait_and_means_no_more(self):
         self.open_slot()
@@ -403,7 +524,10 @@ esac
     def test_a_key_the_slot_cannot_keep_is_said_to_the_host_and_on_the_led(self):
         (self.dir / 'slot-fails').touch()
         self.open_slot()
-        self.assertTrue(self.offer(ed25519()).startswith('error: the unit could not keep the key'))
+        sender = self.sender(ed25519())
+        self.assertTrue(sender.readline().startswith('pending '))
+        self.press(self.CONFIRM + 0.15)
+        self.assertTrue(sender.readline().startswith('error: the unit could not keep the key'))
         self.phase('failed')
         self.press(self.TOGGLE + 0.15)
         self.phase('failed')
@@ -654,7 +778,8 @@ class NoLoginKey(unittest.TestCase):
 
 
 class Unit:
-    """A unit waiting for a key on a local port: answers each line offered with the next answer."""
+    """A unit waiting for a key on a local port: answers each line offered with the next answer
+    (several lines where the answer holds them), and hangs up."""
     def __init__(self, *answers):
         self.answers, self.offered = list(answers), []
         self.listener = socket.socket()
@@ -681,6 +806,8 @@ class Unit:
 class Host(unittest.TestCase):
     """init/key against a unit that waits (or does not)."""
     HOST = 'hostkey=' + ed25519(8).replace(' ', ':')
+    HELD = 'pending key=' + ed25519(2).replace(' ', ':') + ' hold=3 within=60'
+    KEPT = HELD + '\nok persist=1 ' + HOST
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -706,7 +833,7 @@ class Host(unittest.TestCase):
                              **options)
 
     def test_the_key_is_sent_as_its_type_and_body_and_the_login_is_tried_against_the_units_own_host_key(self):
-        unit = self.unit('ok persist=1 ' + self.HOST)
+        unit = self.unit(self.KEPT)
         self.assertEqual(self.send(unit), 0)
         self.assertEqual(unit.offered, [ed25519(2) + '\n'], 'no comment, nothing else')
         self.assertEqual(self.known, f'127.0.0.1 {ed25519(8)}\n')
@@ -719,6 +846,54 @@ class Host(unittest.TestCase):
         self.assertIn(paperclip.fingerprint(ed25519(2).split()[1]), text, 'which key went')
         self.assertIn(paperclip.fingerprint(ed25519(8).split()[1]), text, "the unit's host key, to compare")
         self.assertIn('login works', text)
+
+    def test_while_the_unit_holds_the_key_it_says_whose_it_is_and_what_the_hand_should_do(self):
+        unit = self.unit(self.KEPT)
+        self.assertEqual(self.send(unit), 0)
+        text = '\n'.join(self.said)
+        self.assertIn(f'the unit holds your key ({paperclip.fingerprint(ed25519(2).split()[1])})', text)
+        self.assertIn('HOLD the reset button 3 s', text)
+        self.assertIn('A tap discards it, and so do 60 s without a press', text)
+        self.assertLess(text.index('HOLD the reset button'), text.index('the unit has it'), 'before the outcome, not after')
+        self.assertNotIn('keeps the first key', text)
+
+    def test_a_unit_holding_somebody_elses_key_is_said_with_what_to_do_about_it(self):
+        unit = self.unit('busy key=' + ed25519(9).replace(' ', ':'))
+        with self.assertRaises(paperclip.KeyProblem) as raised:
+            self.send(unit)
+        text = str(raised.exception)
+        self.assertIn('holding another key, not yours: ' + paperclip.fingerprint(ed25519(9).split()[1]), text)
+        self.assertIn('DO NOT HOLD THE BUTTON. Tap it once', text)
+        self.assertEqual(self.ssh, [])
+        self.assertNotIn('HOLD the reset button', '\n'.join(self.said), 'never told to keep it')
+
+    def test_a_unit_that_says_it_holds_a_key_other_than_the_one_sent_is_not_believed(self):
+        for answer in ('pending key=' + ed25519(9).replace(' ', ':') + ' hold=3 within=60\nok persist=1 ' + self.HOST,
+                       'pending hold=3 within=60\nok persist=1 ' + self.HOST, 'pending key=nonsense'):
+            self.said.clear()
+            unit = self.unit(answer)
+            with self.subTest(answer[:24]), self.assertRaisesRegex(paperclip.KeyProblem, 'not the key sent. DO NOT HOLD'):
+                self.send(unit)
+            self.assertNotIn('HOLD the reset button', '\n'.join(self.said))
+        self.assertEqual(self.ssh, [])
+
+    def test_a_key_the_button_discarded_is_a_failure_in_the_units_words(self):
+        unit = self.unit(self.HELD + '\nerror: the key was discarded: the button was pressed, not held')
+        with self.assertRaisesRegex(paperclip.KeyProblem, 'did not take the key: the key was discarded: the button was pressed'):
+            self.send(unit)
+        self.assertEqual(self.ssh, [])
+
+    def test_a_unit_that_hangs_up_before_the_outcome(self):
+        unit = self.unit(self.HELD)
+        with self.assertRaisesRegex(paperclip.KeyProblem, 'did not take the key: it gave no answer'):
+            self.send(unit)
+
+    def test_a_unit_that_keeps_the_first_key_it_is_sent_is_said_to_need_an_update(self):
+        unit = self.unit('ok persist=1 ' + self.HOST)
+        self.assertEqual(self.send(unit), 0)
+        text = '\n'.join(self.said)
+        self.assertIn('keeps the first key it is sent', text)
+        self.assertIn('init/flash --ssh', text)
 
     def test_a_key_that_is_not_one_is_never_sent(self):
         unit = self.unit('ok persist=1 ' + self.HOST)
@@ -747,7 +922,7 @@ class Host(unittest.TestCase):
         self.assertEqual(sum('Hold its reset button' in line for line in self.said), 1, 'said once what to do')
 
     def test_it_waits_for_the_button(self):
-        unit = self.unit('ok persist=1 ' + self.HOST)
+        unit = self.unit(self.KEPT)
         attempts = []
 
         def connect(address, timeout):
@@ -759,12 +934,12 @@ class Host(unittest.TestCase):
         self.assertEqual(len(attempts), 4)
 
     def test_a_loader_that_does_not_keep_the_key_is_said(self):
-        unit = self.unit('ok persist=0 ' + self.HOST)
+        unit = self.unit(self.HELD + '\nok persist=0 ' + self.HOST)
         self.assertEqual(self.send(unit), 0)
         self.assertIn('until the unit restarts', '\n'.join(self.said))
 
     def test_a_key_taken_that_does_not_log_in_is_a_failure(self):
-        unit = self.unit('ok persist=1 ' + self.HOST)
+        unit = self.unit(self.KEPT)
         self.login_works = False
         self.assertEqual(self.send(unit), 1)
         self.assertIn('Permission denied', '\n'.join(self.said))
@@ -772,12 +947,12 @@ class Host(unittest.TestCase):
     def test_the_host_key_is_kept_where_asked_once(self):
         known = self.dir / 'known/hosts'
         for _ in range(2):
-            unit = self.unit('ok persist=1 ' + self.HOST)
+            unit = self.unit(self.KEPT)
             self.assertEqual(self.send(unit, known_hosts=known), 0)
         self.assertEqual(known.read_text(), f'127.0.0.1 {ed25519(8)}\n')
 
     def test_a_host_key_that_is_not_a_key_is_not_trusted(self):
-        unit = self.unit('ok persist=1 hostkey=ssh-ed25519:AAAA')
+        unit = self.unit(self.HELD + '\nok persist=1 hostkey=ssh-ed25519:AAAA')
         with self.assertRaises(paperclip.KeyProblem):
             self.send(unit)
         self.assertEqual(self.ssh, [])

@@ -4,7 +4,10 @@
 A unit has one slot for a login key that only a hand on the unit can change (the reset button;
 kernel/w1700k_sdr/keyd.h). Held ten seconds and let go, the button opens the slot for three
 minutes: the unit takes one line, a public key, on TCP port 7722 of its management address,
-checks it, keeps it, and answers. This is the other end of that.
+checks it and holds it, and says which key it holds. It keeps that key only when the button is
+then held three seconds; a tap, or a minute without a press, discards it. This is the other end
+of that: it sends the key, says whether the key the unit holds is the one it sent, and says what
+the hand on the button should do.
 
 The unit's answer also carries its ssh host key. It came over a cable to a unit someone is
 holding a paperclip to, which is as good an introduction as a host key gets: the login is tried
@@ -22,6 +25,7 @@ import time
 PORT = 7722
 KEY_TYPES = ('ssh-ed25519', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521', 'ssh-rsa')
 WAIT_SECONDS = 180
+OUTCOME_MARGIN = 15     # seconds past the unit's own limit to wait for what the button decided
 
 
 class KeyProblem(ValueError):
@@ -64,9 +68,38 @@ def default_key():
     raise KeyProblem('no public key: name one, or create ~/.ssh/id_ed25519.pub (ssh-keygen -t ed25519)')
 
 
+def _line(reader):
+    """The words of one line of the unit's answer; none when it hung up without one."""
+    return reader.readline(4096).decode('ascii', 'replace').split()
+
+
+def _number(words, name, default):
+    for word in words:
+        if word.startswith(name + '='):
+            try:
+                return float(word.split('=', 1)[1])
+            except ValueError:
+                break
+    return default
+
+
+def _held(words):
+    """The fingerprint of the key the unit says it holds ("key=TYPE:BASE64"), and that key."""
+    for word in words:
+        if word.startswith('key=') and ':' in word:
+            kind, body = word[4:].split(':', 1)
+            try:
+                public_key(f'{kind} {body}')
+            except KeyProblem:
+                break
+            return fingerprint(body), f'{kind} {body}'
+    return 'a key it did not name', None
+
+
 def send(address, line, port=PORT, wait=WAIT_SECONDS, connect=socket.create_connection,
          clock=time.monotonic, sleep=time.sleep, say=print):
-    """Send the key once the unit is waiting; what it answered, as {name: value}."""
+    """Send the key once the unit is waiting, and see it through the button; what the unit
+    answered when it kept the key, as {name: value}."""
     deadline, told = clock() + wait, False
     while True:
         try:
@@ -75,21 +108,45 @@ def send(address, line, port=PORT, wait=WAIT_SECONDS, connect=socket.create_conn
         except OSError as error:
             if clock() >= deadline:
                 raise KeyProblem(f'the unit at {address} did not open its slot in {wait:.0f} s ({error}). '
-                                'Hold the reset button ten seconds, until the LED pulses blue, and let go')
+                                'Hold the reset button ten seconds, until the LED pulses blue, and let go. If you '
+                                'did, and the LED went on to beat cyan in pairs without this having sent a key, '
+                                'the unit is holding a key from somewhere else: tap the button once to discard it')
             if not told:
                 say('key: waiting for the unit. Hold its reset button with a paperclip until the LED flashes and '
                     'pulses blue, ten seconds, and let go then.')
                 told = True
             sleep(0.5)
-    with link:
+    with link, link.makefile('rb') as reader:
         link.sendall(line.encode() + b'\n')
-        answer = b''
-        while not answer.endswith(b'\n') and len(answer) < 4096:
-            piece = link.recv(4096)
-            if not piece:
-                break
-            answer += piece
-    words = answer.decode('ascii', 'replace').split()
+        try:
+            words = _line(reader)
+        except OSError as error:
+            raise KeyProblem(f'the unit did not answer ({error}). If its LED beats cyan in pairs it is holding a '
+                             'key, and nothing here says it is yours: tap the button once to discard it, and start '
+                             'again')
+        if words[:1] == ['busy']:
+            theirs, _ = _held(words)
+            raise KeyProblem(f'the unit is holding another key, not yours: {theirs}. Somebody else sent one first. '
+                             'DO NOT HOLD THE BUTTON. Tap it once: that discards the key (the LED goes out). Then '
+                             'find out who else reaches this unit before you start again')
+        if words[:1] == ['pending']:
+            theirs, held = _held(words)
+            if held != line:
+                raise KeyProblem(f'the unit says it holds {theirs}, which is not the key sent. DO NOT HOLD THE '
+                                 'BUTTON. Tap it once: that discards the key')
+            hold, within = _number(words, 'hold', 3), _number(words, 'within', 60)
+            say(f'key: the unit holds your key ({theirs}) and has not kept it yet. Its LED beats cyan in pairs.')
+            say(f'key: HOLD the reset button {hold:.0f} s, until the LED flashes and pulses green, and let go: that '
+                f'keeps it. A tap discards it, and so do {within:.0f} s without a press.')
+            link.settimeout(within + OUTCOME_MARGIN)
+            try:
+                words = _line(reader)
+            except OSError as error:
+                raise KeyProblem(f'the unit did not say what became of the key ({error}); try ssh root@{address}, '
+                                 'and start again if it does not log in')
+        elif words[:1] == ['ok']:
+            say("key: this unit's software keeps the first key it is sent, without asking the button again. "
+                'It kept yours. Update the unit (init/flash --ssh) and it asks')
     if not words or words[0] != 'ok':
         raise KeyProblem('the unit did not take the key: ' + (' '.join(words[1:] if words[:1] == ['error:'] else words)
                                                               or 'it gave no answer'))

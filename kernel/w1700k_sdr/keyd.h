@@ -8,12 +8,20 @@
  *
  *   held KEY_TOGGLE_SECONDS, released     the slot's key is switched off, or on again
  *   held KEY_PROGRAM_SECONDS, released    programming: for KEY_WINDOW_SECONDS the unit takes one
- *                                         public key on its management address, and keeps it.
- *                                         A press in that time ends it
+ *                                         public key on its management address. A press in that
+ *                                         time ends it
  *   held KEY_PURGE_SECONDS, released      the slot's key is erased
  *
  * What a press means is decided when the button is released, by how long it was held; a shorter
  * press means nothing.
+ *
+ * A key that arrives is held, not kept: the network may offer one, only the hand takes it.
+ *
+ *   held KEY_CONFIRM_SECONDS, released    the key that arrived goes into the slot
+ *   a shorter press                       it is discarded
+ *   KEY_PENDING_SECONDS with no press     it is discarded
+ *
+ * Either way that was the one key of this programming: another needs the button held again.
  */
 #ifndef W1700K_KEYD_H
 #define W1700K_KEYD_H
@@ -25,6 +33,8 @@
 #define KEY_PROGRAM_SECONDS	10.0
 #define KEY_PURGE_SECONDS	15.0
 #define KEY_WINDOW_SECONDS	180.0
+#define KEY_CONFIRM_SECONDS	3.0
+#define KEY_PENDING_SECONDS	60.0
 #define KEY_PORT		7722
 #define KEY_LINE_MAX		1100	/* a 4096-bit RSA key and a comment */
 #define KEY_BLOB_MAX		800	/* base64 characters */
