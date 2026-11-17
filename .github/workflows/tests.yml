@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: MIT
+# The test suite, on every pull request and on main.
+#
+# What runs: `make check`, after building the two things the tests cannot do without, the radio
+# firmware and the host programs (seconds each). That is every test that needs no unit and no
+# full platform build. The tests that need the kernel, the root filesystem or the boot images
+# built skip here and say so: those builds take hours and gigabytes, and `make` then `make check`
+# on a development machine is where they run.
+#
+# The page `make check` writes, every test with its outcome, time and reason if skipped, is kept
+# with each run as an artifact.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: make check (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Python the READMEs promise, and a current one.
+        python: ['3.10', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install what the tests build with
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld llvm pkg-config \
+            libfftw3-dev libsoapysdr-dev zlib1g-dev libssl-dev
+          python3 -m pip install pyserial
+
+      - name: Build the firmware and the host programs
+        run: make firmware host
+
+      - name: Run the tests
+        run: make check
+
+      - name: Keep the test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-report-python-${{ matrix.python }}
+          path: |
+            tests/build/report.html
+            tests/build/report.json
+          if-no-files-found: warn

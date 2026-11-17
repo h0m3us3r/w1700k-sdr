@@ -139,6 +139,7 @@ class Led(unittest.TestCase):
         self.assertEqual(self.look(self.record(), ended=1), 'steady 120 1.00 0.70 0.00 0.00 turn 0',
                          'a done file left by a stream the host stopped means nothing')
 
+    @unittest.skipUnless((ROOT / 'firmware/build/firmware.json').is_file(), 'firmware not built')
     def test_the_record_the_controller_writes(self):
         """The real thing: a controller against the fake unit, its state file read by the LED."""
         unit = host_fake.FakeUnit()

@@ -241,6 +241,13 @@ installation and updates, the radio's packing kernels run from their machine
 code in an emulator, the loader's update script run against a model of the
 flash, and the host programs fed over loopback.
 
+Every pull request, and `main`, has it run on GitHub
+(`.github/workflows/tests.yml`): `make firmware host`, then `make check`, on
+the oldest Python the project promises and on a current one, with the report
+page kept with each run. The tests that need the kernel, the root filesystem
+or the boot images built skip there and say so; they run where `make` has
+been run.
+
 `make sweep` (`tools/unit_sweep.py`) does what they cannot. With a unit
 reachable and `w1700k-stream` running, it runs every band at every sample rate,
 every other packing the link carries, and the 640/2 capture, a few seconds
