@@ -36,6 +36,16 @@ into ROM after it; the build refuses an object with relocations and re-decodes i
 None of MediaTek's 26 ROM redirects is in it, and none of the eFuse "recovery" their 2025 and
 later patches run. It loads on parts with unprovisioned security fuses.
 
+The set is written for one ROM. A hook is a ROM instruction's address and the bytes found
+there, the hooks call ROM functions by address, and so does the WM. In another revision of the
+ROM those addresses are the middle of something else, and the ROM holds a routine that
+programs eFuses. So `rom_patch/patch.py` names the ROM by the SHA-256 of its first 64 KiB (the
+part the driver lets a host read), `firmware.json` carries that, and the host reads the ROM
+after the reset and downloads nothing onto any other (`host/w1700k/radio.py`). The hash is
+that of one hardware 2.1 unit. A radio that hashes otherwise is refused with the hash it has,
+to report; `"unknown_rom": true` in the host's configuration loads all the same, for studying
+such a revision and at that radio's risk.
+
 ## The WM (`wm/`, `radio/`)
 
 - `wm/start.S`: entry from FW_START at `0x00916400`; records the core as the ROM handed it

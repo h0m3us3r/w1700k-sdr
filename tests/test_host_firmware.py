@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""firmware.json, schema 2 (firmware/build.py: our ROM patch, WM and WA in download order), as the
-host reads it; where the RISC-V toolchain is installed, the built set itself."""
+"""firmware.json, schema 3 (firmware/build.py: our ROM patch, WM and WA in download order, and the
+ROM they are written for), as the host reads it; where the RISC-V toolchain is installed, the built set itself."""
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -31,13 +32,20 @@ class Manifest(unittest.TestCase):
                          [self.dir / name for name in ('w1700k_rom_patch.bin', 'w1700k_wm.bin', 'w1700k_wa.bin')])
         self.assertEqual([c.flags for c in fw.containers], [(), (), ('--wa',)])
         self.assertEqual(fw.containers[1].data(), b'wm' * 64)
+        self.assertEqual((fw.rom.base, fw.rom.size, fw.rom.sha256),
+                         (0x00800000, 0x10000, (hashlib.sha256(host_fake.ROM).hexdigest(),)))
         (self.dir / 'w1700k_wm.bin').write_bytes(b'changed')
         with self.assertRaisesRegex(firmware.FirmwareError, 'does not match firmware.json'):
             fw.containers[1].data()
 
     def test_refusals(self):
         containers = self.manifest['containers']
-        bad = [dict(self.manifest, schema=1), {'containers': containers}, [],
+        rom = self.manifest['rom']
+        bad = [dict(self.manifest, schema=1), dict(self.manifest, schema=2), {'containers': containers}, [],
+               {k: v for k, v in self.manifest.items() if k != 'rom'},
+               dict(self.manifest, rom=dict(rom, sha256=[])), dict(self.manifest, rom=dict(rom, sha256=['00'])),
+               dict(self.manifest, rom=dict(rom, size=1000)), dict(self.manifest, rom=dict(rom, base='0x800000')),
+               dict(self.manifest, rom=[]),
                dict(self.manifest, containers=containers[::-1]),
                dict(self.manifest, containers=containers[:2]),
                dict(self.manifest, containers=containers + [dict(containers[0], role='dsp')]),
@@ -73,6 +81,8 @@ class Built(unittest.TestCase):
             self.assertEqual([(c.role, c.path.name, c.flags) for c in fw.containers],
                              [('patch', 'w1700k_rom_patch.bin', ()), ('wm', 'w1700k_wm.bin', ()),
                               ('wa', 'w1700k_wa.bin', ('--wa',))])
+            self.assertEqual((fw.rom.base, fw.rom.size), (0x00800000, 0x10000), 'the part of the ROM a host may read')
+            self.assertEqual(len(fw.rom.sha256), 1)
             for c in fw.containers:
                 self.assertEqual(len(c.data()), c.size)
 

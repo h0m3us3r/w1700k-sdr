@@ -55,11 +55,11 @@ class WmError(RuntimeError):
     pass
 
 
-def load(radio, firmware, module):
-    """A fresh driver, then our set: patch, WM, WA."""
+def load(radio, firmware, module, unknown_rom=False):
+    """A fresh driver, then our set, onto the ROM it is written for: patch, WM, WA."""
     radio.stage(firmware.containers)
     radio.replace_module(module)
-    radio.download(firmware.containers)
+    radio.download(firmware.containers, firmware.rom, unknown_rom)
 
 
 class Wm:

@@ -140,7 +140,7 @@ class Controller:
         self.config = config
         self.emit = emit or (lambda event: None)
         self.unit = unit or Unit(config.unit)
-        self.radio = Radio(self.unit)
+        self.radio = Radio(self.unit, warn=lambda text: self._log('warn', text))
         self.stream = Stream(self.unit)
         self._ctl = None
         self.boot_id = None
@@ -572,7 +572,7 @@ class Controller:
         self.loaded, self.bands_ready, self.lo_lock = False, [], {}
         self._save()
         self._progress('loading our firmware', 0.0)
-        wm.load(self.radio, fw, self.config.unit.module)
+        wm.load(self.radio, fw, self.config.unit.module, self.config.unknown_rom)
         w = self._wm()
         w.wait_running()
         self._progress('bringing the radio up', 0.3)

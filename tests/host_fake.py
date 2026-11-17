@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / 'host'))
 
 from w1700k import radio, rf, stream, wm  # noqa: E402
 from w1700k.config import Config, ExportConfig, UnitConfig  # noqa: E402
-from w1700k.unit import StepResult, UnitError  # noqa: E402
+from w1700k.unit import OUT, StepResult, UnitError  # noqa: E402
 
 BOOT_ID = '01234567-89ab-cdef-0123-456789abcdef'
 
@@ -69,8 +69,11 @@ class FakeDevice:
         self.adie = {}                    # A-die registers by die << 16 | k << 12 | index
         self.wm_up = False                # our WM runs its main loop
         self.wa_up = False
-        self.downloads = []               # per download step: ('acquire',), ('--reset',) or (file, *flags)
+        self.downloads = []               # per download step: ('acquire',), ('--reset',), ('rom',) for the
+                                          # ROM's read, or (file, *flags)
         self.download_failure = None      # a container file name whose download fails
+        self.rom = ROM                    # the boot ROM, as a host reads it
+        self.rom_read_failure = None      # an address at which its read fails
         self.radio_commands = []          # (name, args) per radio command our WM took
         self.radio_failures = {}          # name -> (res, fail code, fail arg): its next command fails so
         self.channels = {}                # band -> (LO Hz, bw class) of its SETUP, the class after a RATE
@@ -600,6 +603,15 @@ class FakeUnit:
         if name == 'mt7996-probe' and argv[1:] == ['/dev/w1700k-sdr', '0x00901000', '4', '--acquire']:
             d.downloads.append(('acquire',))
             return StepResult(0, b'{"at":"read","pass":1,"ok":true,"word0":"0x00000000"}\n', b'', b'')
+        if name == 'mt7996-probe' and argv[1] == '/dev/w1700k-sdr' and argv[4:] == ['--raw', OUT]:
+            at, n = int(argv[2], 16), int(argv[3])
+            if d.downloads[-1:] != [('acquire',)] and d.downloads[-1:] != [('rom',)]:
+                raise AssertionError('the ROM is read with host ownership, before anything is downloaded')
+            if d.downloads[-1] != ('rom',):
+                d.downloads.append(('rom',))
+            if at == d.rom_read_failure:
+                return StepResult(1, b'{"at":"read","pass":1,"ok":false,"errno":"Input/output error"}\n', b'', b'')
+            return StepResult(0, b'{"at":"read","pass":1,"ok":true}\n', b'', d.rom[at - ROM_BASE:at - ROM_BASE + n])
         if name == 'mt7996-download' and argv[1:] == ['/dev/w1700k-sdr', '--reset']:
             d.downloads.append(('--reset',))
             d.reset()
@@ -619,8 +631,12 @@ class FakeUnit:
 FILES = {'patch': 'w1700k_rom_patch.bin', 'wm': 'w1700k_wm.bin', 'wa': 'w1700k_wa.bin'}
 
 
+ROM_BASE, ROM = 0x00800000, bytes(range(256)) * 256           # the fake radio's boot ROM: 64 KiB
+
+
 def make_firmware(directory):
-    """A schema 2 firmware.json set (firmware/build.py) with small stand-in images."""
+    """A schema 3 firmware.json set (firmware/build.py) with small stand-in images, written for the
+    fake radio's ROM."""
     directory = Path(directory)
     containers = []
     for role, name in FILES.items():
@@ -628,7 +644,8 @@ def make_firmware(directory):
         (directory / name).write_bytes(data)
         containers.append({'role': role, 'file': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
                            'flags': ['--wa'] if role == 'wa' else []})
-    manifest = {'schema': 2, 'containers': containers}
+    manifest = {'schema': 3, 'rom': {'base': ROM_BASE, 'size': len(ROM), 'sha256': [hashlib.sha256(ROM).hexdigest()]},
+                'containers': containers}
     (directory / 'firmware.json').write_text(json.dumps(manifest))
     return manifest
 

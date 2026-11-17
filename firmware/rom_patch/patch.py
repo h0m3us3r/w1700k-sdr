@@ -42,6 +42,20 @@ CODE_LIMIT = 0x100
 POOL_BANKS = 704                  # the UMAC SYSRAM pool in 2 KiB banks
 
 
+# The ROM everything here is written for. A hook is a ROM instruction's address, the bytes found
+# there, and ROM functions called by address; the WM calls ROM routines by address too
+# (include/hw/mt7996/rom_patch.h). In another revision of the ROM those addresses are the middle
+# of something else, and among what the ROM holds is a routine that programs eFuses. So the host
+# reads the ROM before it downloads this patch, and loads onto no ROM but one named here
+# (host/w1700k/radio.py).
+#
+# What is hashed is the ROM's first 64 KiB, the part the driver lets a host read
+# (kernel/w1700k_sdr/mmio.c). The ROM is longer; a revision that differs from this one only
+# past that would pass. [measured: one HW 2.1 unit, read twice before any download, 2026-11-17]
+ROM_BASE, ROM_BYTES = 0x00800000, 0x10000
+ROM_SHA256 = ('596f4aeb590f1765980eefedffa39e70585f1a3249ac0b936585ecc0f1e38c07',)
+
+
 @dataclass(frozen=True)
 class Hook:
     source: str                   # replacement body, relative to this directory

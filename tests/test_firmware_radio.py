@@ -12,6 +12,7 @@ mock.c and radio.c each define radio_ee and radio_id (tentative definitions); -f
 """
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -92,8 +93,9 @@ class RadioCode(unittest.TestCase):
         cls.tmp.cleanup()
 
     @classmethod
-    def load(cls, mode):
-        out = subprocess.run([str(cls.binary), str(cls.eeprom), mode], capture_output=True, text=True, check=True)
+    def load(cls, mode, **environment):
+        out = subprocess.run([str(cls.binary), str(cls.eeprom), mode], capture_output=True, text=True, check=True,
+                             env=dict(os.environ, **environment))
         results = [line.split() for line in out.stderr.splitlines() if line.startswith('result ')]
         results = [dict(name=f[1], arg=int(f[2]), res=int(f[4]), fail=(int(f[6]), int(f[7], 16), int(f[8])),
                         state=int(f[10], 16)) for f in results]
@@ -165,6 +167,43 @@ class RadioCode(unittest.TestCase):
         only a stream arms the route."""
         route = re.compile(r'W 880090[0-2][0-9a-f] ')
         self.assertFalse([line for line in self.accesses(self.commands) if route.match(line)])
+
+    def test_nothing_a_load_does_can_transmit_or_burn_a_fuse(self):
+        """Every access of bring-up, the three bands' set-up and DCOC, capture, rate and select, as
+        the mock logs them. This is a receiver: the MAC's transmit stays disabled in every word
+        written to it, no A-die chain is given a transmit bit, and the eFuse controller, the
+        semaphores and the ROM (but for the pool's layout) are left alone."""
+        arb = {'820e3000': 0, '820f3000': 1, '830e3000': 2}                # MT7996_LMAC_ARB_SCR(band)
+        tx_dis, rx_dis, chain_tx = 1 << 8, 1 << 9, 0x01F80004             # ..._TX_DIS, _RX_DIS; ADIE_CHAIN_EN_TX_MASK
+        for run in (self.commands, self.steps):
+            received = set()
+            for line in self.accesses(run):
+                f = line.split()
+                if f[0] == 'W' and f[1] in arb:
+                    self.assertTrue(int(f[2], 16) & tx_dis, f'the MAC\'s transmit enabled: {line}')
+                    if not int(f[2], 16) & rx_dis:
+                        received.add(arb[f[1]])
+                if f[0] == 'AW' and int(f[3], 16) == 0x010:                # ADIE_CHAIN_EN
+                    self.assertFalse(int(f[4], 16) & chain_tx, f'a chain\'s transmit blocks enabled: {line}')
+                if f[0] in ('W', 'R'):
+                    address = int(f[1], 16)
+                    self.assertFalse(0x70021000 <= address < 0x70022000, f'the eFuse controller: {line}')
+                    self.assertFalse(0x7C070000 <= address < 0x7C070400, f'a semaphore: {line}')
+                if line.startswith('# rom call'):
+                    self.assertEqual(line, '# rom call 00822b92(100, 0, 1c0, 1)', 'the pool layout, and no other ROM routine')
+            self.assertEqual(received, {0, 1, 2}, 'and each band was set receiving, with transmit disabled in the same word')
+        chains = {line.split()[4] for line in self.accesses(self.commands)
+                  if line.startswith('AW') and int(line.split()[3], 16) == 0x010}
+        self.assertEqual(chains, {'00000000', '0003fbcb', '8003fbcb'}, 'off, receive, and receive under DCOC: no other state')
+
+    def test_setting_a_band_receiving_disables_transmit_whatever_the_word_held(self):
+        """Not left to the reset value: with transmit found enabled, the word written when a band
+        is set receiving disables it."""
+        run = self.load('commands', RADIO_SMOKE_ARB_SCR='0xf0007000')         # the reset value less TX_DIS and RX_DIS
+        written = [int(line.split()[2], 16) for band in range(3) for line in self.segment('capture', band, run)
+                   if line.startswith(('W 820e3000', 'W 820f3000', 'W 830e3000'))]
+        self.assertEqual(len(written), 3)
+        self.assertEqual({value & 0x300 for value in written}, {0x100}, 'TX_DIS set and RX_DIS clear, on each band')
 
     def test_select_is_the_band_switch(self):
         """SELECT leaves ICAPCR8 of the three ICAPs as the RF band switch writes it mid-stream."""
