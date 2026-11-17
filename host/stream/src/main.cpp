@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "ingest.h"
+#include "awake.h"
 #include "placement.h"
 #include "publish.h"
 
@@ -41,7 +42,9 @@ void usage()
                  "  --name NAME       the shared-memory object (default /w1700k-stream)\n"
                  "  --report S        a JSON status line every S seconds (default 0: none)\n"
                  "  --share-irq-cpu   run also on the CPU that takes the interface's packets (default: where\n"
-                 "                    one CPU takes them all, as with a USB adapter, stay off it)\n");
+                 "                    one CPU takes them all, as with a USB adapter, stay off it)\n"
+                 "  --deep-idle       let the host idle as deeply as it likes while a stream arrives (default:\n"
+                 "                    ask the kernel to keep the CPUs out of deep idle for as long as one does)\n");
 }
 
 unsigned positive(const std::string &option, const std::string &text, unsigned long max)
@@ -64,7 +67,7 @@ int main(int argc, char **argv)
 {
     std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME, unit;
     unsigned port = 7700, rx_threads = 8, workers = 6, ring_mib = 512, receive_mib = kReceiveMib, report = 0;
-    bool share_irq_cpu = false;
+    bool share_irq_cpu = false, deep_idle = false;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -82,6 +85,7 @@ int main(int argc, char **argv)
             else if (arg == "--name") name = value();
             else if (arg == "--report") report = positive(arg, value(), 3600);
             else if (arg == "--share-irq-cpu") share_irq_cpu = true;
+            else if (arg == "--deep-idle") deep_idle = true;
             else if (arg == "-h" || arg == "--help") {
                 usage();
                 return 0;
@@ -105,6 +109,7 @@ int main(int argc, char **argv)
         SampleRing received(receive_mib * 128);
         Ingest ingest(received, bind, port, rx_threads, unit);
         Publisher publisher(received, ingest, shared.header(), workers);
+        if (deep_idle) awake::state.store(awake::kRefused, std::memory_order_relaxed);  // as if it could not ask
         publisher.start();
         ingest.start();
         shared.ready();
@@ -114,7 +119,16 @@ int main(int argc, char **argv)
         // moved, after this service started.
         int avoided = -1;
         unsigned tick = 0;
+        // The receive threads ask for the host to be kept awake when datagrams arrive; two
+        // seconds without any, and it may sleep as it likes again.
+        uint64_t arrived = 0;
+        unsigned quiet = 0;
         while (!stop_requested) {
+            const uint64_t datagrams = ingest.stats().datagrams;
+            quiet = datagrams == arrived ? quiet + 1 : 0;
+            arrived = datagrams;
+            if (quiet == 20 && !deep_idle && awake::state.load(std::memory_order_relaxed) != awake::kIdle)
+                awake::release();
             if (!share_irq_cpu && tick++ % 20 == 0) {
                 const std::string interface = placement::interface_of(bind);
                 const int cpu = placement::receive_cpu(interface);

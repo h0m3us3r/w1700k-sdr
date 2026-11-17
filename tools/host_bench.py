@@ -31,6 +31,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -138,6 +139,16 @@ def receive_placement(interface, sys_root='/sys', proc_root='/proc'):
         if read(device / 'irq', '0').isdigit() and int(read(device / 'irq', '0')) > 0:
             out['irq'] = int(read(device / 'irq'))
             break
+        if re.fullmatch(r'usb\d+', device.name):
+            # A USB controller that is no PCI device shows neither: its interrupt is listed under
+            # the name of one of its buses (xhci-hcd:usb1), not always the adapter's.
+            buses = [device.name] + sorted(p.name for p in device.parent.glob('usb[0-9]*') if p != device)
+            listed = read(Path(proc_root, 'interrupts'))
+            found = [int(m.group(1)) for bus in buses
+                     for m in re.finditer(rf'^\s*(\d+):.*:{bus}(?:,|\s*$)', listed, re.M)]
+            if found:
+                out['irq'] = found[0]
+                break
         device = device.parent
     if out['irq'] is not None:
         out['irq_cpu'] = read(Path(proc_root, 'irq', str(out['irq']), 'effective_affinity_list')) or None

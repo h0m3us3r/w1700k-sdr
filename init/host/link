@@ -26,13 +26,28 @@
 # interrupt moved alone, 1 with both. An interface with several queues is left as
 # it is. `down` puts both back.
 #
+# Given an MTU, the user who ran sudo is also given /dev/cpu_dma_latency, the file
+# through which the kernel is asked to keep the CPUs out of their deep idle states,
+# and w1700k-stream asks while datagrams arrive (host/stream/src/awake.h). A
+# stream at 40 or 80 Msps arrives in clumps with idle stretches between them, long
+# enough for a host to put every CPU to sleep and then enter its deepest,
+# whole-system state, which no CPU awake allows. On an arm64 host whose CPU sleep
+# state takes 1.3 ms to leave, an RTL8159 missed 1 datagram in 250 of the 16-bit
+# format at 40 Msps (0.3 to 0.9 % of slices over eleven runs) and 1 in 500 at 80;
+# with any one CPU kept busy instead, 10 slices of 389,000 and 8 of 783,000.
+# Faster streams keep the host awake by themselves. Whoever holds that file can
+# cost the machine its idle power and nothing else. Run as root itself, there is
+# nobody to give it to, and a w1700k-stream that is not root's says it cannot ask.
+#
 # `up` lasts until the interface goes away: a reboot, or a USB adapter pulled and
 # plugged in again, which comes back with an MTU of 1500 and drops the stream's
 # 8 KiB packets without a word. `keep` also has NetworkManager hold the address,
 # the MTU and the ring, and writes the spreading into a hook NetworkManager runs
 # when IFACE comes up (/etc/NetworkManager/dispatcher.d/60-w1700k-IFACE), so that
-# all of it is applied whenever the interface appears. Without NetworkManager it
-# says so, and `up` has to be repeated.
+# all of it is applied whenever the interface appears, and the owner of
+# /dev/cpu_dma_latency into a udev rule (/etc/udev/rules.d/60-w1700k-stream.rules;
+# delete it to undo), since /dev is made anew at every boot. Without
+# NetworkManager it says so, and `up` has to be repeated.
 #
 # Where NetworkManager keeps them: in a connection of its own for the interface,
 # `w1700k-IFACE`, with the address set by hand (ipv4.method manual) and a higher
@@ -69,6 +84,14 @@ spread() {
 	while [ "$dev" != "${W1700K_LINK_SYSROOT:-}/sys/devices" ] && [ "$dev" != / ] && [ "$dev" != . ]; do
 		if [ -d "$dev/msi_irqs" ]; then irq=$(ls "$dev/msi_irqs" | head -1); break; fi
 		if [ -r "$dev/irq" ] && [ "$(cat "$dev/irq")" != 0 ]; then irq=$(cat "$dev/irq"); break; fi
+		# A USB controller that is no PCI device shows neither: its interrupt is listed
+		# under the name of one of its buses (xhci-hcd:usb1), not always the adapter's.
+		case ${dev##*/} in usb[0-9]*)
+			for bus in "$dev" "${dev%/*}"/usb[0-9]*; do
+				irq=$(awk -v n=":${bus##*/}" '$0 ~ n"(,|$)" { sub(":", "", $1); print $1; exit }' "${W1700K_LINK_SYSROOT:-}/proc/interrupts" 2>/dev/null)
+				[ -z "$irq" ] || break 2
+			done ;;
+		esac
 		dev=$(dirname "$dev")
 	done
 	if [ "$2" = on ]; then
@@ -82,6 +105,13 @@ spread() {
 SPREAD
 )
 eval "$spread_source"
+
+latency=$sysroot/dev/cpu_dma_latency
+awake()	# the user who ran sudo may ask the kernel to keep the CPUs out of deep idle
+{
+	[ -c "$latency" ] && [ -n "${SUDO_UID:-}" ] && [ "$SUDO_UID" != 0 ] || return 0
+	chown "$SUDO_UID" "$latency" || echo "$0: could not give $latency to user $SUDO_UID" >&2
+}
 
 nm_runs() { command -v nmcli >/dev/null && nmcli -t general status >/dev/null 2>&1; }
 nm_get() { nmcli -g "$1" connection show "$2" 2>/dev/null; }		# one setting of a connection
@@ -180,6 +210,14 @@ keep()	# NetworkManager keeps $cidr, $mtu and the largest receive ring on $iface
 	} > "$hook"
 	chmod 755 "$hook"
 	echo "$0: and in $hook"
+	rule=$sysroot/etc/udev/rules.d/60-w1700k-stream.rules
+	[ -c "$latency" ] && [ -n "${SUDO_UID:-}" ] && [ "$SUDO_UID" != 0 ] && [ -d "$(dirname "$rule")" ] || return 0
+	{
+		echo "# Written by init/host/link keep $iface: w1700k-stream, run by this user, may ask the"
+		echo '# kernel to keep the CPUs out of deep idle while a stream arrives. Delete this file to undo.'
+		echo "KERNEL==\"cpu_dma_latency\", OWNER=\"$SUDO_UID\""
+	} > "$rule"
+	echo "$0: and /dev/cpu_dma_latency is user $SUDO_UID's, in $rule"
 }
 
 # `up` beside a NetworkManager that is asking $iface for an address by DHCP and has none yet: when
@@ -208,7 +246,7 @@ up|keep)
 		[ -z "$rx" ] || [ "$rx" = "$now" ] || ethtool -G "$iface" rx "$rx" 2>/dev/null ||
 			echo "$0: could not raise the $iface receive ring" >&2
 	fi
-	[ -z "$mtu" ] || spread "$iface" on
+	[ -z "$mtu" ] || { spread "$iface" on; awake; }
 	ip link set dev "$iface" up
 	if [ "$action" = keep ]; then
 		keep

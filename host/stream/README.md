@@ -29,6 +29,7 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 | `--name NAME` | `/w1700k-stream` | the shared-memory object (`/dev/shm/w1700k-stream`) |
 | `--report S` | 0 | a JSON status line on stdout every S seconds |
 | `--share-irq-cpu` | | run also on the CPU that takes the interface's packets (see below) |
+| `--deep-idle` | | let the host idle as deeply as it likes while a stream arrives (see below) |
 
 The object is the user's who runs the service, and its consumers run as that user: it is made
 readable and writable by its owner alone, and a consumer opens only an object that is its own
@@ -43,6 +44,15 @@ service keeps its threads off that CPU, looks again every two seconds, and names
 shared header (`receive_cpu`) for its consumers; `w1700k-spectrum` follows it. That CPU has
 nothing to spare at 320 Msps, and what the adapter cannot hand over in time it drops
 ([`tools/r8152-rtl8159`](../../tools/r8152-rtl8159/README.md) has the measurements).
+
+While datagrams arrive, and for two seconds after the last, the service asks the kernel to keep
+the CPUs out of their deep idle states (a CPU latency request of 100 us, held through
+`/dev/cpu_dma_latency`). A stream at 40 or 80 Msps arrives in clumps, and a host that goes to
+sleep between them can be too slow to wake for a USB adapter, which holds under a millisecond
+of stream: 0.3 to 0.9 % of the 16-bit format's slices at 40 Msps on one such host, next to none
+with the request ([the measurements](../../tools/r8152-rtl8159/README.md)). That file is root's
+until `init/host/link` gives it to the user; where the service may not open it, it says so once
+and carries on. Between streams the host idles as it likes.
 
 The host needs the destination address on the 10G link, an MTU of at least 8236
 (`sudo init/host/link keep IFACE 10.77.0.10/24 9216` gives the interface both and keeps them

@@ -36,6 +36,14 @@ irq=
 while [ "$dev" != /sys/devices ] && [ "$dev" != / ]; do
 	if [ -d "$dev/msi_irqs" ]; then irq=$(ls "$dev/msi_irqs" | head -1); break; fi
 	if [ -r "$dev/irq" ] && [ "$(cat "$dev/irq")" != 0 ]; then irq=$(cat "$dev/irq"); break; fi
+	# A USB controller that is no PCI device shows neither: its interrupt is listed under the
+	# name of one of its buses (xhci-hcd:usb1), not always the adapter's.
+	case ${dev##*/} in usb[0-9]*)
+		for bus in "$dev" "${dev%/*}"/usb[0-9]*; do
+			irq=$(awk -v n=":${bus##*/}" '$0 ~ n"(,|$)" { sub(":", "", $1); print $1; exit }' /proc/interrupts)
+			[ -z "$irq" ] || break 2
+		done ;;
+	esac
 	dev=$(dirname "$dev")
 done
 [ -n "$irq" ] && [ -w "/proc/irq/$irq/smp_affinity_list" ] || irq=

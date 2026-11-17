@@ -14,7 +14,8 @@ namespace placement {
 // The CPU that takes the packets of the interface named `interface`, where one CPU takes them
 // all: the one its interrupt is delivered to now (the kernel may move it, so ask again). -1 for
 // an interface with several receive queues, or without an interrupt of its own or of the
-// controller it hangs from. `sys` and `proc` are /sys and /proc (other roots in tests).
+// controller it hangs from (a USB controller's is also looked for in /proc/interrupts, under
+// the names of its buses: one that is no PCI device shows none in sysfs). `sys` and `proc` are /sys and /proc (other roots in tests).
 int receive_cpu(const std::string &interface, const std::string &sys = "/sys", const std::string &proc = "/proc");
 
 // The name of the interface that holds the IPv4 address `ip`; empty: none.

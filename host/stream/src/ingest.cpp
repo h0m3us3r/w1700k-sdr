@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "awake.h"
 #include "hw/mt7996/iq_reduce.h"
 
 namespace {
@@ -253,6 +254,7 @@ void Ingest::work(Worker &w)
         }
         int n = recvmmsg(w.fd, msgs, kBatch, MSG_WAITFORONE, nullptr);
         if (n <= 0) continue;
+        awake::needed();
         // A second of silence ends the run: the next slice starts another. Signed: another
         // thread may have stamped a later time between our clock read and the exchange.
         uint64_t t = now_ns(), previous = last_ns_.exchange(t, std::memory_order_acq_rel);
