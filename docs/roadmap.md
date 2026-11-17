@@ -172,8 +172,6 @@ loader at every boot, and `w1700k-gps on` runs it until the next start
   afterwards (`init/README.md`, "The loader"). Still only in the model: power
   lost while the first loader writes or removes `loader-b`. And a loader that
   hangs for good waits for someone to cut the power; nothing resets the unit.
-- **One test that fails now and then under load** (the spectrum server's
-  `tuning_steady`).
 
 ## Release checklist
 
