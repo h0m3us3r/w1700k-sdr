@@ -1,17 +1,27 @@
 # SPDX-License-Identifier: MIT
-"""Getting an image into RAM through stock U-Boot's TFTP client.
+"""Getting an image into RAM through stock U-Boot, over TFTP or the serial line.
 
-Stock U-Boot (2014.04, vendor build) can only fetch from UDP 69, and its TFTP
-gives up after ten timeouts per transfer which its broken timer spends on wall
-clock, not on lost packets. Transfers therefore go in 32 KiB pieces, each one a
-separate `tftpboot` with a fresh budget, at a 1468-byte block size. The pieces
-are checked in RAM with `crc32` against the host's value before anything uses
-them, and stock checks the FIT's own SHA-1 hashes with `iminfo`.
+TFTP, the default: stock U-Boot (2014.04, vendor build) can only fetch from UDP
+69, and its TFTP gives up after ten timeouts per transfer which its broken timer
+spends on wall clock, not on lost packets. Transfers therefore go in 32 KiB
+pieces, each one a separate `tftpboot` with a fresh budget, at a 1468-byte block
+size.
+
+The serial line, `--stock-transport serial`: stock's `loadb` takes the image by
+Kermit over the console itself (the OpenWrt wiki's page for this unit names the
+command). It needs no network, so no listener on UDP 69, no root and no redirect,
+and costs about half a minute an image where TFTP takes seconds.
+
+Either way the image is checked in RAM with `crc32` against the host's value
+before anything uses it, and stock checks the FIT's own SHA-1 hashes with
+`iminfo`. Kermit's own check is six bits a packet, so over the serial line that
+`crc32` is what vouches for the load.
 """
 from pathlib import Path
 import re
 import zlib
 
+from . import kermit
 from .console import StepFailed, command, verify_fit
 
 STAGE_ADDRESS = 0x89000000
@@ -24,6 +34,15 @@ MAX_PIECES = 24
 TRANSFERRED = re.compile(r'Bytes transferred = (\d+)')
 TIMEOUT_MARK = re.compile(r'T(?= |\r|\n)')
 CRC32 = re.compile(r'==>\s*([0-9a-fA-F]{1,8})')
+TRANSPORTS = ('tftp', 'serial')
+# `loadb` announces itself with one line and reports the size when it ends.
+LOADB_READY = re.compile(r'## Ready for binary \(kermit\) download[^\n]*bps\.\.\.')
+LOADB_TOTAL = re.compile(r'## Total Size\s*=\s*0x[0-9a-fA-F]+\s*=\s*(\d+) Bytes')
+# 115200 baud, eight data bits with a start and a stop bit.
+LINE_BYTES_PER_SECOND = 11520
+# A packet unanswered for this long is sent again, this many times in all.
+PACKET_SECONDS = 2.0
+PACKET_TRIES = 12
 ENV_LINE = re.compile(r'^([A-Za-z_][\w#.-]*)=(.*)$')
 
 
@@ -60,13 +79,40 @@ def split(image, directory):
     return pieces
 
 
-def stage(console, log, settings, image, served_dir):
-    """Load `image` to STAGE_ADDRESS through stock and verify it there.
+def load_serial(console, log, image, data):
+    """`data` to STAGE_ADDRESS with stock's `loadb`."""
+    start = console.mark()
+    console.send_async(f'loadb {STAGE_ADDRESS:#x}')
+    if not console.wait(lambda: LOADB_READY.search(console.view(start)) is not None, 15,
+                        'loadb to announce itself'):
+        console.wake()
+        raise StepFailed('stock U-Boot did not start `loadb`; without it the image must '
+                         f'go by TFTP (--stock-transport tftp).\n{console.view(start)[-400:]}')
+    seconds = kermit.line_bytes(data) / LINE_BYTES_PER_SECOND
+    print(f'  {image.name}: to stock U-Boot over the serial line (about {seconds:.0f} s)')
+    port = console.binary()
+    sender = kermit.Sender(port.write, port.read, timeout=PACKET_SECONDS, tries=PACKET_TRIES)
+    try:
+        stats = sender.send(data, image.name.encode())
+    except kermit.Failed as error:
+        console.wake()                  # Ctrl-C ends loadb's wait for a packet
+        log.event('stage_serial_failed', image=image.name, **sender.stats)
+        raise StepFailed(f'{image.name} did not go over the serial line: {error}. Nothing '
+                         'was written; retry, or use --stock-transport tftp.') from error
+    console.expect_prompt('stock', timeout=30)
+    total = LOADB_TOTAL.search(console.view(start))
+    log.event('stage_serial', image=image.name, bytes=len(data),
+              reported=int(total.group(1)) if total else None, **stats)
+    if not total or int(total.group(1)) != len(data):
+        raise StepFailed(f'stock U-Boot reports {total.group(1) if total else "no size"} '
+                         f'for {image.name}, not {len(data)} bytes')
+
+
+def load_tftp(console, log, settings, image, served_dir):
+    """`image` to STAGE_ADDRESS with stock's `tftpboot`; returns the pieces it took.
 
     `served_dir` is the directory the stock-port TFTP server serves.
     """
-    image = Path(image)
-    data = image.read_bytes()
     pieces = split(image, served_dir)
     if len(pieces) > MAX_PIECES:
         raise StepFailed(f'{image.name} needs {len(pieces)} transfers; stock U-Boot '
@@ -82,7 +128,20 @@ def stage(console, log, settings, image, served_dir):
         if not moved or int(moved.group(1)) != length:
             raise StepFailed(f'{name} did not arrive ({length} bytes expected). Check '
                              'that the stock-port TFTP redirect is active (see '
-                             f'init/README.md) and retry.\n{text[-400:]}')
+                             'init/README.md) and retry, or send it over the serial line '
+                             f'instead (--stock-transport serial).\n{text[-400:]}')
+    return len(pieces)
+
+
+def stage(console, log, settings, image, served_dir):
+    """Load `image` to STAGE_ADDRESS through stock and verify it there."""
+    image = Path(image)
+    data = image.read_bytes()
+    if settings.stock_transport == 'serial':
+        load_serial(console, log, image, data)
+        pieces = 0
+    else:
+        pieces = load_tftp(console, log, settings, image, served_dir)
     want = zlib.crc32(data) & 0xffffffff
     text = command(console, f'crc32 {STAGE_ADDRESS:#x} {len(data):#x}', limit=120)
     got = CRC32.search(text)
@@ -90,7 +149,8 @@ def stage(console, log, settings, image, served_dir):
         raise StepFailed(f'{image.name} is corrupt in RAM: crc32 '
                          f'{got.group(1) if got else "missing"}, expected {want:08x}')
     verify_fit(console, STAGE_ADDRESS)
-    log.event('staged', image=image.name, bytes=len(data), pieces=len(pieces))
+    log.event('staged', image=image.name, bytes=len(data), pieces=pieces,
+              transport=settings.stock_transport)
     return len(data)
 
 

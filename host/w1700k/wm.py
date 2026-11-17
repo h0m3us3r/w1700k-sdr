@@ -41,7 +41,7 @@ RADIO_REQ = STATUS + 4 * STATUS_WORDS.index('radio_req')
 RADIO_OP = STATUS + 4 * STATUS_WORDS.index('radio_op')
 RADIO_OPS = {'selftest': 1, 'identify': 2, 'bringup': 3, 'setup': 4, 'step': 5, 'capture': 6, 'select': 7,
              'stream': 8, 'rate': 9, 'dcoc': 10}
-RADIO_PACKING = {'raw': 0, 'half': 1}
+RADIO_PACKING = {'raw': 0, 'half': 1, 'full': 2, 'split': 3}
 RADIO_STEPS = {'patch_init': 1, 'common': 2, 'band': 3, 'rf_init': 4, 'dcoc': 5, 'post': 6, 'pool': 7}
 RADIO_RESULTS = {0: 'ok', 1: 'unknown op', 2: 'bad argument', 3: 'a prerequisite has not run',
                  4: 'hardware access failed'}

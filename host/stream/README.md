@@ -2,7 +2,8 @@
 
 The host's one receiver of the W1700K's UDP export. It puts the stream in order, unpacks it and
 serves it, as complex int16 IQ, to every consumer on the host through shared memory:
-`w1700k-spectrum`, `sdr-recv`, or any program that maps the ring. On request it also corrects
+`w1700k-spectrum`, `sdr-recv`, the SoapySDR module ([`../soapy`](../soapy/README.md)), or any program that
+maps the ring. On request it also corrects
 the stream for the radio's decimation roll-off ("flatten"), in the samples themselves, so that
 every consumer gets the corrected stream.
 
@@ -26,14 +27,43 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 | `--ring-mib N` | 512 | the shared ring, a power of two (512 MiB holds 0.42 s at 320 Msps) |
 | `--name NAME` | `/w1700k-stream` | the shared-memory object (`/dev/shm/w1700k-stream`) |
 | `--report S` | 0 | a JSON status line on stdout every S seconds |
+| `--share-irq-cpu` | | run also on the CPU that takes the interface's packets (see below) |
 
-The host needs the destination address on the 10G link, an MTU of at least 8236, and room for
+Where one CPU takes every packet of the interface that holds the bind address (an interface
+with a single receive queue, such as a USB adapter: the CPU its interrupt is delivered to), the
+service keeps its threads off that CPU, looks again every two seconds, and names the CPU in the
+shared header (`receive_cpu`) for its consumers; `w1700k-spectrum` follows it. That CPU has
+nothing to spare at 320 Msps, and what the adapter cannot hand over in time it drops
+([`tools/r8152-rtl8159`](../../tools/r8152-rtl8159/README.md) has the measurements).
+
+The host needs the destination address on the 10G link, an MTU of at least 8236
+(`sudo init/host/link keep IFACE 10.77.0.10/24 9216` gives the interface both and keeps them
+there; an interface with a smaller MTU drops the stream without a word), and room for
 48 MiB socket buffers (`sysctl -w net.core.rmem_max=67108864`, or the kernel caps them silently
 and drops datagrams under load: counted as `socket_drops`). One service owns the port: a second
 receiver of the same port would take half the datagrams, so consumers read the ring instead. A
 second service under the same name refuses to start; at exit the object is unlinked.
 
 ## The stream
+
+A stream reduced to fewer bits (`w1700k` packings `16`, `14`, `8`, `7`) comes under the magic
+`0x32524453` "SDR2" instead: the same header, with `seq` in 48 bits, the format (bits per I/Q
+pair) in the next 8 and the slice's scale code in the top 8; the slice is 4096, 3584, 2048 or
+1792 bytes (`include/hw/mt7996/iq_reduce.h`), and several whole slices may share a datagram,
+each behind its own header. The service scales them back to 14-bit samples, so consumers see no
+difference but the quantisation noise (`reduced` counts them). A slice may also come in pieces
+(`export.piece`): datagrams with a rising `offset`, assembled here; a slice with a piece missing
+counts as lost, and `pieces` counts those.
+
+In a split stream (`w1700k` packing `split`, 320 Msps on 5 Gbit/s) the radio reduces most of
+the chunks itself: those come under "SDR1" as completions of 3588 bytes whose last word is
+`0x524431xx`, the low byte the shift their samples were cut under
+(`include/hw/mt7996/iq_format.h`); the chunks between come reduced by the unit under "SDR2".
+Both are scaled back to 14-bit samples and counted in `reduced`. The radio is told its shift
+from the levels the unit sees in the chunks between, so a level that more than doubles within
+a millisecond can wrap in the radio's chunks until the shift follows: `suspect` counts radio
+chunks next to a unit-reduced slice whose peak was beyond their shift's range. They are
+published all the same.
 
 The export sends one UDP datagram per completion of the unit's DMA ring: a 16-byte header
 (`u32` magic `0x31524453` "SDR1", `u16` offset, `u16` slice_bytes, `u64` seq) and one slice, 8192
@@ -44,8 +74,11 @@ bytes are firmware events that share the ring.
 Completions are filed by `seq` into a reorder ring (256 MiB, 0.2 s at 320 Msps). A run, one stream, begins with the
 first datagram after a second of silence, after a jump in `seq`, or after a consumer asks for one
 (`restart_requests`, which the spectrum server does when the receiver starts or stops). Slots are
-published in order: one whose completion has arrived, a firmware event, or, once 1024 newer
-completions have arrived without it, a loss. After 5 ms with nothing new, what has arrived is
+published in order: one whose completion has arrived, a firmware event, or a loss: a slot that is
+still missing 250 ms after 1024 newer completions arrived (a receive thread kept off its CPU on a
+busy host delivers late, not never, and the two paths of a split stream run tens of milliseconds
+apart at moments), or at once when half the reorder ring is newer (`--receive-mib`, default
+1 GiB: 0.42 s at 320 Msps). After 5 ms with nothing new, what has arrived is
 published; a loss at the very end of a stream stays unpublished until more arrives. Of the
 losses, `overruns` counts those that did arrive but were overwritten in the reorder ring before
 the service published them: the service fell behind (CPU contention), not the export.

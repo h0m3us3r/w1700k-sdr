@@ -6,23 +6,48 @@
 # (from the unit, on one interface, to this host) to the installer's
 # unprivileged port. Nothing else on the host changes.
 #
-#   sudo init/host/tftp-forward enable IFACE [HOST_IP [UNIT_IP [PORT]]]
+#   sudo init/host/tftp-forward enable [--backend nft|iptables] [--once] IFACE [HOST_IP [UNIT_IP [PORT]]]
 #   sudo init/host/tftp-forward disable
 #   init/host/tftp-forward status
+#
+# The redirect is one nftables rule in a table of its own or, on a host whose
+# nftables cannot load it, one iptables rule in a chain of its own. `enable`
+# checks the host before it changes anything: its arguments, the interface,
+# that the tool it will use accepts this very rule, and that systemd is there
+# to load the rule again at boot. With --once the rule is loaded and nothing
+# is installed: it is gone at the next reboot, or at `disable`.
 set -eu
-unit=w1700k-tftp-forward.service
-rule=/etc/w1700k-tftp-forward.nft
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-usage() { echo "usage: $0 enable IFACE [HOST_IP [UNIT_IP [PORT]]] | disable | status" >&2; exit 2; }
-need_root() { [ "$(id -u)" = 0 ] || { echo "$0: run as root (sudo)" >&2; exit 1; }; }
 
-case "${1:-}" in
-enable)
-	need_root
-	[ $# -ge 2 ] || usage
-	iface=$2 host_ip=${3:-192.168.1.10} unit_ip=${4:-192.168.1.1} port=${5:-7071}
-	[ -e "/sys/class/net/$iface" ] || { echo "$0: no interface $iface" >&2; exit 1; }
-	cat > "$rule" <<RULE
+# For the tests alone: a directory to take /etc, /run, /sys and sbin from.
+sysroot=${W1700K_TFTP_SYSROOT:-}
+PATH=$PATH:$sysroot/usr/sbin:$sysroot/sbin
+
+unit=w1700k-tftp-forward.service
+unit_path=$sysroot/etc/systemd/system/$unit
+nft_file=$sysroot/etc/w1700k-tftp-forward.nft
+ipt_file=$sysroot/etc/w1700k-tftp-forward.iptables
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+usage() {
+	echo "usage: $0 enable [--backend nft|iptables] [--once] IFACE [HOST_IP [UNIT_IP [PORT]]] | disable | status" >&2
+	exit 2
+}
+die() { echo "$0: $*" >&2; exit 1; }
+note() { echo "$0: note: $*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+need_root() { [ "$(id -u)" = 0 ] || die "run as root (sudo)"; }
+systemd() { [ -d "$sysroot/run/systemd/system" ] && have systemctl; }
+first_line() { printf '%s\n' "$1" | sed -n 1p; }
+
+ipv4() {
+	case $1 in ''|*[!0-9.]*|*..*|.*|*.) return 1 ;; esac
+	old=$IFS; IFS=.; set -- $1; IFS=$old
+	[ $# -eq 4 ] || return 1
+	for part; do [ ${#part} -le 3 ] && [ "$part" -le 255 ] || return 1; done
+}
+
+nft_rules() {
+	cat <<RULE
 table ip w1700k_tftp {
     chain prerouting {
         type nat hook prerouting priority -105; policy accept;
@@ -30,22 +55,182 @@ table ip w1700k_tftp {
     }
 }
 RULE
-	chmod 0644 "$rule"
-	install -m 0644 "$here/$unit" "/etc/systemd/system/$unit"
+}
+
+# $1 names the chain. Only the real one is hooked into PREROUTING, and its
+# jump there carries no address, so it can be removed without knowing them.
+ipt_rules() {
+	echo '*nat'
+	echo ":$1 - [0:0]"
+	echo "-A $1 -i $iface -s $unit_ip -d $host_ip -p udp --dport 69 -j REDIRECT --to-ports $port"
+	[ "$1" != W1700K_TFTP ] || echo '-I PREROUTING -p udp --dport 69 -j W1700K_TFTP'
+	echo COMMIT
+}
+
+# Each prints why its tool cannot load the redirect on this host, or nothing.
+# nft checks the rule against the kernel without loading it. iptables has no
+# such check that asks the kernel, so the rule goes into a chain that nothing
+# jumps to, and the chain is removed again.
+try_nft() {
+	have nft || { echo "nft is not installed"; return 1; }
+	nft_rules | nft -c -f - 2>&1 || return 1
+}
+try_iptables() {
+	have iptables && have iptables-restore || { echo "iptables is not installed"; return 1; }
+	ipt_rules W1700K_TFTP_CHECK | iptables-restore -w --noflush 2>&1 || return 1
+	iptables -w -t nat -F W1700K_TFTP_CHECK 2>/dev/null || :
+	iptables -w -t nat -X W1700K_TFTP_CHECK 2>/dev/null || :
+}
+
+live() {
+	case $1 in
+	nft) have nft && nft list chain ip w1700k_tftp prerouting >/dev/null 2>&1 ;;
+	iptables) have iptables &&
+		iptables -w -t nat -C PREROUTING -p udp --dport 69 -j W1700K_TFTP 2>/dev/null ;;
+	esac
+}
+
+# Take the redirect out of the kernel, whichever tool put it there.
+unload() {
+	if have nft; then nft delete table ip w1700k_tftp 2>/dev/null || :; fi
+	if have iptables && iptables -w -t nat -S W1700K_TFTP >/dev/null 2>&1; then
+		while iptables -w -t nat -D PREROUTING -p udp --dport 69 -j W1700K_TFTP 2>/dev/null; do :; done
+		iptables -w -t nat -F W1700K_TFTP 2>/dev/null || :
+		iptables -w -t nat -X W1700K_TFTP 2>/dev/null || :
+	fi
+}
+
+# Everything of ours, however it was installed.
+remove() {
+	if systemd && [ -e "$unit_path" ]; then
+		systemctl disable --now "$unit" >/dev/null 2>&1 || :
+	fi
+	unload
+	rm -f "$unit_path" "$nft_file" "$ipt_file"
+	if systemd; then systemctl daemon-reload; fi
+}
+
+case "${1:-}" in
+enable)
+	need_root
+	shift
+	want='' once=''
+	while [ $# -gt 0 ]; do
+		case $1 in
+		--backend) [ $# -ge 2 ] || usage; want=$2; shift 2 ;;
+		--once) once=1; shift ;;
+		--*) usage ;;
+		*) break ;;
+		esac
+	done
+	[ $# -ge 1 ] && [ $# -le 4 ] || usage
+	iface=$1 host_ip=${2:-192.168.1.10} unit_ip=${3:-192.168.1.1} port=${4:-7071}
+
+	# The checks. Nothing on the host has changed until all of them pass.
+	case $want in ''|nft|iptables) ;; *) die "--backend takes nft or iptables, not $want" ;; esac
+	case $iface in ''|*[!A-Za-z0-9_.:-]*) die "$iface is not an interface name" ;; esac
+	[ ${#iface} -le 15 ] || die "$iface is not an interface name"
+	[ -e "$sysroot/sys/class/net/$iface" ] || die "no interface $iface"
+	ipv4 "$host_ip" || die "$host_ip is not an IPv4 address"
+	ipv4 "$unit_ip" || die "$unit_ip is not an IPv4 address"
+	case $port in ''|*[!0-9]*) die "$port is not a port" ;; esac
+	[ ${#port} -le 5 ] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] ||
+		die "the installer's port must be one a normal user may open, 1024 to 65535, not $port"
+	[ -n "$once" ] || systemd ||
+		die "this host does not run systemd, so nothing would load the redirect at boot; \`enable --once\` loads it until the next reboot"
+	case $want in
+	nft)
+		why=$(try_nft) || die "nftables cannot load the redirect here: $(first_line "${why:-nft refused it}")"
+		backend=nft ;;
+	iptables)
+		why=$(try_iptables) || die "iptables cannot load the redirect here: $(first_line "${why:-iptables refused it}")"
+		backend=iptables ;;
+	*)
+		if why_nft=$(try_nft); then
+			backend=nft
+		elif why_ipt=$(try_iptables); then
+			backend=iptables
+			note "nftables cannot load the redirect here ($(first_line "${why_nft:-nft refused it}")); using iptables"
+		else
+			die "neither nftables nor iptables can load the redirect here; nothing was changed
+  nftables: $(first_line "${why_nft:-nft refused it}")
+  iptables: $(first_line "${why_ipt:-iptables refused it}")"
+		fi ;;
+	esac
+	case $backend in
+	nft) unit_source=$here/$unit ;;
+	iptables) unit_source=$here/w1700k-tftp-forward-iptables.service ;;
+	esac
+	[ -n "$once" ] || [ -r "$unit_source" ] || die "$unit_source is missing"
+
+	# Things that do not stop the redirect loading but would stop it working.
+	if have ip && ! ip -4 -o addr show dev "$iface" 2>/dev/null | grep -qF " $host_ip/"; then
+		note "$iface does not have $host_ip yet (init/host/link up $iface gives it); the redirect matches nothing until it does"
+	fi
+	firewall=''
+	if have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then firewall=ufw; fi
+	if systemd && systemctl is-active --quiet firewalld 2>/dev/null; then firewall=firewalld; fi
+	if [ -n "$firewall" ]; then
+		note "$firewall is active; if stock U-Boot's fetches time out, it is dropping UDP $port from $unit_ip on $iface"
+	fi
+
+	remove
+	umask 022
+	if [ -n "$once" ]; then
+		case $backend in
+		nft) nft_rules | nft -f - ;;
+		iptables) ipt_rules W1700K_TFTP | iptables-restore -w --noflush ;;
+		esac
+		live "$backend" || die "$backend took the redirect but it is not loaded"
+		echo "$0: UDP 69 from $unit_ip to $host_ip on $iface goes to port $port ($backend), until the next reboot or \`disable\`; nothing is installed"
+		exit 0
+	fi
+	# The units name the tools where most hosts have them; this host's own
+	# paths go into the installed copy.
+	case $backend in
+	nft)
+		nft_rules > "$nft_file"
+		sed "s|/usr/sbin/nft|$(command -v nft)|g" "$unit_source" > "$unit_path" ;;
+	iptables)
+		ipt_rules W1700K_TFTP > "$ipt_file"
+		sed -e "s|/usr/sbin/iptables-restore|$(command -v iptables-restore)|g" \
+			-e "s|/usr/sbin/iptables |$(command -v iptables) |g" "$unit_source" > "$unit_path" ;;
+	esac
 	systemctl daemon-reload
-	systemctl enable --now "$unit"
-	systemctl restart "$unit"
-	nft list chain ip w1700k_tftp prerouting
+	systemctl enable "$unit" >/dev/null 2>&1 || :
+	if ! systemctl restart "$unit" || ! live "$backend"; then
+		systemctl status "$unit" --no-pager -n 20 >&2 || :
+		remove
+		die "systemd could not load the redirect (its log is above); nothing is left installed"
+	fi
+	echo "$0: UDP 69 from $unit_ip to $host_ip on $iface goes to port $port ($backend), now and after every boot"
+	echo "$0: installed $unit_path and its rule file beside /etc/systemd; \`disable\` removes both"
 	;;
 disable)
 	need_root
-	systemctl disable --now "$unit" 2>/dev/null || :
-	rm -f "/etc/systemd/system/$unit" "$rule"
-	systemctl daemon-reload
+	remove
+	echo "$0: the redirect is unloaded and nothing of it is installed"
 	;;
 status)
-	systemctl status "$unit" --no-pager || :
-	nft list chain ip w1700k_tftp prerouting 2>/dev/null || echo "$0: the redirect is not loaded"
+	if [ -e "$nft_file" ]; then
+		echo "$0: installed: the nftables rule in $nft_file, loaded at boot by $unit"
+	elif [ -e "$ipt_file" ]; then
+		echo "$0: installed: the iptables rule in $ipt_file, loaded at boot by $unit"
+	else
+		echo "$0: nothing is installed"
+	fi
+	if systemd && [ -e "$unit_path" ]; then systemctl status "$unit" --no-pager || :; fi
+	# Only root may list the kernel's rules; anyone else would be told "not
+	# loaded" of a redirect that is.
+	if [ "$(id -u)" != 0 ]; then
+		echo "$0: listing the rule itself takes root: sudo $0 status"
+	elif live nft; then
+		nft list chain ip w1700k_tftp prerouting
+	elif live iptables; then
+		iptables -w -t nat -S W1700K_TFTP
+	else
+		echo "$0: the redirect is not loaded"
+	fi
 	;;
 *)
 	usage

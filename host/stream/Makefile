@@ -5,7 +5,7 @@ CXX ?= c++
 CXXFLAGS ?= -O3
 WARNINGS ?= -Wall -Wextra -Werror
 PREFIX ?= /usr/local
-override CXXFLAGS += -std=c++17 -pthread -Iinclude $(WARNINGS)
+override CXXFLAGS += -std=c++17 -pthread -Iinclude -I../../include $(WARNINGS)
 LDLIBS += -pthread -lfftw3f -lrt
 
 SOURCES := $(wildcard src/*.cpp)
@@ -17,7 +17,7 @@ all: build/w1700k-stream
 build/w1700k-stream: $(OBJECTS)
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
-build/%.o: src/%.cpp $(wildcard src/*.h) include/w1700k_stream.h | build
+build/%.o: src/%.cpp $(wildcard src/*.h) include/w1700k_stream.h ../../include/hw/mt7996/iq_reduce.h | build
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 build:

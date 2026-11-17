@@ -10,9 +10,11 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import time
 import unittest
 
+import iq_reduce_ref
 import stream_shm
 from stream_shm import TAG_EVENT, TAG_FLAT, TAG_LOST, Shm, tag
 
@@ -88,7 +90,8 @@ def tone_amplitude(samples, cycles):
 
 
 @unittest.skipIf(build_problem(), build_problem())
-class StreamServiceTest(unittest.TestCase):
+class Service(unittest.TestCase):
+    """A w1700k-stream of the test's own, on a free port and under a name of its own."""
     counter = 0
 
     @classmethod
@@ -97,12 +100,15 @@ class StreamServiceTest(unittest.TestCase):
         if result.returncode:
             raise AssertionError("build failed:\n" + result.stdout + result.stderr)
 
+    RECEIVE_MIB, RX_THREADS = 64, 2
+
     def setUp(self):
-        StreamServiceTest.counter += 1
+        Service.counter += 1
         self.name = "/w1700k-test-%d-%d" % (os.getpid(), self.counter)
         self.port = free_udp_port()
         self.proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(self.port), "--name", self.name,
-                                      "--ring-mib", "16", "--workers", "2", "--rx-threads", "2"],
+                                      "--ring-mib", "16", "--receive-mib", str(self.RECEIVE_MIB), "--workers", "2",
+                                      "--rx-threads", str(self.RX_THREADS)],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         deadline = time.monotonic() + 10
         while True:
@@ -127,6 +133,17 @@ class StreamServiceTest(unittest.TestCase):
     def send(self, seq, payload):
         self.sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
 
+    def send_pieces(self, magic, last, payload, piece, skip=()):
+        """A slice as datagrams of at most `piece` payload bytes; `skip`: pieces not sent."""
+        for n, at in enumerate(range(0, len(payload), piece)):
+            if n not in skip:
+                self.sock.sendto(struct.pack("<IHHQ", magic, at, len(payload), last) + payload[at:at + piece],
+                                 ("127.0.0.1", self.port))
+
+    def send_reduced(self, seq, words, fmt, piece=None):
+        code, data = iq_reduce_ref.encode(words, fmt)
+        self.send_pieces(iq_reduce_ref.MAGIC, iq_reduce_ref.header_word(seq, fmt, code), data, piece or len(data))
+
     def send_words(self, seq, words):
         self.send(seq, struct.pack("<%dI" % len(words), *words))
         if seq % 32 == 31:
@@ -144,6 +161,9 @@ class StreamServiceTest(unittest.TestCase):
                 raise AssertionError("published %d of %d" % (newest, n))
             time.sleep(0.02)
 
+
+@unittest.skipIf(build_problem(), build_problem())
+class StreamServiceTest(Service):
     def test_slices_unpacked_bit_exact_events_and_losses_tagged(self):
         words = {s: noise_words(s) for s in range(1200)}
         for s in range(1200):
@@ -164,6 +184,130 @@ class StreamServiceTest(unittest.TestCase):
         self.assertEqual((self.shm.get("packed"), self.shm.get("events"), self.shm.get("lost")), (1, 1, 1))
         self.assertEqual(self.shm.get("slices"), 1198)
         self.assertEqual(self.shm.get("flatten_active"), 0)
+        self.assertEqual(self.shm.get("receive_cpu"), 0, "loopback has no CPU of its own to stay off")
+
+    def test_reduced_slices_are_restored_by_their_scale(self):
+        formats = (16, 14, 8, 7)
+        words = {}
+        for s in range(64):
+            amplitude = (3, 60, 700, 8000)[s // 4 % 4]
+            words[s] = [word(round(amplitude * math.cos(0.37 * n + s)), round(amplitude * math.sin(0.11 * n * n)))
+                        for n in range(SLICE)]
+        for s in range(1100):
+            if s < 64:
+                self.send_reduced(s, words[s], formats[s % 4])
+            else:
+                self.send_words(s, noise_words(s))
+        run = self.wait_newest(1100)
+        for s in range(64):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            self.assertEqual(self.shm.samples(s), iq_reduce_ref.restored(words[s], formats[s % 4]),
+                             "slot %d, format %d" % (s, formats[s % 4]))
+        self.assertEqual(self.shm.samples(100), unpacked(noise_words(100)))
+        self.assertEqual((self.shm.get("reduced"), self.shm.get("slices"), self.shm.get("lost")), (64, 1100, 0))
+        self.assertEqual(self.shm.get("bad"), 0)
+
+    def test_slices_in_pieces_are_assembled_and_a_broken_one_is_lost(self):
+        words = {s: noise_words(s) for s in range(1100)}
+        for s in range(1100):
+            raw = struct.pack("<%dI" % SLICE, *words[s])
+            if s == 5:
+                self.send_pieces(MAGIC, s, raw, 1456)                          # raw, six pieces
+            elif s == 6:
+                self.send_pieces(MAGIC, s, struct.pack("<%dI" % (SLICE // 8 * 7), *pack(words[s])), 1456)
+            elif s == 7:
+                self.send_reduced(s, words[s], 14, piece=1456)
+            elif s == 8:
+                self.send_reduced(s, words[s], 7, piece=700)
+            elif s == 9:
+                self.send_pieces(MAGIC, s, raw, 1456, skip=(2,))               # a piece lost on the way
+            elif s == 10:
+                self.send_pieces(MAGIC, s, raw, 1456, skip=(0,))               # its first piece lost
+            else:
+                self.send_words(s, words[s])
+        run = self.wait_newest(1100)
+        for s in (4, 5, 6, 11):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            self.assertEqual(self.shm.samples(s), unpacked(words[s]), "slot %d" % s)
+        self.assertEqual(self.shm.samples(7), iq_reduce_ref.restored(words[7], 14))
+        self.assertEqual(self.shm.samples(8), iq_reduce_ref.restored(words[8], 7))
+        for s in (9, 10):
+            self.assertEqual(self.shm.tag(s), tag(run, s) | TAG_LOST, "slot %d" % s)
+        self.assertEqual((self.shm.get("lost"), self.shm.get("slices"), self.shm.get("bad")), (2, 1098, 0))
+        self.assertEqual(self.shm.get("pieces"), 2)
+
+    def test_several_slices_in_one_datagram(self):
+        """The unit's senders put as many whole slices in a datagram as fit, each behind its header."""
+        words = {s: noise_words(s + 50) for s in range(8)}
+
+        def record(s, fmt=None):
+            if fmt is None:
+                payload = struct.pack("<%dI" % SLICE, *words[s])
+                return struct.pack("<IHHQ", MAGIC, 0, len(payload), s) + payload
+            code, data = iq_reduce_ref.encode(words[s], fmt)
+            return struct.pack("<IHHQ", iq_reduce_ref.MAGIC, 0, len(data), iq_reduce_ref.header_word(s, fmt, code)) + data
+        to = ("127.0.0.1", self.port)
+        self.sock.sendto(record(0, 14) + record(1, 14), to)
+        self.sock.sendto(record(2, 7) + record(3, 7) + record(4, 8), to)
+        self.sock.sendto(record(6), to)
+        self.sock.sendto(record(5, 16) + record(7, 14) + b"\x00" * 5, to)  # and five bytes that are no record
+        for s in range(8, 1100):
+            self.send_words(s, noise_words(s))
+        run = self.wait_newest(1100)
+        formats = {0: 14, 1: 14, 2: 7, 3: 7, 4: 8, 5: 16, 7: 14}
+        for s in range(8):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            want = iq_reduce_ref.restored(words[s], formats[s]) if s in formats else unpacked(words[s])
+            self.assertEqual(self.shm.samples(s), want, "slot %d" % s)
+        self.assertEqual((self.shm.get("reduced"), self.shm.get("lost"), self.shm.get("bad")), (7, 0, 1))
+
+    def test_radio_reduced_chunks_of_a_split_stream(self):
+        """Every other chunk reduced by the radio (3588 bytes under SDR1, its shift in the trailer),
+        the ones between by the unit's senders (SDR2): both come out as 14-bit samples. A completion
+        of that length without the trailer is an event, as any short one."""
+        words = {s: [word(round(900 * math.cos(0.21 * n + s)), round(900 * math.sin(0.05 * n * n))) for n in range(SLICE)]
+                 for s in range(40)}
+        shifts = {s: (4, 5, 7, 6)[s // 2 % 4] for s in range(0, 40, 2)}
+        quiet = [word(round(100 * math.cos(0.3 * n)), round(100 * math.sin(0.3 * n))) for n in range(SLICE)]
+        for s in range(1100):
+            if s == 38:
+                self.send(s, b"\x00" * iq_reduce_ref.RADIO14_BYTES)       # no trailer: an event
+            elif s < 40 and s % 2 == 0:
+                self.send(s, iq_reduce_ref.radio14_encode(words[s], shifts[s]))
+            elif s < 40:
+                self.send_reduced(s, words[s], 14)
+            elif s in (50, 60):                 # radio chunks under a small shift (range 255) ...
+                self.send(s, iq_reduce_ref.radio14_encode(quiet, 2))
+            elif s == 51:                       # ... one beside a slice of the unit's that peaks at 900
+                self.send_reduced(s, words[1], 14)
+            elif s == 59:                       # ... one beside a quiet slice
+                self.send_reduced(s, quiet, 14)
+            else:
+                self.send_words(s, noise_words(s))
+        run = self.wait_newest(1100)
+        self.assertEqual(self.shm.get("suspect"), 1, "the radio chunk beside the louder slice may have wrapped")
+        self.assertEqual(self.shm.samples(50), iq_reduce_ref.radio14_restored(quiet, 2))
+        for s in range(38):
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            want = iq_reduce_ref.radio14_restored(words[s], shifts[s]) if s % 2 == 0 else iq_reduce_ref.restored(words[s], 14)
+            self.assertEqual(self.shm.samples(s), want, "slot %d" % s)
+        self.assertEqual(self.shm.tag(38), tag(run, 38) | TAG_EVENT)
+        self.assertEqual((self.shm.get("reduced"), self.shm.get("events"), self.shm.get("lost"), self.shm.get("bad")),
+                         (19 + 20 + 4, 1, 0, 0))
+        # in range (900 fits every shift used): within half a step of the samples sent
+        for s in (0, 2, 4, 6):
+            for (i, q), v in zip(self.shm.samples(s), words[s]):
+                self.assertLessEqual(abs(i - signed14(v >> 16 & 0x3FFF)), (1 << shifts[s]) // 2)
+                self.assertLessEqual(abs(q - signed14(v & 0x3FFF)), (1 << shifts[s]) // 2)
+
+    def test_a_reduced_slice_of_the_wrong_length_is_refused(self):
+        code, data = iq_reduce_ref.encode(noise_words(1), 14)
+        self.send_pieces(iq_reduce_ref.MAGIC, iq_reduce_ref.header_word(0, 16, code), data, len(data))
+        self.send_pieces(iq_reduce_ref.MAGIC, iq_reduce_ref.header_word(1, 12, code), data, len(data))
+        for s in range(2, 1100):
+            self.send_words(s, noise_words(s))
+        self.wait_newest(1098)                         # the run starts with the first slice taken
+        self.assertEqual((self.shm.get("bad"), self.shm.get("reduced")), (2, 0))
 
     def test_flatten_gain_follows_the_measured_rolloff(self):
         for field, value in (("radio_sample_rate", 320000000), ("radio_capture_rate", 320000000),
@@ -231,6 +375,52 @@ class StreamServiceTest(unittest.TestCase):
         run2 = self.wait_newest(40)
         self.assertEqual(run2, run + 1)
         self.assertEqual(self.shm.samples(0), unpacked(noise_words(300)), "the new run counts from its first slice")
+
+
+@unittest.skipIf(build_problem() or not shutil.which("cc"), build_problem() or "no C compiler")
+class NewRunWhileReceiving(Service):
+    """A new run asked for while slices arrive on every receive thread at once, as the spectrum server
+    asks when it notices late that one stream ended and the next has begun."""
+    RECEIVE_MIB, RX_THREADS = 128, 4       # a reorder ring of 16384 slices
+    RATE, SECONDS, EVERY = 120_000, 5.0, 0.3
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.tools = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tools.cleanup)
+        cls.blast = os.path.join(cls.tools.name, "stream_blast")
+        result = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-pthread", "-o", cls.blast,
+                                 os.path.join(ROOT, "tests", "stream_blast.c")], capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError("stream_blast did not build:\n" + result.stderr)
+
+    def test_a_slice_of_the_run_that_ended_does_not_move_the_new_runs_position(self):
+        """Each receive thread reads the run and then files its slice. One that read it just before
+        another began a new run files a slice of the old run, at the old run's index; that index must
+        not become the new run's newest slot, or everything the new run receives is older than the
+        ring holds and is dropped as late until its numbering has caught up: all of a 40 Msps stream
+        for a quarter of a minute, when this was found on a unit. Here a run is twice the ring long
+        when the next is asked for, so one such slice costs the new run some 20,000 slices."""
+        blaster = subprocess.Popen([self.blast, str(self.port), str(MAGIC), str(self.RX_THREADS), str(self.RATE),
+                                    str(self.SECONDS)], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(blaster.stdout.close)
+        asked, due = 0, time.monotonic() + self.EVERY
+        while blaster.poll() is None:
+            if time.monotonic() >= due:
+                self.shm.set("restart_requests", self.shm.get("restart_requests") + 1)
+                asked, due = asked + 1, due + self.EVERY
+            time.sleep(0.005)
+        self.assertEqual(blaster.returncode, 0)
+        sent = int(blaster.stdout.read())
+        time.sleep(0.6)                                 # the last slices are published, the counters refreshed
+        run, _ = self.shm.position()
+        self.assertGreaterEqual(run, asked, "every request began a run")
+        self.assertGreater(self.shm.get("slices"), sent // 2, "the slices were received, not dropped on the way in")
+        # A receive thread kept from running for longer than the ring is deep would file what it
+        # held as late too: tens of slices, where the fault files tens of thousands.
+        self.assertLess(self.shm.get("late"), 1000,
+                        "slices of the new run were dropped as late: a slice of the run before moved its position")
 
 
 if __name__ == "__main__":

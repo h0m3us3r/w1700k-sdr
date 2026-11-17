@@ -13,14 +13,30 @@ import partitions  # noqa: E402
 class Layout(unittest.TestCase):
     def test_the_table_covers_the_chip_contiguously(self):
         partitions.check_table()
-        self.assertEqual(partitions.GEOMETRY['loader'], (0x600000, 0x200000))
-        self.assertEqual(partitions.GEOMETRY['system'], (0x800000, 0x3000000))
-        self.assertEqual(partitions.GEOMETRY['durable'], (0x3800000, 0x2000000))
+        # The megabyte for loaders: the one stock boots (it reads 256 KiB), and a second beside it.
+        self.assertEqual(partitions.GEOMETRY['loader'], (0x600000, 0x40000))
+        self.assertEqual(partitions.GEOMETRY['loader-b'], (0x640000, 0xc0000))
+        self.assertEqual(partitions.GEOMETRY['system'], (0x700000, 0x2300000))
+        self.assertEqual(partitions.GEOMETRY['durable'], (0x2a00000, 0x1c00000))
+        # Ours ends where stock's first firmware slot does: its second slot and its UBI are
+        # one partition nobody writes.
+        self.assertEqual(sum(partitions.GEOMETRY['durable']), 0x4600000)
+        self.assertEqual(partitions.GEOMETRY['stock'], (0x4600000, 0x17800000))
+        for stage in ('loader', 'linux'):
+            self.assertIn('stock', partitions.READ_ONLY[stage])
+
+    def test_the_units_own_copy_of_the_durable_window_is_the_tables(self):
+        """/etc/w1700k/storage.conf in the root: durable-open compares the partition with it."""
+        conf = dict(line.split('=', 1) for line in
+                    (ROOT / 'platform/rootfs/overlay/etc/w1700k/storage.conf').read_text().splitlines()
+                    if '=' in line and not line.startswith('#'))
+        self.assertEqual((int(conf['DURABLE_OFFSET'], 16), int(conf['DURABLE_SIZE'], 16)),
+                         partitions.GEOMETRY['durable'])
 
     def test_gaps_overlaps_and_short_tables_are_refused(self):
         for name, value, message in [
                 ('system', (0x900000, 0x2f00000), 'gap or overlaps'),
-                ('system', (0x800000, 0x3000001), 'block-aligned'),
+                ('system', (0x700000, 0x3000001), 'block-aligned'),
                 ('reserved-bmt', (0x1be00000, 0x4100000), 'covers')]:
             with self.subTest(name=name), \
                     mock.patch.dict(partitions.GEOMETRY, {name: value}), \
@@ -40,9 +56,9 @@ class Layout(unittest.TestCase):
         kv, lv = partitions.NANDS
         self.assertEqual((partitions.ubi_bad_reserve(kv), partitions.ubi_bad_reserve(lv)),
                          (80, 40))
-        self.assertEqual(partitions.ubi_lebs('system', kv), 300)
-        self.assertEqual(partitions.ubi_lebs('system', lv), 148)
-        self.assertEqual((partitions.durable_lebs(kv), partitions.durable_lebs(lv)), (172, 84))
+        self.assertEqual(partitions.ubi_lebs('system', kv), 196)
+        self.assertEqual(partitions.ubi_lebs('system', lv), 96)
+        self.assertEqual((partitions.durable_lebs(kv), partitions.durable_lebs(lv)), (140, 68))
         for nand in partitions.NANDS:
             volumes = partitions.system_volumes(nand)
             self.assertEqual(sum(lebs for _, _, lebs in volumes),
@@ -52,7 +68,11 @@ class Layout(unittest.TestCase):
             self.assertGreaterEqual(volumes[2][2] * nand.leb, partitions.FIT_VOLUME_BYTES)
             self.assertGreaterEqual(volumes[3][2] * nand.leb, partitions.ROOTFS_VOLUME_BYTES)
         self.assertGreater(partitions.FIT_VOLUME_BYTES, 12 << 20)
-        self.assertGreater(partitions.ROOTFS_VOLUME_BYTES, 16 << 20)
+        # What the first slot leaves the root once the FIT has its 15.5 MiB: twice the root of
+        # today (2.9 MiB), and a staged update of it (the new root and the old) fits `durable`.
+        self.assertGreater(partitions.ROOTFS_VOLUME_BYTES, 6 << 20)
+        for nand in partitions.NANDS:
+            self.assertGreater(partitions.durable_lebs(nand) * nand.leb, 2 * partitions.ROOTFS_VOLUME_BYTES)
 
     def test_the_parts(self):
         kv, lv = partitions.NANDS
@@ -73,14 +93,23 @@ class Layout(unittest.TestCase):
     def test_the_bmt_write_policy(self):
         header = partitions.policy_header()
         first = partitions.GEOMETRY['system'][0]
-        end = sum(partitions.GEOMETRY['scratch'])
+        end = sum(partitions.GEOMETRY['durable'])
+        self.assertEqual(end, 0x4600000, 'the loader and Linux write nothing past what is ours')
         self.assertIn(f'#define BMT_WRITE_FIRST_BYTES {first:#x}ull', header)
         self.assertIn(f'#define BMT_WRITE_END_BYTES {end:#x}ull', header)
+        # The loader may also write the second loader, before `system`; never the first, itself.
+        loader = partitions.policy_header(partitions.WRITES_FROM['loader'])
+        self.assertIn(f'#define BMT_WRITE_FIRST_BYTES {0x640000:#x}ull', loader)
+        self.assertIn(f'#define BMT_WRITE_END_BYTES {end:#x}ull', loader)
+        self.assertIn('loader', partitions.READ_ONLY['loader'])
+        self.assertNotIn('loader-b', partitions.READ_ONLY['loader'])
+        self.assertLessEqual({'loader', 'loader-b'}, partitions.READ_ONLY['linux'])
         self.assertIn('#define BMT_MIN_BLOCK_BYTES 0x20000u', header)
         # The journal is the block after the BBT: 3847 on the W25N04KV.
         self.assertIn('#define BMT_JOURNAL_AFTER_BBT 1u', header)
-        self.assertIn(f'#define BMT_WRITE_FIRST_BYTES {0x200000:#x}ull',
-                      partitions.policy_header('uenv'))
+        restorer = partitions.policy_header('uenv', 'stock')
+        self.assertIn(f'#define BMT_WRITE_FIRST_BYTES {0x200000:#x}ull', restorer)
+        self.assertIn(f'#define BMT_WRITE_END_BYTES {0x1be00000:#x}ull', restorer, 'the restorer: stock too')
 
 
 class DeviceTrees(unittest.TestCase):
@@ -94,8 +123,9 @@ class DeviceTrees(unittest.TestCase):
 
     def test_a_stale_region_is_reported(self):
         path, stage = next(iter(partitions.DEVICE_TREES.items()))
-        text = (ROOT / path).read_text().replace('0x00800000 0x03000000',
-                                                 '0x00700000 0x03100000', 1)
+        current = '0x00700000 0x02300000'
+        self.assertIn(current, (ROOT / path).read_text())
+        text = (ROOT / path).read_text().replace(current, '0x00680000 0x02380000', 1)
         with mock.patch.object(Path, 'read_text', return_value=text), \
                 self.assertRaisesRegex(ValueError, 'stale partition table'):
             partitions.check(path, stage)

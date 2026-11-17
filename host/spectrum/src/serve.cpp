@@ -28,6 +28,7 @@
 #include <thread>
 
 #include "controller.h"
+#include "../../stream/src/placement.h"
 #include "stream.h"
 #include "json.h"
 #include "serve.h"
@@ -287,6 +288,7 @@ private:
         const bool configure = m.has("band") || m.has("sample_rate");
         if (configure) set_configuration(m);
         if (m.has("filter")) set_filter(m);
+        if (m.has("filter_follow")) set_filter_follow(m);
         if (m.has("agc") || m.has("lna") || m.has("lpf")) set_gain(m);
         if (m.has("lo")) tune(m.number_or("lo", NAN));
     }
@@ -317,6 +319,17 @@ private:
             throw std::runtime_error("filter must be 20, 40, 80, 160 or 320 MHz");
         require_idle();
         controller_->submit({{"filter", ",\"mhz\":" + std::to_string(width), nullptr, report("filter")}}, "filter");
+    }
+
+    // Whether every band's analog filter follows its sample rate (a filter set by hand ends that).
+    void set_filter_follow(const JsonValue &m)
+    {
+        const JsonValue *v = m.at("filter_follow");
+        if (!v || !v->is_boolean()) throw std::runtime_error("filter_follow must be true or false");
+        require_idle();
+        controller_->submit({{"filter_follow", std::string(",\"on\":") + (v->boolean ? "true" : "false"), nullptr,
+                              report("filter")}},
+                            "filter_follow");
     }
 
     void set_gain(const JsonValue &m)
@@ -450,9 +463,14 @@ private:
                      json_number(r.capture_rate) + ",\"bands\":[" + bands_of + "]}";
         }
         for (unsigned w : kFilters) filters += (filters.empty() ? "" : ",") + std::to_string(w);
+        const SpectrumSettings fft;  // what a server starts with
+        const std::string fft_defaults =
+            "{\"size\":" + std::to_string(fft.size) + ",\"window\":" + json_quote(fft.window) + ",\"rate\":" +
+            json_number(fft.rate) + ",\"averaging\":" + std::to_string(fft.averaging) + ",\"peak\":" +
+            (fft.peak ? "true" : "false") + ",\"dc\":" + (fft.remove_dc ? "true" : "false") + "}";
         web_.send_text(client, "{\"t\":\"hello\",\"version\":" + std::to_string(kProtocolVersion) +
                                    ",\"client\":" + std::to_string(client) + ",\"windows\":[" + windows +
-                                   "],\"max_bins\":" + std::to_string(kMaxBins) +
+                                   "],\"fft_defaults\":" + fft_defaults + ",\"max_bins\":" + std::to_string(kMaxBins) +
                                    ",\"controller\":" + (controller_ ? "true" : "false") + ",\"bands\":[" + bands +
                                    "],\"rates\":[" + rates + "],\"filters\":[" + filters + "],\"max_lna\":" + std::to_string(kMaxLna) +
                                    ",\"max_lpf\":" + std::to_string(kMaxLpf) + "}");
@@ -526,6 +544,15 @@ private:
     void on_tick()
     {
         stream_.refresh();
+        // Off the CPU that takes the stream's packets, as the stream service is (placement.h).
+        if (Clock::now() - placed_at_ >= std::chrono::seconds(2)) {
+            placed_at_ = Clock::now();
+            const int cpu = stream_.alive() ? stream_.receive_cpu() : -1;
+            if (cpu != kept_off_) {
+                placement::keep_off(cpu);
+                kept_off_ = cpu;
+            }
+        }
         if (controller_) controller_->poll();
         if (dump_requested.exchange(false)) {
             if (dumping_) {
@@ -593,7 +620,7 @@ private:
     {
         const SpectrumFrame *p = v.pending.get();
         bool same = p && p->run == frame->run && p->center_hz == frame->center_hz &&
-                    p->sample_rate == frame->sample_rate && p->db.size() == frame->db.size() &&
+                    p->sample_rate == frame->sample_rate && p->power.size() == frame->power.size() &&
                     p->peak == frame->peak;
         if (!same) {
             v.pending = frame;
@@ -604,11 +631,17 @@ private:
                 v.merged = std::make_shared<SpectrumFrame>(*v.pending);
                 v.pending = v.merged;
             }
+            // The maximum, or the mean power, of the frames merged.
+            const size_t bins = v.merged->power.size();
+            float *merged_power = v.merged->power.data();
+            const float *power = frame->power.data();
+            if (frame->peak) {
+                for (size_t i = 0; i < bins; ++i) merged_power[i] = std::max(merged_power[i], power[i]);
+            } else {
+                const float keep = float(v.pending_frames) / float(v.pending_frames + 1), add = 1 - keep;
+                for (size_t i = 0; i < bins; ++i) merged_power[i] = merged_power[i] * keep + power[i] * add;
+            }
             SpectrumFrame *merged = v.merged.get();
-            float n = float(v.pending_frames);
-            for (size_t i = 0; i < merged->db.size(); ++i)
-                merged->db[i] = frame->peak ? std::max(merged->db[i], frame->db[i])
-                                            : (merged->db[i] * n + frame->db[i]) / (n + 1);
             merged->blocks += frame->blocks;
             merged->index = frame->index;
             ++v.pending_frames;
@@ -690,10 +723,11 @@ private:
     }
 
     // The frame fitted to the viewer's range and resolution: at most v.bins bins, each the
-    // maximum of the FFT bins it covers, as 8-bit steps of kStepDb above a base level.
+    // maximum of the FFT bins it covers (taken as power: one logarithm per bin sent), as 8-bit
+    // steps of kStepDb above a base level.
     static std::string encode(const SpectrumFrame &f, const Viewer &v, uint32_t sequence)
     {
-        const size_t n = f.db.size();
+        const size_t n = f.power.size();
         const double width = f.sample_rate / double(n), left = f.center_hz - f.sample_rate / 2 - width / 2;
         size_t first = 0, last = n;
         if (v.stop_hz > v.start_hz) {
@@ -705,8 +739,9 @@ private:
         float low = 1e9f, high = -1e9f;
         for (size_t o = 0; o < bins; ++o) {
             size_t from = first + o * span / bins, to = std::max(from + 1, first + (o + 1) * span / bins);
-            float peak = f.db[from];
-            for (size_t i = from + 1; i < to; ++i) peak = std::max(peak, f.db[i]);
+            float peak = f.power[from];
+            for (size_t i = from + 1; i < to; ++i) peak = std::max(peak, f.power[i]);
+            peak = spectrum_db(peak);
             values[o] = peak;
             low = std::min(low, peak);
             high = std::max(high, peak);
@@ -844,6 +879,7 @@ private:
              ",\"pairs_used\":" + json_number(std::round(spectrum_used_)) +
              ",\"pairs_dropped\":" + json_number(std::round(spectrum_dropped_)) +
              ",\"coverage\":" + json_number(sample_rate_ > 0 ? std::min(1.0, spectrum_used_ / sample_rate_) : 0) +
+             ",\"share\":" + json_number(std::round(spectrum.share * 1000) / 1000) +
              ",\"workers\":" + std::to_string(spectrum.workers) + ",\"queued\":" + std::to_string(spectrum.queued) +
              ",\"backlog\":" + std::to_string(spectrum.backlog) + ",\"missing\":" + std::to_string(spectrum.pairs_missing) +
              ",\"retuned\":" + std::to_string(spectrum.frames_retuned) + "}";
@@ -895,6 +931,8 @@ private:
     double byte_rate_ = 0, datagram_rate_ = 0, sample_rate_ = 0, packed_share_ = 0;
     std::thread dump_thread_;
     std::atomic<bool> dumping_{false};
+    Clock::time_point placed_at_{};
+    int kept_off_ = -1;
 
     // Last: destroyed first, while the web server its reader wakes still exists.
     std::unique_ptr<Controller> controller_;

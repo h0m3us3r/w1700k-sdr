@@ -1,0 +1,18 @@
+SPDX-License-Identifier: GPL-2.0+
+Subject: [PATCH] configs: an7581: the saved environment sets only the update state
+
+With CONFIG_ENV_WRITEABLE_LIST the environment is the built-in default plus
+the listed variables from storage: the two a staged root update keeps between
+boots. A saved copy of the boot and update scripts can then never stand in
+for the ones this loader was built with.
+
+--- a/include/configs/an7581.h
++++ b/include/configs/an7581.h
+@@ -19,0 +20,7 @@
++/*
++ * With CONFIG_ENV_WRITEABLE_LIST, the only variables the saved environment may
++ * set: a staged root update's state. Everything else, the boot and update
++ * scripts first of all, is always the built-in default.
++ */
++#define CFG_ENV_FLAGS_LIST_STATIC	"update_tried:sw,update_failed:sw,loader_tried:sw,loader_failed:sw,loader_booted:sw"
++

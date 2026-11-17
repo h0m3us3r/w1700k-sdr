@@ -134,7 +134,9 @@
 /* MDIO pins (mux "mdio" = GPIO 1/2); GPIO 2 is also configured output-high. */
 #define W1700K_GPIO_MDIO_MDC            1u
 #define W1700K_GPIO_MDIO_MDIO           2u
-/* Front LEDs, all active-low. */
+/* Front LEDs, all active-low. The four status emitters share one lens; each lights its colour
+ * when its pin is low, and all four dim under the SoC's waveform generators (GPIO flash mode,
+ * map entry 8 + (gpio & 7): kernel/w1700k_sdr/led.c) [measured by eye on a unit]. */
 #define W1700K_GPIO_LED_LAN3_GREEN      9u
 #define W1700K_GPIO_LED_LAN3_YELLOW     10u
 #define W1700K_GPIO_LED_STATUS_GREEN    17u
@@ -240,7 +242,7 @@
  * top 163 good ones and differs per unit; the BMT checksum covers that many
  * entries. The stock kernel would publish 1792 blocks (0x1c000000). With at
  * most 40 bad blocks, at least 1845 blocks translate, above the 1784 that
- * reach the end of `scratch` (0x1be00000). */
+ * reach the end of `stock` (0x1be00000). */
 #define W1700K_BMT_LV_POOL_LEAST        163u
 #define W1700K_BMT_LV_USER_BLOCKS       1792u
 
@@ -264,15 +266,19 @@
 #define W1700K_NAND_RESERVE_SIZE        0x04200000u
 
 /* Project map: the first three windows and the reserve stay vendor-owned and
- * read-only; the chainloaded U-Boot occupies the start of stock tclinux. */
-#define W1700K_NAND_LOADER              0x00600000u /* 2 MiB */
-#define W1700K_NAND_LOADER_SIZE         0x00200000u
-#define W1700K_NAND_SYSTEM              0x00800000u /* UBI: FIT, rootfs, env */
-#define W1700K_NAND_SYSTEM_SIZE         0x03000000u
-#define W1700K_NAND_DURABLE             0x03800000u /* UBI, writable */
-#define W1700K_NAND_DURABLE_SIZE        0x02000000u
-#define W1700K_NAND_SCRATCH             0x05800000u
-#define W1700K_NAND_SCRATCH_SIZE        0x16600000u
+ * read-only; the chainloaded U-Boot occupies the start of stock tclinux, and
+ * everything of ours ends where stock tclinux does, so tclinux_slave and
+ * stock's UBI behind it are never written. */
+#define W1700K_NAND_LOADER              0x00600000u /* 256 KiB: what stock reads and boots */
+#define W1700K_NAND_LOADER_SIZE         0x00040000u
+#define W1700K_NAND_LOADER_B            0x00640000u /* 768 KiB: a newer loader, started by the first */
+#define W1700K_NAND_LOADER_B_SIZE       0x000c0000u
+#define W1700K_NAND_SYSTEM              0x00700000u /* UBI: FIT, rootfs, env */
+#define W1700K_NAND_SYSTEM_SIZE         0x02300000u
+#define W1700K_NAND_DURABLE             0x02a00000u /* UBI, writable */
+#define W1700K_NAND_DURABLE_SIZE        0x01c00000u
+#define W1700K_NAND_STOCK               0x04600000u /* tclinux_slave and stock's UBI */
+#define W1700K_NAND_STOCK_SIZE          0x17800000u
 
 /* OpenWrt's layout for comparison: chainloader 0x600000 (1 MiB), one UBI
  * 0x700000..0x1be00000. Its UBI "factory" volume (EEPROM at +0, 0x1e00

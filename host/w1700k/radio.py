@@ -113,6 +113,25 @@ DEFAULT_BANDS = {
 }
 
 
+# Where a unit carries its calibration: 16 KiB at 0x5000 of the vendor's factory partition, which
+# our layout names `calibration` and nothing of ours writes (NAND 0x405000).
+UNIT_EEPROM_OFFSET = 0x5000
+EEPROM_CHIP_ID = b'\x90\x79'                           # 0x7990, little-endian, where the image starts
+UNIT_EEPROM = ('n=$(sed -n \'s/^mtd\\([0-9]*\\):.*"calibration"$/\\1/p\' /proc/mtd); [ -n "$n" ] && '
+               f'dd if=/dev/mtd${{n}}ro bs=4096 skip={UNIT_EEPROM_OFFSET // 4096} '
+               f'count={EEPROM_FILE_BYTES // 4096} 2>/dev/null')
+
+
+def unit_eeprom(unit):
+    """The calibration EEPROM file the unit itself holds, or None when it gives none (a system
+    without the partition, or a partition without an MT7996 image)."""
+    result = unit.run(UNIT_EEPROM, timeout=30)
+    data = result.stdout
+    if result.returncode or len(data) != EEPROM_FILE_BYTES or data[:2] != EEPROM_CHIP_ID:
+        return None
+    return data
+
+
 def eeprom_image(data):
     """The 7680 calibration bytes of a unit EEPROM file (16 KiB with a blank tail, or 7680 bytes)."""
     if len(data) == EEPROM_FILE_BYTES:
@@ -165,7 +184,8 @@ class Radio:
     def replace_module(self, module):
         """A fresh driver. Any stream is stopped (its pump writes the stop word) and any control
         session closed, since both hold the device; RESET_MT quiesces DMA before the old module
-        may go; then insmod."""
+        may go; then insmod. The status LED's program (w1700k-led) opens the device only for the
+        instant of each change of the LED, so an rmmod that meets it is tried again."""
         download = self.unit.tool('mt7996-download')
         script = (f'set -e\n'
                   f'n=0\n'
@@ -175,7 +195,14 @@ class Radio:
                   f'done\n'
                   f'pids=$(pidof mt7996-ctl || true)\n'
                   f'if [ -n "$pids" ]; then kill $pids; sleep 1; fi\n'
-                  f'if [ -c {DEVICE} ]; then {download} {DEVICE} --reset >/dev/null; rmmod w1700k_sdr; fi\n'
+                  f'if [ -c {DEVICE} ]; then\n'
+                  f'  {download} {DEVICE} --reset >/dev/null\n'
+                  f'  n=0\n'
+                  f'  until rmmod w1700k_sdr 2>/dev/null; do\n'
+                  f'    [ $n -lt 20 ] || {{ rmmod w1700k_sdr; exit 1; }}\n'
+                  f'    sleep 0.1; n=$((n + 1))\n'
+                  f'  done\n'
+                  f'fi\n'
                   f'insmod {module}\n'
                   f'[ -c {DEVICE} ]\n')
         try:

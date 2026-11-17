@@ -103,6 +103,27 @@ class Restore(Bench):
         self.assertEqual(unit.saved['bootcmd'], fake.STOCK_BOOTCMD)
         self.assertEqual(unit.state, 'stock-linux')
 
+    def test_stocks_second_slot_alone_is_written_back_and_ours_stays(self):
+        """--stock-slot: what an old layout's `durable` overwrote in stock's second slot comes
+        back from the backup; the loader, our system and our boot command are not touched."""
+        unit = self.installed_unit()
+        span = (0x700000, SIZE - 0x700000)                     # `stock`, on this small chip
+        damaged = span[0] + 2 * KV.block
+        unit.nand[damaged:damaged + 3 * KV.block] = b'\xa5' * (3 * KV.block)
+        with mock.patch.dict(partitions.GEOMETRY, {'stock': span}):
+            self.assertEqual(restore.stock_span(SIZE), span)
+            self.assertEqual(self.restore(stock_only=True, boot=False), 0)
+            self.assertEqual(unit.nand_writes, [(damaged + k * KV.block, KV.block) for k in range(3)])
+            self.assertEqual(bytes(unit.nand[span[0]:]), self.backup.read_bytes()[span[0]:])
+            self.assertEqual(bytes(unit.nand[0x600000:0x700000]), b'\x5a' * 0x100000, 'our images')
+            self.assertEqual(bytes(unit.nand[0x200000:0x200000 + len(OURS)]), OURS, 'our boot command')
+
+    def test_an_intact_second_slot_is_compared_and_not_written(self):
+        unit = self.installed_unit()
+        with mock.patch.dict(partitions.GEOMETRY, {'stock': (0x700000, SIZE - 0x700000)}):
+            self.assertEqual(self.restore(stock_only=True, boot=False), 0)
+        self.assertEqual(unit.nand_writes, [])
+
     def test_only_the_blocks_that_differ_are_rewritten(self):
         unit = self.installed_unit()
         self.restore()

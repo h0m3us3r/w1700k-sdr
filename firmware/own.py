@@ -18,9 +18,9 @@ from stream import blob
 HERE = Path(__file__).resolve().parent
 WM_ENTRY, WM_LIMIT = 0x00916400, 0x00938000       # ULM1, as wm/wm.h
 WM_CRAM, WM_CRAM_LIMIT = 0xe0040000, 0xe027c000    # CRAM, as wm/wm.h
-# The stream producer, one image per packing schedule, in ULM1 above our WM's code; the WA packer at
-# the address the producer raises the WA into (stream/layout.h WA_CODE). Loaded with the firmware.
-PRODUCER_BASE = {'raw': 0x00930000, 'half': 0x00932000}
+# The stream producer in ULM1 above our WM's code (one image, every packing schedule); the WA packer
+# at the address the producer raises the WA into (stream/layout.h WA_CODE). Loaded with the firmware.
+PRODUCER_BASE = 0x00930000
 PRODUCER_SIZE = 0x2000
 WA_ENTRY, WA_LIMIT = 0x10000000, 0x1001c000       # WA ILM
 VERSION = 'w1700k-own'
@@ -50,8 +50,8 @@ def wm_code(keep_elf=None):
     missing = [t for t, path in tools.items() if not path]
     if missing:
         raise SystemExit('the WM build needs ' + ', '.join(missing))
-    defines = blob._schedule_defines(blob.RAW)
-    defines.update(WM_PRODUCER_RAW=f"{PRODUCER_BASE['raw']:#x}u", WM_PRODUCER_HALF=f"{PRODUCER_BASE['half']:#x}u")
+    defines = blob.schedule_defines()
+    defines.update(WM_PRODUCER=f'{PRODUCER_BASE:#x}u')
     flags = blob.CFLAGS + [f'-I{HERE.parent / "include"}'] + [f'-D{k}={v}' for k, v in defines.items()]
     with tempfile.TemporaryDirectory() as tmp:
         objects = []
@@ -71,7 +71,7 @@ def wm_code(keep_elf=None):
         if sections != ['.text', '.cram']:
             raise SystemExit(f'WM sections other than .text and .cram: {sections}')
         out = []
-        for name, base, limit in (('.text', WM_ENTRY, PRODUCER_BASE['raw']), ('.cram', WM_CRAM, WM_CRAM_LIMIT)):
+        for name, base, limit in (('.text', WM_ENTRY, PRODUCER_BASE), ('.cram', WM_CRAM, WM_CRAM_LIMIT)):
             raw = Path(tmp, name.strip('.') + '.bin')
             subprocess.run([tools['llvm-objcopy'], '-O', 'binary', '-j', name, str(elf), str(raw)], check=True)
             code = raw.read_bytes()
@@ -87,22 +87,21 @@ def wa_code():
     return blob.compile_blob([str(HERE / 'wa' / 'start.S'), str(HERE / 'wa' / 'wa.c')], {}, WA_ENTRY, blob.WA_CODE)
 
 
-def producer(packing):
-    base = PRODUCER_BASE[packing.name]
-    return blob.compile_blob(['lead.S', 'producer.c', 'pack.S'], blob._schedule_defines(packing), base,
-                             base + PRODUCER_SIZE)
+def producer():
+    return blob.compile_blob(['lead.S', 'producer.c', 'pack.S', 'reduce14.S'], blob.schedule_defines(), PRODUCER_BASE,
+                             PRODUCER_BASE + PRODUCER_SIZE)
 
 
 def wm_container():
     ulm1, cram = wm_code(HERE / 'build' / 'w1700k_wm.elf')
     regions = [(WM_ENTRY, ulm1, ENTRY)]
-    regions += [(PRODUCER_BASE[p.name], producer(p), container.FEATURE_ENCRYPT) for p in blob.PACKINGS]
+    regions.append((PRODUCER_BASE, producer(), container.FEATURE_ENCRYPT))
     regions.append((WM_CRAM, cram, container.FEATURE_ENCRYPT))
     return container.ram_container(regions, VERSION, BUILD_DATE)
 
 
 def wa_container():
-    packer = blob.wa_packer(blob.HALF)
+    packer = blob.wa_packer()
     return container.ram_container([(WA_ENTRY, wa_code(), ENTRY), (blob.WA_CODE, packer, container.FEATURE_ENCRYPT)],
                                    VERSION, BUILD_DATE)
 

@@ -76,6 +76,23 @@
  * -3 dB corners: about +-11 / +-27 / +-45 / +-68 MHz for codes 0..3; +-85 MHz
  * at code 3 with trim 0 (+-55 with trim 31). Tones beyond +-160 MHz alias
  * in at least 58 dB down at code 3.
+ * The filter is the receiver's only anti-alias filter: the converter samples
+ * at 320 MHz, so whatever passes the filter 320 MHz from the LO folds onto
+ * the band. At 160 Msps (band 0, BW80, LNA 2 / LPF 5, 2026-11-12; a tone at
+ * 2435 MHz from a HackRF in a shielded box, the LO on it and then 320 MHz
+ * either side; a ratio at one tone frequency, so the path between the radios
+ * drops out), the folded tone against the tone itself, by the host's filter
+ * setting (rf.py FILTER_CODE), LO below / above the tone:
+ *   320 MHz  -19.7 / -18.4 dB     160 MHz  -33.2 / -32.1     80 MHz  -45.3 / -44.4
+ *    40 MHz  -65.5 / -65.5        20 MHz   -78.1 / -76.3
+ * (at 2420..2480 MHz, 320 MHz setting: -17.8 .. -20.2). With the filter as
+ * wide as the sample rate, as the host sets it by default: -33.8 / -32.1 at
+ * 160 Msps, -45.6 / -43.8 at 80 Msps, -65.6 / -65.2 at 40 Msps; the folds at
+ * 80 and 160 MHz at or under -56 dB at each. The response 160 MHz
+ * from the LO (the decimation's own fold) is -42 dB at the 320 MHz setting
+ * and at or under -56 dB, the measurement's floor, at the others. So a strong
+ * band 320 MHz from the view shows in it: the 2.4 GHz band at 2720..2804 and
+ * 2080..2164 MHz. [measured]
  * ------------------------------------------------------------------------ */
 #define MT7976_RX_BW_CODE_MAX           ADIE_RX_BW_CODE_160MHZ
 

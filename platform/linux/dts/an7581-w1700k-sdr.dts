@@ -178,24 +178,30 @@
 
 		loader@600000 {
 			label = "loader";
-			reg = <0x00600000 0x00200000>;
+			reg = <0x00600000 0x00040000>;
 			read-only;
 		};
 
-		system@800000 {
+		loader-b@640000 {
+			label = "loader-b";
+			reg = <0x00640000 0x000c0000>;
+			read-only;
+		};
+
+		system@700000 {
 			label = "system";
-			reg = <0x00800000 0x03000000>;
+			reg = <0x00700000 0x02300000>;
 			read-only;
 		};
 
-		durable@3800000 {
+		durable@2a00000 {
 			label = "durable";
-			reg = <0x03800000 0x02000000>;
+			reg = <0x02a00000 0x01c00000>;
 		};
 
-		scratch@5800000 {
-			label = "scratch";
-			reg = <0x05800000 0x16600000>;
+		stock@4600000 {
+			label = "stock";
+			reg = <0x04600000 0x17800000>;
 			read-only;
 		};
 

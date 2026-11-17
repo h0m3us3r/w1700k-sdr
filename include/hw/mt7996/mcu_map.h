@@ -58,9 +58,15 @@
  * the patch copy; survives the full four-container load. [measured] */
 #define MT7996_WM_PROBE_BASE              0x0090a000u
 #define MT7996_WM_PROBE_SIZE              0x00006000u
-/* Free patch SRAM below WM region 0: holds power-on noise after boot and a
- * full load; nothing writes it. Used for packed-chunk buffers that MCU_DMA0
- * TX0 reads directly. [measured] */
+/* Patch SRAM below WM region 0, free of the ROM, the patch and the firmware
+ * images: it holds power-on noise after boot and a full load. Free only
+ * until a stream packs: our WM's packers keep their packed-chunk buffers
+ * 1..3 here (0x00910000..0x009153ff, probe_page.h), which MCU_DMA0 TX0 reads
+ * directly, and rewrite them for as long as a packed stream runs (half, full,
+ * split). A raw stream leaves the region alone. Seen on a unit: code,
+ * descriptor rings and a test pattern put at 0x00910000..0x009120ff stayed
+ * intact through a 40 Msps raw stream and were overwritten from the start of
+ * a 160 Msps full one. [measured] */
 #define MT7996_WM_ULM1_FREE_BASE          0x00910000u
 #define MT7996_WM_ULM1_FREE_SIZE          0x00006000u	/* to 0x00915fff */
 /* WM region-0 code (vendor 2026 release and test mode): 0x00916400..0x00937d0f. */

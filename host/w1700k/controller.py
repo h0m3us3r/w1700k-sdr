@@ -10,37 +10,68 @@ until the pump's stop word. Every operation goes to our firmware as a command (w
 host writes no radio register.
 
 The radio's state is kept on the unit (STATE_FILE, in RAM: a reboot clears it, and the boot id
-is checked), so separate CLI invocations and a `serve` session see the same receiver. Streams
-run detached on the unit; a controller attaches to one that is already running.
+is checked), so separate CLI invocations and `serve` sessions see the same receiver: a controller
+reads it before every operation, and a `serve` session every two seconds while it has nothing to
+do, and adopts what another has changed. A long operation (load, configure, start, stop) is
+written there before it begins, so that the others show it and wait their turn. Streams run
+detached on the unit; a controller attaches to one that is already running.
 
 Rules the hardware imposes:
 - RF programs (tune, gain, filter, band switch) run in our WM between stream chunks, or in its
   main loop without a stream.
 - The LO is one TUNE, also mid-stream. A new sample rate on the band being streamed stops the stream,
   runs RATE and restarts it; switching to another band is one ICAPCR8 write mid-stream.
-- A stream's packing follows its sample rate (packing_for): raw 14-bit IQ up to 160 Msps, half
-  above, where raw exceeds one 10 GbE link. Half is lossless (8 samples in 7 words), so it is not a
-  setting; a band switch keeps a running half stream as it is, since half carries any rate.
+- A stream's packing follows its sample rate and the link (packing_for): raw 14-bit IQ where it
+  fits the unit port's speed, else every chunk packed to 28 bits (full, up to 160 Msps: all the
+  radio's two packers carry), else every other chunk (half: 320 Msps on 10 GbE). Packing is
+  lossless (8 samples in 7 words); a band switch keeps a running stream as it is where its packing
+  carries the new rate. Where none of those fits, the unit's SoC requantises each slice to fewer
+  bits with a scale of its own (stream.REDUCED: 16, 14, 8 or 7 bits per I/Q pair, the deepest
+  that fits: 160 Msps is 14 bits on 2.5 Gbit/s, 80 Msps is 8 on 1); that is not lossless, and the
+  SoC does it only up to 160 Msps (its memory bus cannot read a 320 Msps capture). At 320 Msps
+  the split packing shares the work: the radio's cores reduce every other chunk to 14 bits and
+  the SoC the ones between (4.6 Gbit/s: 5 Gbit/s carries it). A rate no packing fits on the
+  link is refused. Where that choice is wrong for a link, export.packing (or
+  `start --packing`, `serve --packing`) sets the packing by hand: the link is then not consulted,
+  only what the packers can do.
+- The analog filter is the receiver's only anti-alias filter: the converter samples at 320 MHz, and
+  what the filter passes 320 MHz from the LO folds onto the band (18..20 dB down with the 320 MHz
+  filter, 32 at 160, 45 at 80: include/hw/adie/mt7976.h). So each band's filter follows its sample
+  rate (filter_for) unless one is set by hand, which holds until it is told to follow again.
 """
 import json
 import queue
+import secrets
 import sys
 import threading
 import time
 
 from . import config, firmware, rf, wm
-from .config import local_mac_for
+from .config import local_link_for
 from dataclasses import replace
 
-from .radio import DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image
-from .stream import GO_ADDR, Result, Stream, StreamError
+from .radio import (DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Radio, actual_lo, eeprom_image,
+                    unit_eeprom)
+from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MAX_DATAGRAMS, SPLIT, Result,
+                     Stream, StreamError, check_host_mtu, datagram_rate, wire_rate)
 from .unit import Unit
 
 STATE_FILE = '/tmp/w1700k-state.json'
+# The unit's boot id, its uptime in seconds, then the state file: what a controller follows.
+READ_STATE = f'cat /proc/sys/kernel/random/boot_id; cut -d" " -f1 /proc/uptime; cat {STATE_FILE} 2>/dev/null; true'
+# Another session's long operation is waited for this long, and believed for as long: a session
+# killed in the middle of one leaves its mark behind.
+BUSY_WAIT = 120.0
 BANDS = (0, 1, 2)
 DEFAULT_BAND = 1
-PACKINGS = ('raw', 'half')
-RAW_MAX_RATE = 160_000_000        # raw 14-bit IQ above this exceeds one 10 GbE link: packed half
+PACKINGS = config.PACKINGS
+assert PACKINGS == tuple(PACKED_SHARE) + tuple(REDUCED)
+# The order tried: lossless first, then the deepest. split is 14 bits where the unit alone cannot
+# reduce (above REDUCED_MAX_RATE), the numbered ones where it can.
+AUTOMATIC = ('raw', 'full', 'half', SPLIT) + tuple(REDUCED)
+FULL_MAX_RATE = 160_000_000       # the WM and the WA pack every chunk up to this rate, half of them above
+DEFAULT_LINK_MBPS = 10_000        # a port that reports no speed: the unit's 10 GbE
+LINK_FILL = 0.975                 # the share of the link a stream may take (320 Msps half is 97.0 % of 10 GbE)
 START_TIMEOUT = 10.0
 COMMAND_TIMEOUT = 60.0
 
@@ -49,22 +80,58 @@ class ControlError(RuntimeError):
     pass
 
 
+class Refused(ControlError):
+    """A request turned down before anything changed: the receiver is as it was."""
+
+
 LOCK_RESOLUTION_HZ = 100_000            # the lock-edge search's resolution
 LOCK_NEAR_HZ = 20_000_000               # the edges lie this close to TUNE's reach: tried first
 LOCK_MARGIN_HZ = 1_000_000              # the span kept inside the edges found (they wander ~0.1 MHz)
 
 
-def packing_for(rate):
-    return 'half' if rate > RAW_MAX_RATE else 'raw'
+def packing_fits(packing, rate, link_mbps, piece=None):
+    """Whether a stream at `rate` under `packing` fits the link, the packers and the unit's senders."""
+    if packing == 'full' and rate > FULL_MAX_RATE or packing in REDUCED and rate > REDUCED_MAX_RATE:
+        return False
+    if packing == SPLIT:               # whole slices only, and only where the unit cannot do it alone
+        return not piece and rate > REDUCED_MAX_RATE and wire_rate(packing, rate) <= link_mbps * 1e6 * LINK_FILL
+    if piece and datagram_rate(packing, rate, piece) > SENDER_MAX_DATAGRAMS:
+        return False
+    return wire_rate(packing, rate, piece) <= link_mbps * 1e6 * LINK_FILL
 
 
-def packing_allows(packing, rate):
-    return packing == 'half' or rate <= RAW_MAX_RATE
+def packing_for(rate, link_mbps=DEFAULT_LINK_MBPS, piece=None):
+    """The packing of a stream at `rate` on a link of `link_mbps`: raw where it fits, else every
+    chunk packed (the most room on the link, lossless), else every other chunk, else reduced to the
+    most bits that fit."""
+    for packing in AUTOMATIC:
+        if packing_fits(packing, rate, link_mbps, piece):
+            return packing
+    if piece and not any(datagram_rate(p, rate, piece) <= SENDER_MAX_DATAGRAMS for p in AUTOMATIC if p != SPLIT):
+        raise Refused(f'{rate / 1e6:g} Msps in datagrams of {piece} bytes (export.piece) is more than the '
+                      f'unit sends: {datagram_rate(AUTOMATIC[-1], rate, piece) / 1e3:.0f} thousand a second '
+                      f'even at {AUTOMATIC[-1]} bits per sample, of {SENDER_MAX_DATAGRAMS / 1e3:g}')
+    if rate > REDUCED_MAX_RATE:
+        need = wire_rate(SPLIT, rate)
+        raise Refused(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link even reduced to 14 bits '
+                      f'(split between the radio and the unit, which is all they manage at that rate), '
+                      f'and the link carries {link_mbps / 1e3:g} (at most {LINK_FILL:.1%} of it)')
+    need = wire_rate(AUTOMATIC[-1], rate, piece)
+    raise Refused(f'{rate / 1e6:g} Msps needs {need / 1e9:.2f} Gbit/s on the link even at '
+                  f'{AUTOMATIC[-1]} bits per sample, and the link carries {link_mbps / 1e3:g} '
+                  f'(at most {LINK_FILL:.1%} of it)')
+
+
+def filter_for(cfg):
+    """The analog filter that follows a band's sample rate: as wide as the rate (the widest the
+    roll-off correction applies to, and no wider: the filter is what keeps aliases out), 320 MHz at
+    640/2."""
+    return min(DEFAULT_FILTER_MHZ, cfg.sample_rate // 1_000_000)
 
 
 def default_rf(cfg, filter_mhz=DEFAULT_FILTER_MHZ):
-    """A band's RF state after its SETUP. The analog filter is its own setting, independent of the
-    sample rate: it is kept across LO and sample-rate changes."""
+    """A band's RF state after its SETUP. The analog filter is its own setting: it follows the
+    sample rate, or is the one set by hand, kept across LO and sample-rate changes."""
     return {'lo_hz': cfg.lo_hz, 'agc': True, 'lna': None, 'lpf': None, 'filter_mhz': filter_mhz}
 
 
@@ -77,31 +144,45 @@ class Controller:
         self.stream = Stream(self.unit)
         self._ctl = None
         self.boot_id = None
+        self.session = secrets.token_hex(4)   # this controller, among those that share the unit
+        self._seen = None                 # the state file as this controller last wrote or read it
+        self._unit_clock = None           # the unit's uptime minus this host's monotonic clock
+        self.busy_other = None            # another session's long operation, and when it began
+        self._busy_other_since = None     # (the unit's uptime)
+        self.busy = None
+        self.error = None
+        self._reset()
+        self.snapshot = self.state()
+
+    def _reset(self):
+        """The receiver of a unit that holds no state: nothing loaded, every band at its default."""
         self.loaded = False
         self.bands = dict(DEFAULT_BANDS)
         self.bands_ready = []
         self.band = DEFAULT_BAND
         self.packing = None               # the running stream's packing; None: no stream
-        self.rf = {b: default_rf(cfg) for b, cfg in self.bands.items()}
+        self.link_mbps = None             # the export link's capacity, read at a stream start; None: not yet
+        self.packing_manual = None        # the running stream's packing as set by hand; None: chosen automatically
+        self.filter_follows_rate = True   # each band's analog filter is filter_for() its sample rate
+        self.rf = {b: default_rf(cfg, filter_for(cfg)) for b, cfg in self.bands.items()}
         self.synth_locked = [None] * len(BANDS)
         self.lo_lock = {}                 # band -> (lowest, highest) LO its synthesizer locks at, found at load
-        self.busy = None
-        self.error = None
-        self.snapshot = self.state()
 
     # --- state ---
 
     def state(self):
         cfg, rfs = self.bands[self.band], self.rf[self.band]
         return {
-            'busy': self.busy,
+            'busy': self.busy or self.busy_other,
             'radio': {'loaded': self.loaded, 'band': self.band, 'rf_band': cfg.rf_band, 'lo_hz': cfg.lo_hz,
                       'sample_rate': cfg.sample_rate, 'capture_rate': cfg.capture_rate,
                       'bands_ready': sorted(self.bands_ready),
                       'synth_locked': list(self.synth_locked)},
             'stream': {'running': self.packing is not None, 'packing': self.packing,
+                       'packing_manual': self.packing_manual is not None, 'link_mbps': self.link_mbps,
                        'sample_rate': cfg.sample_rate, 'center_hz': rfs['lo_hz']},
-            'rf': dict(rfs, lo_range_hz=list(self.lo_lock.get(self.band, LO_RANGE[self.band]))),
+            'rf': dict(rfs, lo_range_hz=list(self.lo_lock.get(self.band, LO_RANGE[self.band])),
+                       filter_follows_rate=self.filter_follows_rate),
             'error': self.error,
         }
 
@@ -119,23 +200,64 @@ class Controller:
         record = {'boot_id': self.boot_id, 'loaded': self.loaded, 'band': self.band,
                   'lo_lock': {str(b): list(v) for b, v in self.lo_lock.items()},
                   'bands': {str(b): c.as_dict() for b, c in self.bands.items()},
-                  'bands_ready': self.bands_ready, 'packing': self.packing,
-                  'rf': {str(b): v for b, v in self.rf.items()}, 'synth_locked': self.synth_locked}
-        self.unit.push(json.dumps(record).encode(), STATE_FILE)
+                  'bands_ready': self.bands_ready, 'packing': self.packing, 'link_mbps': self.link_mbps,
+                  'packing_manual': self.packing_manual, 'filter_follows_rate': self.filter_follows_rate,
+                  'rf': {str(b): v for b, v in self.rf.items()}, 'synth_locked': self.synth_locked,
+                  # last, after everything the unit's own reader of this file looks for: whose it
+                  # is, and the long operation that session is in the middle of
+                  'session': self.session, 'busy': self.busy,
+                  'busy_since': self._unit_now() if self.busy else None}
+        text = json.dumps(record)
+        self.unit.push(text.encode(), STATE_FILE)
+        self._seen = text
+
+    def _unit_now(self):
+        """The unit's uptime now, as far as the last reading of it tells; None before the first."""
+        return None if self._unit_clock is None else round(time.monotonic() + self._unit_clock, 2)
 
     def attach(self):
         """Adopt the receiver state the unit holds for this boot, and a stream already running."""
-        text = self.unit.check(f'cat /proc/sys/kernel/random/boot_id; cat {STATE_FILE} 2>/dev/null; true')
-        boot_id, _, saved = text.partition('\n')
-        self.boot_id = boot_id.strip()
+        self._follow()
+        self._check_stream()
+        self._changed()
+
+    def _follow(self):
+        """Adopt what the unit holds where that is not what this controller last saw there:
+        another session's change, or a reboot. True when the receiver is not as it was believed."""
+        text = self.unit.check(READ_STATE)
+        boot_id, _, rest = text.partition('\n')
+        uptime, _, saved = rest.partition('\n')
+        boot_id, saved = boot_id.strip(), saved.strip()
         try:
-            record = json.loads(saved) if saved.strip() else None
+            self._unit_clock = float(uptime) - time.monotonic()
+        except ValueError:
+            pass
+        if boot_id == self.boot_id and saved == self._seen:
+            if self.busy_other and not self._busy_fresh():      # that session went away mid-operation
+                self.busy_other = None
+                self._changed()
+                return True
+            return False
+        if self.boot_id is not None and boot_id != self.boot_id:
+            self._log('warn', 'the unit has rebooted: its radio is not loaded')
+            self._close_ctl()
+            self._reset()
+        self.boot_id, self._seen = boot_id, saved
+        self.busy_other = None
+        try:
+            record = json.loads(saved) if saved else None
             if record and record.get('boot_id') == self.boot_id:
                 self._restore(record)
         except (ValueError, KeyError, TypeError):
             self._log('warn', 'ignoring an unreadable receiver state on the unit')
-        self.poll()
         self._changed()
+        return True
+
+    def _busy_fresh(self):
+        now, since = self._unit_now(), self._busy_other_since
+        # (two sessions' readings of the unit's clock differ by their round trips: a mark that
+        # seems to lie a moment ahead is a fresh one)
+        return not isinstance(since, (int, float)) or now is None or now - since < BUSY_WAIT
 
     def _restore(self, record):
         bands = {int(b): BandConfig(int(b), **c).validate() for b, c in record['bands'].items()}
@@ -147,27 +269,68 @@ class Controller:
         self.bands, self.band = bands, record['band']
         self.loaded, self.bands_ready = bool(record['loaded']), list(record['bands_ready'])
         self.packing = record['packing']
+        link = record.get('link_mbps')
+        self.link_mbps = link if isinstance(link, int) and not isinstance(link, bool) and link > 0 else None
+        manual = record.get('packing_manual')
+        self.packing_manual = manual if manual in PACKINGS and self.packing else None
+        self.filter_follows_rate = bool(record.get('filter_follows_rate', True))
         self.rf = rfs
         self.lo_lock = {int(b): tuple(v) for b, v in record.get('lo_lock', {}).items()}
         locks = record.get('synth_locked', [None] * len(BANDS))
         if len(locks) == len(BANDS) and all(v in (None, True, False) for v in locks):
             self.synth_locked = list(locks)
+        busy = record.get('busy') if record.get('session') != self.session else None
+        self._busy_other_since = record.get('busy_since')
+        self.busy_other = busy if isinstance(busy, str) and self._busy_fresh() else None
 
     # --- operations ---
 
     def run(self, busy, operation, *args):
-        """Run one operation with the busy flag set and errors recorded in the state."""
+        """Run one operation with the busy flag set and errors recorded in the state. A request
+        that is refused (Refused: the receiver stays as it was) is logged, not recorded: the
+        state's error is what is wrong with the receiver, and it keeps the one it had."""
+        before = self.error
+        try:
+            self._wait_turn()
+        except Exception as exc:
+            self.error = str(exc)
+            self._log('error', self.error)
+            self._changed()
+            raise
         self.busy, self.error = busy, None
         self._changed()
         try:
+            if busy:
+                self._save()        # the other sessions show it, and wait
             return operation(*args)
+        except Refused as exc:
+            self.error = before
+            self._log('error', str(exc))
+            raise
         except Exception as exc:
             self.error = str(exc)
             self._log('error', self.error)
             raise
         finally:
             self.busy = None
+            if busy:
+                try:
+                    self._save()
+                except Exception as exc:        # the unit is gone: the others will see that themselves
+                    self._log('warn', f'the receiver state was not saved: {exc}')
             self._changed()
+
+    def _wait_turn(self):
+        """The receiver as the unit holds it now, once no other session is in the middle of a long
+        operation on it."""
+        self._follow()
+        deadline = time.monotonic() + BUSY_WAIT
+        while self.busy_other and time.monotonic() < deadline:
+            time.sleep(0.3)
+            self._follow()
+        if self.busy_other:
+            self._log('warn', f'another session has been {self.busy_other} for {BUSY_WAIT:.0f} s: going ahead')
+            self.busy_other = None
 
     def load(self, band=None):
         """Download our firmware and bring the radio up from cold, every band at its LO and sample rate."""
@@ -188,8 +351,11 @@ class Controller:
         self._check_lock_range(band, cfg.lo_hz)
         return self.run('configuring', self._configure, cfg)
 
-    def start(self):
-        return self.run('starting', self._start)
+    def start(self, packing=None):
+        """Start streaming; `packing` sets it by hand, as export.packing does for every stream."""
+        if packing is not None and packing not in PACKINGS:
+            raise ValueError(f'packing: one of {", ".join(PACKINGS)}')
+        return self.run('starting', self._start, packing)
 
     def stop(self):
         return self.run('stopping', self._stop)
@@ -201,7 +367,12 @@ class Controller:
         return self.run(None, self._gain, agc, lna, lpf)
 
     def filter(self, mhz):
+        """The active band's analog filter, set by hand: filters no longer follow the sample rate."""
         return self.run(None, self._filter, mhz)
+
+    def filter_follow(self, on=True):
+        """Whether every band's analog filter follows its sample rate; turned on, they are set to it."""
+        return self.run(None, self._filter_follow, bool(on))
 
     def trim(self, code):
         self._require_loaded()
@@ -215,7 +386,14 @@ class Controller:
         return out
 
     def poll(self):
-        """Notice a stream that ended on its own (overrun, lost source, killed pump)."""
+        """Adopt what another session has changed, and notice a stream that ended on its own
+        (overrun, lost source, killed pump)."""
+        self._follow()
+        self._check_stream()
+
+    def _check_stream(self):
+        if self.busy_other:
+            return      # that session is stopping or restarting it: its end is not the stream's own
         if self.packing and self.stream.finished():
             result = self._finish_stream()
             self.error = f'the stream ended: {result.text}'
@@ -230,7 +408,27 @@ class Controller:
 
     def _require_loaded(self):
         if not self.loaded:
-            raise ControlError('the radio is not loaded')
+            raise Refused('the radio is not loaded')
+
+    def _link(self):
+        return self.link_mbps or DEFAULT_LINK_MBPS
+
+    def _packing_at(self, rate, manual=None):
+        """The packing of a stream at `rate`: the one set by hand (this stream's, else the
+        configuration's) where the packers can do it, else the one the rate and the link give."""
+        manual = manual or self.config.export.packing
+        if not manual:
+            return packing_for(rate, self._link(), self.config.export.piece)
+        if manual == 'full' and rate > FULL_MAX_RATE:
+            raise Refused(f'packing full is set by hand, and the radio packs every chunk only up to '
+                          f'{FULL_MAX_RATE / 1e6:g} Msps, not {rate / 1e6:g}')
+        if manual in REDUCED and rate > REDUCED_MAX_RATE:
+            raise Refused(f'packing {manual} is set by hand, and the unit reduces the bits per sample only '
+                          f'up to {REDUCED_MAX_RATE / 1e6:g} Msps, not {rate / 1e6:g}')
+        if manual == SPLIT and (rate <= REDUCED_MAX_RATE or self.config.export.piece):
+            raise Refused(f'packing split is set by hand; it is for whole slices above '
+                          f'{REDUCED_MAX_RATE / 1e6:g} Msps, where the unit cannot reduce a stream alone')
+        return manual
 
     def _tune(self, hz):
         self._require_loaded()
@@ -315,7 +513,22 @@ class Controller:
             raise ValueError(f'filter: one of {", ".join(map(str, rf.FILTER_CODE))} MHz')
         rf.set_filter(self._session(), self.band, mhz)
         self.rf[self.band]['filter_mhz'] = mhz
+        self.filter_follows_rate = False
         self._save()
+
+    def _filter_follow(self, on):
+        self.filter_follows_rate = on
+        if on and self.loaded:
+            for b in BANDS:
+                self._follow_filter(b)
+        self._save()
+
+    def _follow_filter(self, b):
+        """Band b's filter at its sample rate, if filters follow."""
+        want = filter_for(self.bands[b])
+        if self.filter_follows_rate and self.rf[b]['filter_mhz'] != want:
+            rf.set_filter(self._session(), b, want)
+            self.rf[b]['filter_mhz'] = want
 
     def _command(self, op, *args, timeout=COMMAND_TIMEOUT):
         """One radio command on our WM; raises ControlError with the firmware's reason."""
@@ -328,6 +541,8 @@ class Controller:
         return res
 
     def _filter_of(self, band):
+        if self.filter_follows_rate:
+            return filter_for(self.bands[band])
         return self.rf.get(band, {}).get('filter_mhz', DEFAULT_FILTER_MHZ)
 
     def _set_band(self, cfg):
@@ -381,8 +596,15 @@ class Controller:
         return wm.Wm(self.unit, session=self._session())
 
     def _eeprom(self):
+        """The calibration to load: a file the user named; else what the unit itself carries, so
+        that a host with several units never gives one unit another's; else the one saved copy."""
         try:
             path = config.eeprom_path(self.config)
+            if path is None:
+                own = unit_eeprom(self.unit)
+                if own is not None:
+                    return eeprom_image(own)
+                path = config.saved_eeprom()
             return eeprom_image(path.read_bytes())
         except config.ConfigError as exc:
             raise ControlError(str(exc))
@@ -397,12 +619,17 @@ class Controller:
             self._load()
             return
         old = self.bands[b]
+        manual = self.packing_manual
+        if running:
+            needed = self._packing_at(cfg.sample_rate, manual)      # refused before anything changes
         if cfg.rate_code == old.rate_code and b in self.bands_ready:
             # the band's rate unchanged: switch the capture (mid-stream when the running packing
             # carries that rate, else restarted with the packing it needs), then the LO alone if it
             # moved
             if b != self.band:
-                if running and packing_allows(running, cfg.sample_rate):
+                # a stream chosen automatically keeps a packing that still fits; one set by hand is that one
+                if running and (running == needed or not manual and running not in REDUCED and running != SPLIT
+                                and packing_fits(running, cfg.sample_rate, self._link(), self.config.export.piece)):
                     self._switch_mid_stream(b)
                 else:
                     if running:
@@ -411,7 +638,7 @@ class Controller:
                     self.band = b
                     self._save()
                     if running:
-                        self._start()
+                        self._start(manual)
             if cfg.lo_hz != old.lo_hz:
                 self._tune_band(b, cfg.lo_hz)
             return
@@ -424,13 +651,14 @@ class Controller:
             self._save()
         self._set_rate(replace(cfg, lo_hz=old.lo_hz))
         self.bands[b] = replace(old, sample_rate=cfg.sample_rate, capture_rate=cfg.capture_rate)
+        self._follow_filter(b)
         self.bands_ready.append(b)
         self._command('select', b)
         self._save()
         if cfg.lo_hz != old.lo_hz:
             self._tune_band(b, cfg.lo_hz)
         if running:
-            self._start()
+            self._start(manual)
 
     def _switch_mid_stream(self, band):
         before, after = rf.select_band(self._session(), band)
@@ -439,18 +667,25 @@ class Controller:
         self._log('info', f'capturing band {band} from ICAP0 write pointer {before:#x}..{after:#x}')
         self._check_locks()
 
-    def _start(self):
+    def _start(self, packing=None):
         if self.packing:
             return
-        packing = packing_for(self.bands[self.band].sample_rate)
         if not self.loaded:
             self._load()
         export = self.config.export
-        dst_mac = export.dst_mac or local_mac_for(export.dst_ip)
-        self.stream.check_interface(export.interface)
+        # Without a destination MAC in the configuration, the stream goes to this host.
+        here = None if export.dst_mac else local_link_for(export.dst_ip)
+        dst_mac = export.dst_mac or here[1]
+        speed, mtu = self.stream.check_interface(export.interface)
+        self.link_mbps = min((v for v in (speed, export.link_mbps) if v), default=None)
+        manual = packing or export.packing
+        packing = self._packing_at(self.bands[self.band].sample_rate, manual)
+        self.stream.check_mtu(export.interface, mtu, packing, export.piece)
+        if here:
+            check_host_mtu(here[0], here[2], export.dst_ip, packing, export.piece, mtu)
         self.stream.install_own(self._wm(), packing)
-        self.stream.launch(export, dst_mac)
-        self.packing = packing
+        self.stream.launch(export, dst_mac, packing, mtu)
+        self.packing, self.packing_manual = packing, manual
         self._save()
         try:
             self._wait_producer()
@@ -483,7 +718,7 @@ class Controller:
             self._log('error', f'stream start failed: {result.text}')
         except StreamError as exc:
             self._log('error', str(exc))
-            self.packing = None
+            self.packing = self.packing_manual = None
             self._save()
 
     def _stop(self):
@@ -494,6 +729,29 @@ class Controller:
         result = self._finish_stream()
         level = 'info' if result.ok else 'warn'
         self._log(level, f'stream {result.text}: {result.chunks} chunks in {result.seconds} s')
+        sent = (result.reader or {}).get('send') or {}
+        if sent.get('senders'):
+            # the unit's own senders (a reduced packing, or small datagrams): what they could not carry
+            short = sent.get('lapped', 0) or sent.get('errors', 0)
+            self._log('warn' if short else 'info',
+                      f'the unit sent {sent.get("slices", 0)} slices in {sent.get("datagrams", 0)} datagrams; '
+                      f'{sent.get("lapped", 0)} skipped (the senders fell behind), {sent.get("errors", 0)} send '
+                      f'errors, {sent.get("busy", 0)} waits for the link')
+        exported = (result.reader or {}).get('export') or {}
+        if exported.get('result'):
+            self._log('warn', f'the driver\'s export ended with {exported.get("result")}: '
+                              f'{exported.get("unsent", 0)} completions were not sent')
+        elif exported.get('unsent'):
+            # beside the unit's senders it goes on after falling behind (W1700K_SDR_EXPORT_SHORT)
+            self._log('warn', f'the driver\'s export fell behind and passed over {exported.get("unsent")} '
+                              f'completions (at most {exported.get("max_lag", 0)} behind)')
+        split = (result.reader or {}).get('split') or {}
+        if split.get('on'):
+            # the radio's own chunks: how wide the shift it was given ranged (7 holds full scale)
+            self._log('warn' if split.get('shift_errors') else 'info',
+                      f'the radio reduced its chunks under shifts {split.get("shift_lowest")} to '
+                      f'{split.get("shift_highest")} ({split.get("shift_writes", 0)} changes, '
+                      f'{split.get("shift_errors", 0)} failed); the driver exported {exported.get("slices", 0)} of them')
         return result
 
     def _finish_stream(self):
@@ -503,7 +761,7 @@ class Controller:
         except (StreamError, wm.WmError) as exc:
             self._log('warn', f'stream clean-up: {exc}')
             result = Result(0, 0, 0.0, False, None)
-        self.packing = None
+        self.packing = self.packing_manual = None
         self._save()
         return result
 
@@ -542,7 +800,7 @@ def handle(controller, request):
                              _require(request, 'lo_hz', (int, float), True),
                              _require(request, 'capture_rate', int, True))
     elif op == 'start':
-        controller.start()
+        controller.start(_require(request, 'packing', str, optional=True))
     elif op == 'stop':
         controller.stop()
     elif op == 'tune':
@@ -551,6 +809,8 @@ def handle(controller, request):
         controller.gain(bool(request.get('agc')), _require(request, 'lna', int, True), _require(request, 'lpf', int, True))
     elif op == 'filter':
         controller.filter(_require(request, 'mhz', int))
+    elif op == 'filter_follow':
+        controller.filter_follow(_require(request, 'on', bool))
     else:
         raise ValueError(f'unknown op {op!r}')
     return {}

@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'init'), str(Path(__file__).resolve().parent)]
-from initkit import backup, config, install, layout, provision, session, update  # noqa: E402
+from initkit import backup, config, install, layout, provision, session, stock, update  # noqa: E402
 from initkit import nand as parts  # noqa: E402
 from initkit.config import partitions  # noqa: E402
 from initkit.console import StepFailed  # noqa: E402
@@ -50,6 +50,7 @@ class Bench(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.settings = argparse.Namespace(uart='/dev/null', host_ip='192.168.1.10',
                                            device_ip='192.168.1.1', stock_port=7071,
+                                           stock_transport='tftp',
                                            transfer_port=7070, data_dir=self.work / 'data')
         self.unit_root = self.work / 'unit-root.squashfs'
         self.unit_root.write_bytes(fake.fit('hsqs-unit', 0x31000))
@@ -125,6 +126,19 @@ class Install(Bench):
                              for line in self.commands()))
         self.assertEqual(unit.saved.get('bootcmd'), fake.STOCK_BOOTCMD)
 
+    def test_an_install_with_no_login_key_needs_no_key_and_says_how_the_unit_gets_one(self):
+        self.make_unit()
+        key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA=='
+        with mock.patch.object(install, 'open_session', self.open_session), \
+                mock.patch.object(provision, 'authorized_key', side_effect=provision.ProvisionError('no key')), \
+                mock.patch.object(provision, 'provision', return_value=(self.unit_root, key)) as provisioned, \
+                mock.patch('builtins.print') as printed:
+            self.assertEqual(install.run(self.settings, no_login_key=True), 0)
+        self.assertTrue(provisioned.call_args.kwargs['no_login_key'])
+        said = ' '.join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn('It has no login key: give it one with its reset button (init/key)', said)
+        self.assertNotIn('Log in with', said)
+
     def test_the_flag_installs_on_an_untested_nand_with_its_own_layout(self):
         unit = self.make_unit(part=LV)
         self.assertEqual(self.install(accept_untested=True), 0)
@@ -132,7 +146,7 @@ class Install(Bench):
         self.assertNotEqual(config.durable(LV).read_bytes(), config.durable(KV).read_bytes())
         sizes = {name: int(size, 16) for name, size, *_ in unit.created['system']}
         self.assertEqual(sizes['fit'], 64 * LV.leb)
-        self.assertEqual(sizes['rootfs'], 82 * LV.leb)
+        self.assertEqual(sizes['rootfs'], 30 * LV.leb)
         self.assertEqual(unit.state, 'linux')
 
     def test_a_pool_stock_does_not_share_stops_the_flagged_install(self):
@@ -184,7 +198,7 @@ class Install(Bench):
         erased = {}
         for partition, offset, length in self.unit.erased:
             erased[partition] = erased.get(partition, 0) + length
-        self.assertEqual(erased, {'system': 0x3000000, 'durable': 0x2000000})
+        self.assertEqual(erased, {'loader-b': 0xc0000, 'system': 0x2300000, 'durable': 0x1c00000})
         stock_writes = [line for line in self.commands('stock')
                         if line.startswith(('flash write', 'flash erase'))]
         self.assertTrue(all(' 0x600000 ' in line for line in stock_writes))
@@ -245,6 +259,146 @@ class Install(Bench):
             self.install()
 
 
+class StockTransport(Bench):
+    """How the first image reaches stock U-Boot: its TFTP client, or `loadb`."""
+
+    def serial(self, **options):
+        self.settings.stock_transport = 'serial'
+        return self.make_unit(**options)
+
+    def untouched(self, unit):
+        self.assertFalse(any(line.startswith(('flash', 'saveenv', 'mtd', 'bootm'))
+                             for line in self.commands()))
+        self.assertEqual(unit.saved.get('bootcmd'), fake.STOCK_BOOTCMD)
+
+    def test_tftp_is_the_default(self):
+        self.assertEqual(config.DEFAULTS['stock_transport'], 'tftp')
+        self.make_unit()
+        self.install()
+        self.assertTrue(any(line.startswith('tftpboot ') for line in self.commands('stock')))
+        self.assertFalse(any(line.startswith('loadb') for line in self.commands()))
+
+    def test_over_serial_a_unit_is_installed_and_stock_fetches_nothing(self):
+        unit = self.serial()
+        self.assertEqual(self.install(), 0)
+        stock_commands = self.commands('stock')
+        self.assertIn(f'loadb {stock.STAGE_ADDRESS:#x}', stock_commands)
+        self.assertFalse(any(line.startswith(('tftpboot', 'setenv serverip', 'setenv ipaddr'))
+                             for line in stock_commands), stock_commands)
+        self.assertEqual(unit.state, 'linux')
+
+    def test_over_serial_the_image_is_still_checked_in_ram_before_it_is_booted(self):
+        self.serial()
+        self.install()
+        order = [self.index(pattern) for pattern in (r'^loadb ', r'^crc32 0x89000000 ',
+                                                     r'^iminfo 0x89000000', r'^bootm ')]
+        self.assertEqual(order, sorted(order))
+
+    def test_a_loader_update_goes_over_serial_too(self):
+        unit = self.serial(installed=True)
+        self.flash(loader=True)
+        self.assertIn(f'loadb {stock.STAGE_ADDRESS:#x}', self.commands('stock'))
+        self.assertFalse(any(line.startswith('tftpboot') for line in self.commands('stock')))
+        self.assertTrue(unit.loader_slot.startswith(config.LOADER.read_bytes()))
+
+    def test_an_image_kermit_let_through_wrong_is_caught_by_the_crc(self):
+        unit = self.serial(line='corrupting')
+        with self.assertRaisesRegex(StepFailed, 'corrupt in RAM'):
+            self.install()
+        self.untouched(unit)
+
+    def test_a_size_stock_reports_wrong_stops_the_run(self):
+        unit = self.serial(line='short')
+        with self.assertRaisesRegex(StepFailed, 'not 176128 bytes'):
+            self.install()
+        self.untouched(unit)
+
+    def test_a_line_that_carries_nothing_stops_the_run_and_frees_the_prompt(self):
+        unit = self.serial(line='dead')
+        with mock.patch.object(stock, 'PACKET_SECONDS', 0.002), \
+                mock.patch.object(stock, 'PACKET_TRIES', 3), \
+                self.assertRaisesRegex(StepFailed, 'did not go over the serial line.*'
+                                                   '--stock-transport tftp'):
+            self.install()
+        # Ctrl-C, so stock is back at its prompt and not waiting for a packet.
+        self.assertEqual(self.commands('stock')[-2:], [f'loadb {stock.STAGE_ADDRESS:#x}',
+                                                       '<ctrl-c>'])
+        self.untouched(unit)
+
+    def test_a_stock_loader_without_loadb_says_to_use_tftp(self):
+        unit = self.serial(loadb=False)
+        with self.assertRaisesRegex(StepFailed, 'did not start `loadb`.*--stock-transport tftp'):
+            self.install()
+        self.untouched(unit)
+
+    def test_a_tftp_piece_that_does_not_arrive_names_the_serial_way(self):
+        self.make_unit()
+        with mock.patch.object(stock, 'split', return_value=[('missing.p00', 100)]), \
+                self.assertRaisesRegex(StepFailed, '--stock-transport serial'):
+            self.install()
+
+
+class Listeners(unittest.TestCase):
+    """With the serial transport the tools listen for stock U-Boot nowhere."""
+
+    def settings(self, transport):
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        return argparse.Namespace(uart='/dev/null', host_ip='192.0.2.1',
+                                  device_ip='192.0.2.2', stock_port=69, transfer_port=7070,
+                                  stock_transport=transport, data_dir=Path(work.name))
+
+    def test_only_tftp_needs_the_stock_port(self):
+        for transport, ports in (('tftp', [69, 7070]), ('serial', [7070])):
+            with self.subTest(transport):
+                asked = []
+                with mock.patch.object(session, 'local_interface', return_value='eth0'), \
+                        mock.patch.object(session, 'uart_free', return_value=None), \
+                        mock.patch.object(session, 'port_free',
+                                          side_effect=lambda address, port: asked.append(port)):
+                    session.preflight(self.settings(transport))
+                self.assertEqual(asked, ports)
+
+    def test_only_tftp_starts_a_server_for_stock(self):
+        for transport, names in (('tftp', ['tftp-stock', 'tftp-transfer']),
+                                 ('serial', ['tftp-transfer'])):
+            with self.subTest(transport):
+                started = []
+
+                class Server:
+                    def __init__(self, root, address, port, **options):
+                        self.name = options['name']
+
+                    def start(self):
+                        started.append(self.name)
+
+                    def stop(self):
+                        pass
+
+                console = mock.Mock()
+                with mock.patch.object(session, 'preflight'), \
+                        mock.patch.object(session.tftp, 'ServerThread', Server), \
+                        mock.patch.object(session.uart, 'ConsoleSession', return_value=console), \
+                        mock.patch('builtins.print'), \
+                        session.open_session(self.settings(transport), 'test'):
+                    pass
+                self.assertEqual(started, names)
+
+    def test_the_setting_is_one_of_the_two(self):
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / 'install.json'
+            path.write_text('{"stock_transport": "serial"}')
+            self.assertEqual(config.load(path)['stock_transport'], 'serial')
+            path.write_text('{"stock_transport": "xmodem"}')
+            with self.assertRaisesRegex(SystemExit, 'stock_transport is "tftp" or "serial"'):
+                config.load(path)
+
+    def test_every_console_tool_offers_the_flag(self):
+        for tool in ('install', 'flash', 'restore', 'rawdump'):
+            with self.subTest(tool):
+                self.assertIn('config.add_arguments', (ROOT / 'init' / tool).read_text())
+
+
 class Flash(Bench):
     def test_a_system_update_from_linux(self):
         unit = self.make_unit(installed=True)
@@ -293,6 +447,76 @@ class Flash(Bench):
     def test_durable_storage_gets_the_w25n04lv_image(self):
         self.durable_for(LV)
 
+    # The layout upstream had until November 2026: a 2 MiB loader, `system` a megabyte further
+    # up, `durable` reaching into stock's second slot, and the rest of the chip as `scratch`.
+    OLDER = {'bootloader': (0x00000000, 0x00200000), 'uenv': (0x00200000, 0x00200000),
+             'calibration': (0x00400000, 0x00200000), 'loader': (0x00600000, 0x00200000),
+             'system': (0x00800000, 0x03000000), 'durable': (0x03800000, 0x02000000),
+             'scratch': (0x05800000, 0x16600000), 'reserved-bmt': (0x1be00000, 0x04200000)}
+    WRITES = r'(ubi (write|create)|mtd erase|flash (erase|write)|saveenv)'
+
+    def test_a_unit_laid_out_by_an_older_version_is_told_so_before_anything_is_written(self):
+        """Over the serial console, as over the network: every kind of update stops at the
+        loader's own list of partitions and says how such a unit is moved."""
+        for what in ({'fit': True, 'rootfs': True}, {'fit': True}, {'rootfs': True}, {'durable': True},
+                     {'loader': True}):
+            for state in ('linux', 'loader', 'stock'):
+                with self.subTest(what=what, state=state):
+                    # A run's log is named by the second: each run here gets its own place.
+                    self.settings.data_dir = self.work / f'data-{"-".join(what)}-{state}'
+                    config.unit_dir(self.settings.data_dir, 'W1700KTEST0001').mkdir(parents=True)
+                    unit = self.make_unit(installed=True, layout=self.OLDER)
+                    unit.state = state
+                    with self.assertRaisesRegex(StepFailed, r'not laid out as these images expect \(durable, loader, '
+                                                            r'loader-b, scratch, stock, system\).*init/install --force'
+                                                            r'.*Nothing was written.*power cycle'):
+                        self.flash(**what)
+                    self.assertFalse(any(re.match(self.WRITES, line) for line in self.commands()))
+
+    def test_the_layout_is_read_before_the_loader_is_replaced(self):
+        unit = self.make_unit(installed=True)
+        unit.state = 'linux'
+        self.flash(loader=True, boot=False)
+        self.assertLess(self.index(r'^mtd list$'), self.index(r'^flash erase '))
+
+    def test_a_unit_laid_out_as_the_build_expects_is_updated(self):
+        unit = self.make_unit(installed=True)
+        unit.state = 'loader'
+        self.flash(fit=True)
+        self.assertIn('mtd list', self.commands('loader'))
+        self.assertEqual(unit.ubi['system']['fit'], config.SYSTEM_FIT.read_bytes())
+
+    def test_recovery_reads_no_layout(self):
+        """It writes nothing and attaches no flash, and is how a unit in any state is looked at."""
+        unit = self.make_unit(installed=True, layout=self.OLDER)
+        unit.state = 'linux'
+        self.flash(recovery=True)
+        self.assertNotIn('mtd list', self.commands())
+
+    def test_a_loader_that_lists_no_partitions_stops_the_run(self):
+        unit = self.make_unit(installed=True, layout={'spi-nand0': (0, 0x420000)})
+        unit.state = 'loader'
+        with self.assertRaisesRegex(StepFailed, 'listed no partitions'):
+            self.flash(fit=True)
+        self.assertFalse(any(re.match(self.WRITES, line) for line in self.commands()))
+
+    def test_a_loader_that_does_not_come_up_can_still_be_replaced(self):
+        """The one case the layout cannot be read in is the one a loader update mends."""
+        unit = self.make_unit(installed=True)
+        unit.state = 'stock'
+        reach, calls = update.unit.to_installed_loader, []
+
+        def dead_once(console, log, state):
+            calls.append(state)
+            if len(calls) == 1:
+                raise StepFailed('the loader did not answer')
+            return reach(console, log, state)
+
+        with mock.patch.object(update.unit, 'to_installed_loader', dead_once):
+            self.flash(loader=True, boot=False)
+        self.assertTrue(unit.loader_slot.startswith(config.LOADER.read_bytes()))
+        self.assertTrue(any('did not come up' in str(call) for call in print.call_args_list))
+
     def test_an_uninstalled_unit_cannot_take_a_loader_update(self):
         unit = self.make_unit()
         unit.state = 'stock'
@@ -324,10 +548,10 @@ class Layout(unittest.TestCase):
     def test_volumes_are_created_in_id_order(self):
         self.assertEqual(layout.create_system_volumes(KV), [
             'ubi create ubootenv 0x4000 d 0', 'ubi create ubootenv2 0x4000 d 1',
-            f'ubi create fit {128 * 0x1f000:#x} s 2', f'ubi create rootfs {170 * 0x1f000:#x} s 3'])
+            f'ubi create fit {128 * 0x1f000:#x} s 2', f'ubi create rootfs {66 * 0x1f000:#x} s 3'])
         self.assertEqual(layout.create_system_volumes(LV), [
             'ubi create ubootenv 0x4000 d 0', 'ubi create ubootenv2 0x4000 d 1',
-            f'ubi create fit {64 * 0x3e000:#x} s 2', f'ubi create rootfs {82 * 0x3e000:#x} s 3'])
+            f'ubi create fit {64 * 0x3e000:#x} s 2', f'ubi create rootfs {30 * 0x3e000:#x} s 3'])
 
     def test_erase_steps_cover_the_partition_exactly(self):
         steps = layout.erase('system')

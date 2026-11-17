@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // The unit's UDP export received into a ring of raw sample words, w1700k-stream's reorder buffer.
-// Each datagram carries one completion of the unit's DMA ring, numbered by `seq`: a sample slice,
-// raw (2048 words) or packed to 28 bits (7168 bytes), or a short firmware event that shares the
-// ring. A sample word holds 14-bit I in bits [29:16] and Q in [13:0].
+// Each datagram carries one completion of the unit's DMA ring, numbered by `seq`, or a piece of
+// one: a sample slice, raw (2048 words), packed to 28 bits (7168 bytes) or reduced to fewer bits
+// with a scale (include/hw/mt7996/iq_reduce.h), or a short firmware event that shares the ring.
+// A sample word holds 14-bit I in bits [29:16] and Q in [13:0]; every slice is filed as such words.
 #pragma once
 
 #include <atomic>
@@ -27,6 +28,11 @@ public:
     // Writer: slice `index` of run `run`. Any thread.
     void put(uint64_t run, uint64_t index, const uint32_t *words);
     void put_packed(uint64_t run, uint64_t index, const uint32_t *packed);
+    void put_reduced(uint64_t run, uint64_t index, unsigned format, unsigned scale, const uint8_t *reduced);
+    bool put_radio14(uint64_t run, uint64_t index, const uint8_t *chunk);
+    // After slot `index` was filed reduced: whether a radio chunk here or beside it was cut under
+    // a shift too small for what the unit measured in the slice next to it (its samples may wrap).
+    bool suspect(uint64_t run, uint64_t index) const;
     void put_event(uint64_t run, uint64_t index);  // a completion that is not samples
 
     // Readers. A slot's tag names the run and slice it holds; a reader checks it before and after
@@ -39,6 +45,10 @@ public:
 private:
     static constexpr uint64_t kEventBit = uint64_t(1) << 63;
     void claim(uint64_t index);
+    // What a reduced slot was cut under, for the check of a split stream's radio chunks against
+    // their neighbours: kRadio | shift, or the unit's scale code; kNone otherwise.
+    static constexpr uint16_t kNone = 0xffff, kRadio = 0x8000;
+    std::unique_ptr<std::atomic<uint16_t>[]> cut_;
     unsigned slices_;
     std::vector<uint32_t> words_;
     std::unique_ptr<std::atomic<uint64_t>[]> tags_;
@@ -53,9 +63,11 @@ public:
     struct Stats {
         uint64_t run = 0;                // current run, 1.. (0: none yet)
         uint64_t datagrams = 0, bytes = 0;
-        uint64_t slices = 0, packed = 0; // sample slices filed
+        uint64_t slices = 0, packed = 0; // sample slices filed, and those of them packed to 28 bits
+        uint64_t reduced = 0;            // and those reduced to fewer bits, by the unit's SoC or by the radio
+        uint64_t suspect = 0;            // radio chunks beside a slice louder than their shift holds
         uint64_t events = 0;             // completions that are not samples (firmware events)
-        uint64_t pieces = 0;             // datagrams carrying part of a slice (not reassembled)
+        uint64_t pieces = 0;             // slices sent in pieces that did not all arrive, in order
         uint64_t bad = 0;                // wrong magic or length
         uint64_t late = 0;               // older than the run's start or than the ring holds
         uint64_t before_start = 0;       // in a run's first second, from before it (joined late)
@@ -80,7 +92,7 @@ public:
     void start();  // binds the sockets and starts receiving
     Stats stats() const;
     uint64_t run() const { return run_.load(std::memory_order_acquire); }
-    uint64_t newest() const { return newest_.load(std::memory_order_acquire); }
+    uint64_t newest() const { return position().newest; }
     Position position() const;  // run and newest, read consistently
     void restart_run();         // the next completion starts a new run (the stream was restarted)
 
@@ -88,6 +100,7 @@ private:
     struct Worker;
     void work(Worker &w);
     void take(Worker &w, const uint8_t *data, size_t n, bool fresh, uint64_t t);
+    size_t record(Worker &w, const uint8_t *data, size_t n, uint64_t t);
     void check(Worker &w, uint64_t run, uint64_t index);
 
     SampleRing &ring_;
@@ -96,7 +109,8 @@ private:
     std::atomic<bool> stopping_{false};
     std::vector<std::unique_ptr<Worker>> workers_;
 
-    // The run: its first sequence number, and the newest slot filled.
+    // The run: its first sequence number, and the newest slot filled, kept with the run it is of
+    // (ingest.cpp, `placed`).
     std::atomic<uint64_t> run_{0}, base_{0}, newest_{0};
     std::atomic<uint64_t> started_ns_{0}, last_ns_{0};
     std::atomic<bool> new_run_{false};

@@ -19,6 +19,7 @@ int main(void)
 	SIZE(w1700k_sdr_mem_read);
 	SIZE(w1700k_sdr_stream_ring);
 	SIZE(w1700k_sdr_stream_export);
+	SIZE(w1700k_sdr_led);
 	SIZE(w1700k_sdr_export_header);
 	SIZE(w1700k_sdr_stream_rx);
 	SIZE(w1700k_sdr_ctl);
@@ -30,6 +31,8 @@ int main(void)
 	OFF(w1700k_sdr_stream_rx, export_slices);
 	OFF(w1700k_sdr_stream_export, dst_mac);
 	OFF(w1700k_sdr_stream_export, drain_ms);
+	OFF(w1700k_sdr_stream_export, flags);
+	OFF(w1700k_sdr_led, white);
 	OFF(w1700k_sdr_export_header, seq);
 	OFF(w1700k_sdr_ctl, read);
 	OFF(w1700k_sdr_ctl, result);
@@ -40,6 +43,7 @@ int main(void)
 	IOCTL(W1700K_SDR_READ_MEM);
 	IOCTL(W1700K_SDR_STREAM_RX);
 	IOCTL(W1700K_SDR_CTL);
+	IOCTL(W1700K_SDR_LED);
 	printf(",\"abi\":%d}\n", W1700K_SDR_ABI_VERSION);
 	return 0;
 }

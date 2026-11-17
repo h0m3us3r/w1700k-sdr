@@ -139,6 +139,24 @@
 #define MT7996_IQ_CHUNK_BYTES		8192u
 #define MT7996_IQ_CHUNK_SAMPLES		2048u
 #define MT7996_IQ_CHUNK_PACKED_BYTES	7168u
+/* A radio-reduced chunk (the split schedule, 320 Msps on a link too slow for
+ * the lossless ones): 7 bits of each of I and Q under one shift s (0..7) for
+ * the chunk, q = (x >> s) & 0x7f: two's complement, rounded down, exact while
+ * -64 <= x >> s <= 63 and wrapped beyond (the host sets s from the levels it
+ * sees in the chunks between, with room to spare). Two samples fold into one
+ * word shaped like a sample word,
+ *   Q(2j) | Q(2j+1) << 7 in [13:0],  I(2j) | I(2j+1) << 7 in [29:16],
+ * and those 1024 words are packed 8 to 7 as below: 896 words. Then one
+ * trailer word, RADIO14_TRAILER | s. 3588 bytes: the length tells it from an
+ * event (shorter than 4096 too) together with the trailer.
+ * A sample is read back as (q << s) + ((1 << s) >> 1), the middle of its step.
+ * At 320 Msps, each packer on 5 of every 16 chunks, the kernel costs 11.5k
+ * cycles a chunk on the WM (78 % busy) and 12.8k on the WA (87 %).  [measured] */
+#define MT7996_IQ_CHUNK_RADIO14_BYTES	3588u
+#define MT7996_IQ_RADIO14_DATA_BYTES	3584u
+#define MT7996_IQ_RADIO14_TRAILER	0x52443100u	/* "RD1", then the shift in [2:0] */
+#define MT7996_IQ_RADIO14_TRAILER_MASK	0xffffff00u
+#define MT7996_IQ_RADIO14_SHIFT_MAX	7u
 #define MT7996_IQ_CHUNK_EVENT_MAX	4095u	/* longest non-sample completion */
 #define MT7996_IQ_CHUNKS_PER_MIB	128u	/* one 1 MiB ICAP lap */
 /* Length of a ring completion from its ctrl word (DDONE | LS0 | len << 16;
@@ -152,7 +170,9 @@
  * (I bits). 8 words -> 7 (28-bit samples), 8192 -> 7168 bytes. The MCU
  * packers pack a fixed share of chunks (positions within a power-of-two
  * period of at most 32 chunks); half the chunks packed carries 320 Msps on
- * one 10 Gbit/s link at 97 % load.                                 [measured] */
+ * one 10 Gbit/s link at 97 % load. Every chunk packed runs to 160 Msps
+ * (4.52 Gbit/s on the wire): 11.4k cycles a chunk on either packer, each
+ * 62 % busy, the capture at most 4.6 chunks ahead.                 [measured] */
 #define MT7996_IQ_PACK_GROUP_IN		8u
 #define MT7996_IQ_PACK_GROUP_OUT	7u
 #define MT7996_IQ_PACK_WORD(w, w7, k) \
@@ -175,7 +195,13 @@
 /* Wire budget: 8192 payload bytes per 8274 on the wire, so one 10G link    */
 /* carries at most 1.238 GB/s against 1.28 GB/s raw at 320 Msps.            */
 /* ------------------------------------------------------------------------ */
+/* A slice reduced on the SoC (iq_reduce.h) comes under "SDR2": the same      */
+/* header with seq in bits [47:0] of the last field, the format (bits per I/Q */
+/* pair) in [55:48] and the scale code in [63:56]. Datagrams of the unit's    */
+/* own senders may hold several whole slices, each behind its header; a       */
+/* record shorter than the rest of its slice is a piece and ends its datagram.*/
 #define MT7996_IQ_EXPORT_MAGIC		0x31524453u	/* "SDR1", le32 */
+#define MT7996_IQ_EXPORT_MAGIC_REDUCED	0x32524453u	/* "SDR2", le32 */
 #define MT7996_IQ_EXPORT_HDR_BYTES	16u
 #define MT7996_IQ_EXPORT_OFS_MAGIC	0u	/* le32 */
 #define MT7996_IQ_EXPORT_OFS_OFFSET	4u	/* le16: offset of this piece in the slice */

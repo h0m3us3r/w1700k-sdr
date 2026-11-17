@@ -6,11 +6,18 @@
      "eeprom": "~/.config/w1700k/eeprom.bin",
      "firmware_dir": "<repo>/firmware/build",
      "export": {"interface": "eth1", "src_ip": "10.77.0.1", "dst_ip": "10.77.0.10",
-                "dst_mac": null, "port": 7700, "ports": 8}}
+                "dst_mac": null, "port": 7700, "ports": 8, "link_mbps": null, "packing": null,
+                "piece": null}}
 
 unit.bin_dir and unit.module point at the installed clients and driver (production rootfs);
 after `w1700k push` set them to /tmp/w1700k and /tmp/w1700k/w1700k_sdr.ko. export.dst_mac null
-means the MAC of the local interface that holds dst_ip.
+means the MAC of the local interface that holds dst_ip. export.link_mbps caps what a stream may
+put on the link, in Mbit/s, below the unit port's negotiated speed (a USB adapter that carries less
+than its Ethernet side links at); null: the negotiated speed. export.packing ("raw", "half",
+"full", "split", or "16", "14", "8", "7" bits per I/Q pair) sets every stream's packing by hand; null:
+chosen from the sample rate and the link. export.piece sends each slice as datagrams of at most
+that many of its bytes (1456 fits a 1500-byte MTU) for a path without jumbo frames; null: one
+datagram per slice.
 """
 import ipaddress
 import json
@@ -23,6 +30,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PATH = Path('~/.config/w1700k/config.json')
 ENV_PATH = 'W1700K_CONFIG'
+
+
+# raw, half, full: the radio's lossless schedules (firmware/stream/blob.py; stream.PACKED_SHARE has
+# each one's share). 16, 14, 8, 7: bits per I/Q pair, requantised on the unit (stream.REDUCED).
+# split: 14 bits per pair at 320 Msps, half the chunks reduced by the radio and half by the unit.
+PACKINGS = ('raw', 'half', 'full', 'split', '16', '14', '8', '7')
 
 
 class ConfigError(ValueError):
@@ -47,6 +60,9 @@ class ExportConfig:
     dst_mac: str | None = None
     port: int = 7700
     ports: int = 8
+    link_mbps: int | None = None      # None: the unit port's negotiated speed
+    packing: str | None = None        # None: chosen from the sample rate and the link
+    piece: int | None = None          # None: a slice per datagram; else at most this many of its bytes
 
 
 @dataclass(frozen=True)
@@ -105,6 +121,15 @@ def _validate(config):
         raise ConfigError('export.dst_mac: expected xx:xx:xx:xx:xx:xx')
     if not 1 <= export.port <= 65535 - export.ports or not 1 <= export.ports <= 256:
         raise ConfigError('export.port/ports out of range')
+    if export.link_mbps is not None and (isinstance(export.link_mbps, bool) or not isinstance(export.link_mbps, int)
+                                         or export.link_mbps < 1):
+        raise ConfigError('export.link_mbps: expected Mbit/s, a positive integer')
+    if export.packing is not None and export.packing not in PACKINGS:
+        raise ConfigError(f'export.packing: one of {", ".join(PACKINGS)}, or null for automatic')
+    if export.piece is not None and (isinstance(export.piece, bool) or not isinstance(export.piece, int)
+                                     or not 256 <= export.piece <= 8192):
+        raise ConfigError('export.piece: bytes of a slice per datagram, 256..8192 (1456 fits a 1500-byte MTU), '
+                          'or null for whole slices')
     if not config.unit.bin_dir.startswith('/') or not config.unit.module.startswith('/'):
         raise ConfigError('unit.bin_dir and unit.module must be absolute unit paths')
 
@@ -124,8 +149,9 @@ def load(path=None):
         raise ConfigError(f'{path}: {exc}')
 
 
-def local_mac_for(ip):
-    """The MAC of the local interface holding `ip` (iproute2 JSON), for the export's destination."""
+def local_link_for(ip):
+    """The local interface holding `ip` (iproute2 JSON), where the export is sent: its name, MAC
+    and MTU."""
     try:
         out = subprocess.run(['ip', '-j', '-4', 'addr', 'show'], capture_output=True, text=True, check=True,
                              stdin=subprocess.DEVNULL).stdout
@@ -135,10 +161,16 @@ def local_mac_for(ip):
     for interface in interfaces:
         if any(a.get('local') == ip for a in interface.get('addr_info', [])):
             try:
-                return Path('/sys/class/net', interface['ifname'], 'address').read_text().strip().lower()
-            except (KeyError, OSError) as exc:
-                raise ConfigError(f'cannot read the MAC of the interface holding {ip}: {exc}')
+                name = interface['ifname']
+                return (name, Path('/sys/class/net', name, 'address').read_text().strip().lower(),
+                        int(Path('/sys/class/net', name, 'mtu').read_text()))
+            except (KeyError, OSError, ValueError) as exc:
+                raise ConfigError(f'cannot read the MAC and MTU of the interface holding {ip}: {exc}')
     raise ConfigError(f'no local interface holds {ip}; configure it or set export.dst_mac')
+
+
+def local_mac_for(ip):
+    return local_link_for(ip)[1]
 
 
 DATA_DIR = Path(os.environ.get('XDG_DATA_HOME', '~/.local/share')).expanduser() / 'w1700k'
@@ -146,14 +178,20 @@ USER_EEPROM = Path('~/.config/w1700k/eeprom.bin').expanduser()
 
 
 def eeprom_path(config):
-    """The calibration EEPROM to load: `eeprom` if set; else ~/.config/w1700k/eeprom.bin; else
-    the one init/install saved, if exactly one unit has one."""
+    """The calibration EEPROM file the user named: `eeprom` if set, else
+    ~/.config/w1700k/eeprom.bin; None without either, when the unit's own copy is used."""
     if config.eeprom:
         return config.eeprom
     if USER_EEPROM.is_file():
         return USER_EEPROM
+    return None
+
+
+def saved_eeprom():
+    """The copy init/install saved, for a unit that cannot give its own: only when exactly one
+    unit has one, since nothing here says which unit is at the other end."""
     found = sorted(DATA_DIR.glob('units/*/eeprom.bin'))
     if len(found) == 1:
         return found[0]
-    where = 'several units have one; set "eeprom"' if found else 'run init/install or init/eeprom'
-    raise ConfigError(f'no calibration EEPROM: {where} (see host/w1700k/README.md)')
+    where = 'several units have a saved one; set "eeprom"' if found else 'run init/install or init/eeprom'
+    raise ConfigError(f'no calibration EEPROM: the unit gave none, and {where} (see host/w1700k/README.md)')

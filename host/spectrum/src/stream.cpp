@@ -60,6 +60,12 @@ StreamClient::Position StreamClient::position() const
     return {run ? v->run_id(run) : 0, newest};
 }
 
+int StreamClient::receive_cpu() const
+{
+    const auto v = view();
+    return v ? int(load(&v->header()->receive_cpu)) - 1 : -1;
+}
+
 StreamClient::Stats StreamClient::stats() const
 {
     Stats s;

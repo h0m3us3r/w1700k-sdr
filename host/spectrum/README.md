@@ -46,6 +46,14 @@ The stream service may start before or after the server, and restart: the server
 One browser is served at a time: opening the page elsewhere takes over (the previous one is
 closed with code 4001 and offers to take it back).
 
+The FFT workers take the CPU that is left: they run at nice 15, so the stream service's receive
+threads, this server's web thread and a browser on the same host come first. With "every sample"
+averaging on a host that cannot transform them all, frames keep their rate and carry a share of
+their blocks (`spectrum.share` in the status, and the coverage shown in the Stream panel). FFTW's
+measured plan for each FFT size is found once in the background (seconds for the largest; the
+estimated plan serves meanwhile) and kept in `$XDG_CACHE_HOME/w1700k/fftwf-wisdom` (default
+`~/.cache`): at 262,144 points it transforms about 40 % more samples per core than the estimate.
+
 `kill -USR1` writes the newest samples, as the stream serves them, to
 `DIR/w1700k-dump-<unix ms>.bin` (complex int16, I then Q, on the 14-bit scale: full scale 8192)
 and a `.json` with `center_hz`, `sample_rate`, `tuning_steady` (false if the tuning changed
@@ -66,7 +74,8 @@ then 30 s; the page shows it as down meanwhile, and requests that were queued ar
 | run button | `start` or `stop` |
 | LO: the header display (wheel, click, keys, typing), the LO box, double-click on the plot | `tune` `hz`, refused outside the band's `rf.lo_range_hz`; any time the radio is loaded |
 | Band, Sample rate 40-320 Msps or 640/2 (band 2), then Apply | `configure` `band`, `sample_rate`, `capture_rate` (the LO stays) |
-| Filter 20-320 MHz | `filter` `mhz` |
+| Filter 20-320 MHz | `filter` `mhz` (and the filters stop following the sample rate) |
+| Follow the sample rate (ticked by default, remembered in the browser) | `filter_follow` `on`: every band's filter as wide as its sample rate |
 | Automatic gain control, LNA 0-4 (~6 dB steps), Baseband 0-9 (~2 dB steps) | `gain` `agc:true`, or `lna` and `lpf` |
 | Flatten the passband | none: the stream service's `flatten` control word |
 
@@ -75,8 +84,14 @@ consumer; the server also writes the radio's sample rate, capture rate and filte
 controller's state, and the correction applies where the filter is as wide as the sample rate and
 the rate is not 640/2 (`receiver.flatten_available`, `flatten_active` in the status).
 
-The controller picks the stream's packing from the sample rate (raw up to 160 Msps, half at 320,
-lossless either way); the Stream panel shows the share of packed slices. While a configure,
+The controller picks the stream's packing from the sample rate and the link's speed (raw where it
+fits, else every chunk or every other chunk packed to 28 bits, lossless either way, else reduced
+on the unit to 16, 14, 8 or 7 bits per sample, or at 320 Msps to 14 by the radio and the unit
+together (`split`): shown as for example `7-bit, reduced (14 b/sample)`, with what it costs in
+noise in the tooltip), unless it is
+set by hand (`w1700k serve --packing`, or `export.packing` in its configuration). The header shows
+what the stream carries next to the sample rate and band, for example `14-bit, packed
+(28 b/sample)`, with `(manual)` when set by hand; the Stream panel shows the share of packed slices. While a configure,
 start or stop runs, other requests are refused and the page
 disables its controls and shows the controller's progress. Tune, gain and filter requests
 queue one at a time; a newer one of the same kind replaces one not yet sent.
@@ -103,9 +118,9 @@ are JSON text with a type `t`, plus binary spectrum frames.
 From the page: `ping {c}`, `ack {seq}` for every frame, `view {start, stop, bins, auto, fps,
 kbps}` (the range and resolution wanted, and pacing limits), `fft {size, window, rate,
 averaging, peak, dc}`, `set {...}` with any of `lo`; `band, sample_rate, capture_rate`;
-`filter`; `agc, lna, lpf`; `flatten`, and `run {on}`.
+`filter`; `filter_follow`; `agc, lna, lpf`; `flatten`, and `run {on}`.
 
-From the server: `hello {version, windows, max_bins, controller, bands, rates {label,
+From the server: `hello {version, windows, fft_defaults, max_bins, controller, bands, rates {label,
 sample_rate, capture_rate, bands}, filters, max_lna, max_lpf}`, `status` (sections `state`,
 `message`, `running`, `devices`, `receiver {lo, sample_rate, flatten, flatten_available,
 flatten_active}`, `controller {mode, command, alive, pid,

@@ -1,0 +1,85 @@
+SPDX-License-Identifier: GPL-2.0-only
+Subject: [PATCH] net: phy: realtek: RTL8261C firmware: write every entry, load after every reset
+
+The RTL8261C/CE driver (OpenWrt's backport of the v7.3 one) left the PHY with
+a damaged firmware patch on the first start after boot, and with none at all
+on every later one. On a W1700K2 against an RTL8159 adapter the first start
+tried 10GBASE-T for about 80 s, then failed 5G and 2.5G three times each and
+linked at 5 Gbit/s late or at 1 Gbit/s; taking the port down and up gave
+5 Gbit/s in 20 s, which is the PHY without its patch.
+
+- A write entry went through phy_modify_mmd(), which reads the register and
+  leaves the write out when nothing would change. The patch's code is a run of
+  words written to 0xa438, where each write takes the next address, so every
+  word that matched what was read back was lost and the rest misplaced.
+  Applied from user space the same way, the file leaves the PHY unable to
+  link; applied with every write made, it links at 5 Gbit/s in 6 s (10G not
+  advertised) or 19 s (three 10G attempts first), and repairs a PHY the driver
+  had loaded.
+- The firmware was loaded once per boot. A PHY with reset-gpios is taken
+  through a hard reset whenever it is attached, which drops the patch
+  (extension register 0x801e reads 0x0015 again, not 0x2215), so it is now
+  loaded on every config_init.
+
+--- a/drivers/net/phy/realtek/realtek_main.c
++++ b/drivers/net/phy/realtek/realtek_main.c
+@@ -359,7 +359,6 @@
+ 
+ struct rtl8261x_priv {
+ 	const char *fw_name;
+-	bool fw_loaded;
+ 	/* LCR7's polarity bit doubles as the manual on/off level in
+ 	 * led_brightness_set(), so the configured polarity is kept here
+ 	 * to restore it whenever hardware control is set up again.
+@@ -575,8 +574,23 @@
+ 
+ 	switch (entry->type) {
+ 	case OP_WRITE:
+-		ret = phy_modify_mmd(phydev, dev, addr,
+-				     GENMASK(msb, lsb), (value << lsb) & GENMASK(msb, lsb));
++		/* Every entry is written, also one whose value the register
++		 * already reads. The patch's code goes through 0xa438 as a
++		 * run of words, each write taking the next address:
++		 * phy_modify_mmd() leaves out a write that would not change
++		 * what it read back, and the words after one left out land in
++		 * the wrong place.
++		 */
++		bits = GENMASK(msb, lsb);
++		if (bits == 0xffff) {
++			ret = phy_write_mmd(phydev, dev, addr, value);
++		} else {
++			val = phy_read_mmd(phydev, dev, addr);
++			if (val < 0)
++				return val;
++			ret = phy_write_mmd(phydev, dev, addr,
++					    (val & ~bits) | ((value << lsb) & bits));
++		}
+ 		if (ret)
+ 			return ret;
+ 		break;
+@@ -636,8 +650,6 @@
+ 		}
+ 	}
+ 
+-	priv->fw_loaded = true;
+-
+ release_fw:
+ 	release_firmware(fw);
+ 	return ret;
+@@ -851,10 +863,13 @@
+ 	int ret;
+ 
+ 	/* The firmware parameters are preserved across IEEE soft resets and
+-	 * suspend/resume cycles. Reloading is only necessary after a power
+-	 * cycle or hard reset.
++	 * suspend/resume cycles, and lost in a hard reset. A PHY with a reset
++	 * line is taken through one every time it is attached (phy_detach()
++	 * asserts the line, phy_init_hw() releases it before calling here),
++	 * so the firmware is loaded on every initialisation and not just on
++	 * the first; loading it over itself is harmless.
+ 	 */
+-	if (priv->fw_name && !priv->fw_loaded) {
++	if (priv->fw_name) {
+ 		ret = rtl8261x_fw_load(phydev);
+ 		if (ret)
+ 			return ret;

@@ -99,6 +99,10 @@
 #define MT7996_PROBE_WM_GO                0x0090f008u
 #define   MT7996_PROBE_GO_MAGIC           0x474f474fu	/* "GOGO" */
 #define   MT7996_PROBE_STOP_MAGIC         0x504f5453u	/* "STOP" */
+/* The shift (bits [2:0], 0..7) the packers use for the chunks they reduce to
+ * 14 bits (iq_format.h, radio-reduced chunk); the host writes it while the
+ * stream runs, the producer relays it to the WA. */
+#define MT7996_PROBE_WM_SHIFT             0x0090f00cu
 #define MT7996_PROBE_WM_RES               0x0090f010u
 /*
  * HAZARD: a generic blob may use up to 500 result words from 0x0090f010,
@@ -369,10 +373,12 @@
 #define MT7996_PROBE_SH_DONE              0x10u	/* every WA chunk below this is packed */
 #define MT7996_PROBE_SH_PUBLISHED         0x14u	/* WM publish point */
 #define MT7996_PROBE_SH_SENT              0x18u	/* chunks below this have left TX0 */
+#define MT7996_PROBE_SH_PACKING           0x1cu	/* WM: the stream's packing schedule, before the WA is raised */
 #define MT7996_PROBE_SH_STATUS            0x20u
 #define   MT7996_PROBE_SH_ST_STOPPED      1u
 #define   MT7996_PROBE_SH_ST_NO_GO        2u	/* go never came within 1 s */
 #define   MT7996_PROBE_SH_ST_WM_STALLED   3u	/* publish point still for 1 s */
+#define   MT7996_PROBE_SH_ST_NO_SCHEDULE  4u	/* the schedule has nothing for the WA to pack */
 #define MT7996_PROBE_SH_PACK_MAX          0x24u
 #define MT7996_PROBE_SH_PACKS             0x28u	/* u64 */
 #define MT7996_PROBE_SH_PACK_CYCLES       0x30u	/* u64 */

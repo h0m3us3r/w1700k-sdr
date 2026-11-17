@@ -3,6 +3,7 @@
   "host_ip": "192.168.1.10",
   "device_ip": "192.168.1.1",
   "stock_port": 7071,
+  "stock_transport": "tftp",
   "transfer_port": 7070,
   "authorized_key": "~/.ssh/id_ed25519.pub"
 }

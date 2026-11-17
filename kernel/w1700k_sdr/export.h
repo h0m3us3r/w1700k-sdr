@@ -35,7 +35,7 @@ struct sdr_export {
 	u64 drain_until;
 	bool stopping, done;
 	int result;
-	u64 sent, busy, unsent, last_ns;
+	u64 sent, busy, unsent, skipped, last_ns;
 	u32 max_lag, inflight_max;
 };
 

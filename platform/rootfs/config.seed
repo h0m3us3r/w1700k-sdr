@@ -1,4 +1,9 @@
 # SPDX-License-Identifier: MIT
+# Package sources come from Buildroot's own mirror first and each package's
+# site second; Buildroot checks every file against its hashes either way. With
+# the default order a site that answers but crawls (mpfr.org has) is never
+# given up on, and the build waits on it for hours.
+BR2_PRIMARY_SITE="https://sources.buildroot.net"
 BR2_aarch64=y
 BR2_cortex_a53=y
 BR2_REPRODUCIBLE=y

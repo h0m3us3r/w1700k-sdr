@@ -23,8 +23,10 @@ Everything is polled; the driver requests no interrupt. It disables PCIe ASPM
 Files: `pci.c` (device, ioctls, mmap), `pump.c` (stream pump), `export.c`
 (UDP export), `fwdl.c` (download executor), `fwdl_wire.c` (download command
 wire format), `fwdl-image.c` (container parsing), `dma-ring.c` (rings),
-`wfdma.c` (WFDMA control), `mmio.c` (BAR translation), `ownership.c`. The
-clients are `probe.c`, `download.c`, `stream.c` and `ctl.c`, with
+`wfdma.c` (WFDMA control), `mmio.c` (BAR translation), `ownership.c`, `led.c`
+(the status LED's four emitters). The
+clients are `probe.c`, `download.c`, `stream.c`, `ctl.c` and `ledd.c`
+(`w1700k-led`, with its vocabulary in `ledd.h`), with
 `client.h`. The ABI is `include/uapi/w1700k_sdr.h`.
 
 ## Build
@@ -71,6 +73,7 @@ device, also during a stream:
 | `READ_MEM` | diagnostics: up to 4096 bytes through the BAR translation, only inside the host CSR page `0x000e0000-0x000e0fff` (LPCR `0xe0010`, FW_STATE `0xe00f0`), ROM `0x00800000-0x0080ffff` or patch SRAM `0x00900000-0x0090ffff` |
 | `STREAM_RX` | the stream pump, on the calling thread (below) |
 | `CTL` | up to 64 word writes then 64 word reads in `0x0090b000-0x0090fffc`; performed by the pump between sweeps while a stream runs |
+| `LED` | the front status LED's four emitters (red, green, blue, white), each 0..255; the SoC's waveform generators dim the pins at 250 Hz (`led.c`). Announced by `W1700K_SDR_CAP_LED`. It is the board's, not the radio's: it works whatever a stream or a reset is doing, and the LED keeps its levels when the module is replaced |
 
 ## Clients
 
@@ -97,6 +100,8 @@ mt7996-stream DEVICE --seconds S [--idle-ms N] [--go ADDR VALUE]
               [--data BYTES FILE] [--wrap] [--meta FILE] [--snap SLICES FILE]
               [--export IF SRC_IP DST_IP DST_MAC PORT] [--ports N]
               [--drain-ms N] [--export-cpu N] [--cpu N]
+              [--send SRC_IP DST_IP PORT] [--format 16|14|8|7] [--piece BYTES]
+              [--datagram BYTES] [--senders N] [--split]
   One {"at":"stream",...} line at the end (see stream.c for the fields).
 
 mt7996-ctl DEVICE [--timeout MS] [ADDR=VALUE ...] [--read ADDR COUNT]
@@ -104,6 +109,24 @@ mt7996-ctl DEVICE --serve
   {"at":"ctl","ok":bool,"errno":"...","result":N,"via_pump":0|1,"writes":N,
    "read_address":"0x...","read":["0x...",...]}
   --serve takes one request per stdin line and answers each with one line.
+
+w1700k-led DEVICE [--state FILE] [--done FILE] [--iface IF] [--brightness B]
+w1700k-led DEVICE --demo [SECONDS] | --show H S B | --status
+  The front status LED, started at boot (rcS) and left running: it shows what
+  the unit is doing (docs/led.md has the legend; ledd.h the vocabulary and the
+  colour maths, all in hue, saturation and brightness). It opens the device
+  only for each change of the LED, so the module can be replaced under it.
+  --status prints one {"at":"led",...} line: what it sees, and the look for it.
+
+w1700k-key [--chip DEV] [--line N] [--listen ADDRESS] [--port N] [--state FILE] ...
+  The reset button's service (not a client of the driver; keyd.c, with its
+  logic in keyd.h): the paperclip key. It watches the button on the pin
+  controller's line 0 through the GPIO character device, and when the button
+  is let go does what the hold meant: switches the login key's slot off or on
+  (5 s), opens it for a new key on TCP port 7722 (10 s), or erases it (15 s).
+  The slot itself is kept by /usr/sbin/w1700k-keyslot; what the button is
+  doing goes to /run/w1700k-key for the LED. init/README.md, "The paperclip
+  key".
 ```
 
 ## Bring-up
@@ -180,7 +203,92 @@ DF, UDP checksum filled by the MAC:
 The interface needs scatter-gather and an MTU of at least `slice_bytes + 44`
 (8236 for 8 KiB slices). The device's TX queue is the only flow control; the
 export reports `-ENOBUFS` if it falls more than `slices - slots - 64`
-completions behind.
+completions behind. With `W1700K_SDR_EXPORT_SHORT` (beside the client's own
+senders, which carry on whatever the export does) it does not end there: it
+passes over what the device may be rewriting, resumes 256 completions behind the
+newest, and counts what it passed over in `export_unsent`.
+
+### The client's own senders
+
+`mt7996-stream --send` sends the slices itself, from threads that follow the
+mapped ring, through ordinary UDP sockets (the driver's export stays off). It
+is for what the zero-copy export cannot do:
+
+- `--format 16|14|8|7`: each raw slice requantised to that many bits per I/Q
+  pair with a scale of its own (`include/hw/mt7996/iq_reduce.h`, NEON), under
+  the magic `0x32524453` ("SDR2"): the same header, with `seq` in bits [47:0]
+  of its last field, the format in [55:48] and the scale code in [63:56]. A
+  slice is then 4096, 3584, 2048 or 1792 bytes. Events and packed slices leave
+  unchanged under "SDR1".
+- `--datagram BYTES`: a datagram carries as many whole slices as fit that much
+  UDP payload, each behind its own header (two 14-bit slices in a 9216-byte
+  MTU), which halves the cost of the network stack.
+- `--piece BYTES`: every slice as datagrams of at most that many of its bytes,
+  `offset` rising, for a path without jumbo frames.
+
+The senders take completions in turn, a few at a time (`--senders`, default
+2: two read more between them than three do). With `--cpu` the pump keeps its
+CPU: the senders and the network device's NAPI threads stay off it while the
+stream runs. Measured with the capture at 320 Msps, the SoC's memory bus lets
+one sender read 0.60 GB/s of slices, two 1.0 and three 0.93, so the senders
+carry 160 Msps (0.64 GB/s; all four formats, no slice lost, 20–45 % of each
+sender's core idle) and not 320 (1.28 GB/s); reading further ahead of the
+device than the slice in hand slowed the pump until the firmware overran.
+In pieces, every rate from 80 to 239 thousand datagrams a second was clean
+with the packets counted at the port (200 and 239 thousand for two minutes);
+five runs in a row at 235 thousand once had the port transmit 0.1–0.2 % fewer
+than the send calls accepted, for a reason not found.
+A batch is four slices: what a sender has reduced must still be in the
+512 KiB L2 the four cores share when the kernel copies it out (batches of 16
+cost the 160 Msps case 15–25 % of each sender's core). Senders the ring
+laps skip to the newest completions and count what they skipped (`"send"` in
+the result line: `slices`, `reduced`, `datagrams`, `lapped`, `errors`, `busy`,
+and `max_lag`, the furthest behind the device a sender took a completion).
+
+### Split streams
+
+At 320 Msps neither path carries a reduced stream alone, so `--split` runs
+both (`--export ... --send ... --format 14 --split`) on a stream whose radio
+reduces 10 of every 16 chunks itself (the firmware's split schedule):
+
+- The export is opened with `W1700K_SDR_EXPORT_SHORT` in its `flags` (the
+  field that was `reserved`): it sends only completions shorter than a slice,
+  zero-copy as ever, and skips the raw ones. Its thread then sleeps 20–50 us
+  when it has nothing to send instead of polling, so it needs no CPU of its
+  own; the client lets it run on every CPU but the pump's and gives it
+  priority (it must run when it wakes, or the radio's chunks trail the
+  others). A module without the flag refuses the stream with `EINVAL`.
+- The senders take only the raw slices and reduce them to format 14.
+- A third thread keeps the radio's shift (the mailbox word at `0x0090f00c`,
+  written through `W1700K_SDR_CTL`, which the pump serves between sweeps)
+  wide enough for twice the largest magnitude the senders saw in the last
+  second, rising within a millisecond and falling after a second
+  (`"split"` in the result line: the writes, and the lowest, highest and last
+  shift).
+
+Each sender has a CPU to itself where there are enough (4 CPUs: the pump on
+3, the senders on 1 and 2, the kernel's network threads on 0), and while a
+stream runs the senders and those network threads have priority over
+ordinary processes (nice -10; the pump and the export thread -20). It
+matters. Sharing their CPUs with the network threads, the senders lost them
+for 2–12 ms some 26 times a second each, and with little room to make that up
+they ran 10 ms and more behind 47 % of the time and up to 0.21 s; on their
+own CPUs 94 % of their work is taken within a millisecond. The export thread
+may run on the senders' CPUs too (short bursts, at priority): confined to the
+one CPU everything else shares it fell half a second behind when that CPU
+was busy and did not catch up. And at ordinary priority two busy loops on
+the unit cost a 320 Msps stream a fifth of its slices while they ran; with
+priority, none, the export 36 ms behind at worst.
+
+Measured at 320 Msps on a 5 Gbit/s link (4.6 Gbit/s on the wire, a USB
+adapter on the host) for five minutes: 47.7 million chunks, 29.8 million
+exported and 17.9 million reduced by the senders, none skipped, none lost at
+the host; the export at most 35 ms behind the device and the senders 32 ms,
+against the receiver's wait of 250 ms; the WM 77 % busy, the WA 87 %, the
+SoC's three other CPUs each about 70 %. (Ten minutes before the senders had
+their own CPUs: 94.4 million chunks, none lost, but up to 0.14 s and 0.21 s
+behind.) The radio taking 8 or 9 chunks of 16 instead of 10 leaves the
+senders more than they can reduce.
 
 ## Hazards
 

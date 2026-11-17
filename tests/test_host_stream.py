@@ -75,6 +75,85 @@ class Pump(unittest.TestCase):
         self.assertIn('--export-cpu 2 --cpu 3', text)
         self.assertNotIn('--pulse', argv, 'our WM runs the producer: no IRQ5 pulse')
 
+    def test_command_line_of_the_senders(self):
+        """A reduced packing, or small datagrams, leave through the pump's own senders."""
+        argv = stream.stream_argv('/usr/sbin/mt7996-stream', ExportConfig(), '02:00:00:00:00:02', '7')
+        text = ' '.join(argv)
+        self.assertIn('--send 10.77.0.1 10.77.0.10 7700 --ports 8 --senders 2 --format 7 --cpu 3', text)
+        self.assertNotIn('--export', text)
+        self.assertIn('--go 0x0090f008 0x474f474f', text)
+        argv = stream.stream_argv('/usr/sbin/mt7996-stream', ExportConfig(piece=1456), '02:00:00:00:00:02', 'full')
+        self.assertIn('--send 10.77.0.1 10.77.0.10 7700 --ports 8 --senders 2 --piece 1456 --cpu 3', ' '.join(argv))
+        # with the port's MTU known, a datagram carries as many whole slices as fit
+        argv = stream.stream_argv('/usr/sbin/mt7996-stream', ExportConfig(), '02:00:00:00:00:02', '14', 9216)
+        self.assertIn('--format 14 --datagram 9188 --cpu 3', ' '.join(argv))
+
+    def test_datagram_rate(self):
+        self.assertAlmostEqual(stream.datagram_rate('raw', 80_000_000, 1456), 234375)
+        self.assertAlmostEqual(stream.datagram_rate('14', 160_000_000, 1456), 234375)
+        self.assertAlmostEqual(stream.datagram_rate('half', 320_000_000, 1456), 859375)
+
+
+class Link(unittest.TestCase):
+    def test_wire_rate(self):
+        """One datagram per chunk: 8192 or 7168 bytes and 82 of headers, preamble and gap."""
+        self.assertAlmostEqual(stream.wire_rate('raw', 320_000_000) / 1e9, 10.3425, places=4)
+        self.assertAlmostEqual(stream.wire_rate('half', 320_000_000) / 1e9, 9.7025, places=4)
+        self.assertAlmostEqual(stream.wire_rate('full', 160_000_000) / 1e9, 4.53125, places=4)
+        self.assertEqual(stream.WIRE_OVERHEAD, 16 + 8 + 20 + 14 + 4 + 8 + 12)
+
+    def test_wire_rate_reduced_and_in_pieces(self):
+        """A reduced chunk is 2048 samples at its bits per pair; each piece pays the 82 bytes again."""
+        for packing, bits in stream.REDUCED.items():
+            self.assertEqual(stream.REDUCED_CHUNK[packing], 2048 * bits // 8)
+        self.assertAlmostEqual(stream.wire_rate('14', 320_000_000) / 1e9, 4.5825, places=4)
+        self.assertAlmostEqual(stream.wire_rate('7', 320_000_000) / 1e9, 2.3425, places=4)
+        self.assertAlmostEqual(stream.wire_rate('8', 80_000_000) / 1e9, 0.665625, places=5)
+        self.assertAlmostEqual(stream.wire_rate('14', 320_000_000, 1456) / 1e9, 4.7875, places=4)   # 3 pieces
+        self.assertAlmostEqual(stream.wire_rate('raw', 40_000_000, 1456) / 1e9, 1.356875, places=5)  # 6 pieces
+        # split: 10 chunks of 16 from the radio (3588 bytes), 6 from the senders (3584), a datagram each
+        self.assertAlmostEqual(stream.wire_rate('split', 320_000_000) / 1e9, 4.585625, places=5)
+
+    def test_mtu_needed(self):
+        self.assertEqual(stream.mtu_needed('raw'), 8236)
+        self.assertEqual(stream.mtu_needed('full'), 8236, 'the driver checks for a whole raw slice')
+        self.assertEqual(stream.mtu_needed('14'), 3584 + 44)
+        self.assertEqual(stream.mtu_needed('7'), 1792 + 44)
+        self.assertEqual(stream.mtu_needed('raw', 1456), 1500)
+        self.assertEqual(stream.mtu_needed('8', 4000), 2048 + 44)
+        self.assertEqual(stream.mtu_needed('split'), 8236, 'the driver\'s export runs too')
+
+    def test_largest_packet_and_the_receiving_mtu(self):
+        self.assertEqual(stream.largest_packet('raw', None, 9216), 8236)
+        self.assertEqual(stream.largest_packet('full', None, 9216), 8236)
+        self.assertEqual(stream.largest_packet('split', None, 9216), 8236)
+        self.assertEqual(stream.largest_packet('14', None, 9216), 28 + 2 * 3600, 'two slices to a datagram')
+        self.assertEqual(stream.largest_packet('7', None, 9216), 28 + 5 * 1808)
+        self.assertEqual(stream.largest_packet('7', None, 1900), 28 + 1808, 'never less than one')
+        self.assertEqual(stream.largest_packet('14'), 3628, "the unit port's MTU not known: a slice")
+        self.assertEqual(stream.largest_packet('raw', 1456, 9216), 1500)
+        self.assertEqual(stream.largest_packet('8', 1456, 9216), 1500)
+        stream.check_host_mtu('enx0', 9000, '10.77.0.10', 'raw', None, 9216)
+        stream.check_host_mtu('enx0', 1500, '10.77.0.10', 'raw', 1456, 9216)
+        with self.assertRaisesRegex(stream.StreamError, 'enx0 has an MTU of 1500.*8236 bytes.*init/host/link up enx0'):
+            stream.check_host_mtu('enx0', 1500, '10.77.0.10', 'raw', None, 9216)
+        with self.assertRaisesRegex(stream.StreamError, '9068 bytes'):
+            stream.check_host_mtu('enx0', 9000, '10.77.0.10', '7', None, 9216)
+
+    def test_interface_speed(self):
+        unit = host_fake.FakeUnit()
+        s = stream.Stream(unit)
+        self.assertEqual(s.check_interface('eth1'), (10000, 9216))
+        unit.device.link_mbps = 5000
+        self.assertEqual(s.check_interface('eth1'), (5000, 9216))
+        unit.device.link_mbps = None
+        self.assertEqual(s.check_interface('eth1'), (None, 9216))
+        with self.assertRaisesRegex(stream.StreamError, 'MTU is 1500; packing 14 needs at least 3628'):
+            s.check_mtu('eth1', 1500, '14')
+        s.check_mtu('eth1', 1500, '14', 1456)
+        with self.assertRaises(stream.StreamError):
+            s.check_interface('eth9')
+
 
 class ResultPage(unittest.TestCase):
     def page(self, status, wa_status=0):

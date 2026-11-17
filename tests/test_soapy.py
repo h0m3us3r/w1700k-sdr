@@ -1,0 +1,265 @@
+# SPDX-License-Identifier: MIT
+"""The SoapySDR module (host/soapy) through SoapySDR's own API (tests/soapy_check.cpp): w1700k-stream
+fed by a fake export over loopback, and the fake controller of the spectrum server's tests standing
+in for `w1700k serve`. What the device says of the receiver, which requests its setters make, and
+that the samples come in order, bit for bit, with times that account for every one lost."""
+import json
+import os
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+from stream_shm import Shm, ready as stream_ready
+from test_stream import BINARY as STREAM_BINARY, MAGIC, STREAM, build_problem, free_udp_port, noise_words, pack, unpacked
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SOAPY = os.path.join(ROOT, "host", "soapy")
+FAKE_CONTROLLER = os.path.join(ROOT, "tests", "spectrum_fake_controller.py")
+SLICE = 2048
+
+
+def soapy_problem():
+    problem = build_problem()
+    if problem:
+        return problem
+    probe = subprocess.run([os.environ.get("CXX", "c++"), "-x", "c++", "-fsyntax-only", "-"],
+                           input="#include <SoapySDR/Device.hpp>\n", text=True, capture_output=True)
+    return "SoapySDR headers missing" if probe.returncode else None
+
+
+def samples_of(words):
+    """A slice's samples as the stream serves them: int16 I, Q."""
+    return struct.pack("<4096h", *(v for iq in unpacked(words) for v in iq))
+
+
+@unittest.skipIf(soapy_problem(), soapy_problem())
+class SoapyTest(unittest.TestCase):
+    counter = 0
+
+    @classmethod
+    def setUpClass(cls):
+        for directory in (STREAM, SOAPY):
+            result = subprocess.run(["make", "-C", directory], capture_output=True, text=True)
+            if result.returncode:
+                raise AssertionError("build failed:\n" + result.stdout + result.stderr)
+        cls.tmp = tempfile.mkdtemp()
+        cls.tool = os.path.join(cls.tmp, "soapy_check")
+        subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror",
+                        os.path.join(ROOT, "tests", "soapy_check.cpp"), "-lSoapySDR", "-o", cls.tool], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def setUp(self):
+        SoapyTest.counter += 1
+        self.name = "/w1700k-soapytest-%d-%d" % (os.getpid(), self.counter)
+        self.port = free_udp_port()
+        self.service = subprocess.Popen([STREAM_BINARY, "--bind", "127.0.0.1", "--port", str(self.port),
+                                         "--name", self.name, "--ring-mib", "16", "--workers", "2",
+                                         "--rx-threads", "2"], stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 10
+        while not stream_ready(self.name):
+            self.assertLess(time.monotonic(), deadline, "w1700k-stream did not start")
+            time.sleep(0.05)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.log = os.path.join(self.tmp, "controller-%d.jsonl" % self.counter)
+        self.env = dict(os.environ, SOAPY_SDR_PLUGIN_PATH=os.path.join(SOAPY, "build"), SOAPY_SDR_LOG_LEVEL="ERROR")
+
+    def tearDown(self):
+        self.sock.close()
+        self.service.send_signal(signal.SIGINT)
+        self.service.wait(10)
+
+    def args(self, controller=""):
+        """The device's arguments: this test's stream, and the fake controller (None: none)."""
+        if controller is None:
+            return "driver=w1700k,stream=%s,controller=none" % self.name
+        return "driver=w1700k,stream=%s,controller=exec %s %s --log %s --progress-delay 0.01 %s" % (
+            self.name, sys.executable, FAKE_CONTROLLER, self.log, controller)
+
+    def tool_start(self, args, *ops):
+        return subprocess.Popen([self.tool, args, *ops], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                env=self.env)
+
+    def run_tool(self, args, *ops):
+        """Each op's JSON line."""
+        process = self.tool_start(args, *ops)
+        out, err = process.communicate(timeout=60)
+        return [json.loads(line) for line in out.splitlines()], err
+
+    def requests(self):
+        """What the controller was asked, without the ids (and the first line, its pid)."""
+        with open(self.log) as f:
+            lines = [json.loads(line) for line in f]
+        return [{k: v for k, v in line.items() if k != "id"} for line in lines[1:]]
+
+    def send(self, seq, payload):
+        self.sock.sendto(struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload, ("127.0.0.1", self.port))
+        if seq % 32 == 31:
+            time.sleep(0.002)
+
+    def send_slices(self, seqs, words):
+        for s in seqs:
+            self.send(s, struct.pack("<2048I", *words[s]))
+
+    def wait_newest(self, newest):
+        shm = Shm(self.name)
+        try:
+            deadline = time.monotonic() + 10
+            while shm.position()[1] < newest:
+                self.assertLess(time.monotonic(), deadline, "the stream did not reach slice %d" % newest)
+                time.sleep(0.01)
+        finally:
+            shm.close()
+
+    def reading(self, process):
+        self.assertEqual(json.loads(process.stdout.readline()).get("reading"), True)
+
+    def finish(self, process):
+        out, err = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 0, err)
+        return json.loads(out.strip().splitlines()[-1])
+
+    def test_the_device_describes_the_receiver(self):
+        (state,), _ = self.run_tool(self.args(), "state")
+        self.assertEqual((state["driver"], state["hardware"], state["channels"]), ("w1700k", "W1700K", 1))
+        self.assertEqual(state["antennas"], ["2.4G", "5G", "6G"])
+        self.assertEqual((state["antenna"], state["freq"], state["rate"], state["bw"]), ("5G", 5180e6, 40e6, 20e6))
+        self.assertEqual(state["rates"], 4)
+        self.assertEqual((state["formats"], state["native"], state["full_scale"]), (["CS16", "CF32"], "CS16", 8192))
+        self.assertEqual(state["agc"], True)
+        low, high = state["freq_ranges"]
+        self.assertLess(low[1], 3e9)                            # the 2.4 GHz radio
+        self.assertEqual(high, [4650e6, 7576.2e6],
+                         "the 5 and 6 GHz radios as one span: the band in use as the unit reports it, the other's default")
+        self.assertEqual(state["sensors"]["service"], "true")
+        self.assertEqual(state["sensors"]["streaming"], "false")
+        self.assertEqual(state["settings"], {"flatten": "false", "capture_640": "false"})
+        self.assertEqual(self.requests(), [], "describing it asks the controller for nothing")
+
+    def test_setters_are_the_controllers_requests(self):
+        lines, _ = self.run_tool(
+            self.args(),
+            "freq=5300000000",          # inside the band in use: a tune
+            "freq=2450000000",          # another band: the switch, with the LO, at the device's sample rate
+            "rate=80000000",
+            "antenna=6G",               # a band by name: the sample rate goes with it
+            "bw=30000000",              # the narrowest filter that passes it
+            "bw=0",                     # as wide as the sample rate again
+            "agc=0", "gain:LNA=18", "gain:LPF=4", "agc=1",
+            "setting:capture_640=true",
+            "state")
+        self.assertEqual([line for line in lines[:-1] if line != {"ok": True}], [])
+        self.assertEqual(self.requests(), [
+            {"op": "tune", "hz": 5300000000},
+            {"op": "configure", "band": 0, "sample_rate": 40000000, "capture_rate": 40000000, "lo_hz": 2450000000},
+            {"op": "configure", "band": 0, "sample_rate": 80000000, "capture_rate": 80000000},
+            {"op": "configure", "band": 2, "sample_rate": 80000000, "capture_rate": 80000000},
+            {"op": "filter", "mhz": 40},
+            {"op": "filter_follow", "on": True},
+            {"op": "gain", "lna": 2, "lpf": 5},
+            {"op": "gain", "lna": 3, "lpf": 5},
+            {"op": "gain", "lna": 3, "lpf": 2},
+            {"op": "gain", "agc": True},
+            {"op": "configure", "band": 2, "sample_rate": 320000000, "capture_rate": 640000000},
+        ])
+        state = lines[-1]
+        self.assertEqual((state["antenna"], state["rate"], state["freq"]), ("6G", 320e6, 6105e6))
+        self.assertEqual(state["settings"]["capture_640"], "true")
+
+    def test_what_the_receiver_cannot_do_is_refused_with_the_reason(self):
+        lines, _ = self.run_tool(self.args(), "rate=50000000", "freq=3500000000", "antenna=900M", "gain:IF=3", "state")
+        self.assertIn("40, 80, 160 or 320 Msps", lines[0]["error"])
+        self.assertIn("outside every band", lines[1]["error"])
+        self.assertIn("2.4G, 5G or 6G", lines[2]["error"])
+        self.assertIn("LNA or LPF", lines[3]["error"])
+        self.assertEqual((lines[4]["freq"], lines[4]["rate"]), (5180e6, 40e6), "and it stays as it was")
+        self.assertEqual(self.requests(), [], "none of it reached the controller")
+
+    def test_a_radio_not_yet_loaded_is_loaded_by_the_first_setter(self):
+        lines, _ = self.run_tool(self.args("--unloaded"), "state", "freq=5300000000")
+        self.assertEqual(lines[1], {"ok": True})
+        self.assertEqual(self.requests(), [{"op": "load"}, {"op": "tune", "hz": 5300000000}])
+
+    def test_samples_come_in_order_with_their_times(self):
+        """A stream that starts after the reader: from its first slice. One slice packed, one a
+        firmware event (no samples, no time), one lost (an overflow, and its time passed over)."""
+        words = {s: noise_words(s) for s in range(1300)}
+        path = os.path.join(self.tmp, "order.cs16")
+        want = 1298 * SLICE
+        process = self.tool_start(self.args(), "read:CS16:%d:%s" % (want, path))
+        self.reading(process)
+        for s in range(1300):
+            if s == 20:
+                self.send(s, b"\x00" * 64)
+            elif s == 30:
+                continue
+            elif s == 10:
+                self.send(s, struct.pack("<1792I", *pack(words[s])))
+            else:
+                self.send(s, struct.pack("<2048I", *words[s]))
+        report = self.finish(process)
+        self.assertEqual((report["samples"], report["overflows"], report["lost_samples"]), (want, 1, SLICE))
+        self.assertEqual((report["time_errors"], report["errors"]), (0, 0))
+        self.assertEqual(report["span_ns"], round(1299 * SLICE * 1e9 / 40e6), "every sample's time, the lost one's too")
+        with open(path, "rb") as f:
+            got = f.read()
+        expected = b"".join(samples_of(words[s]) for s in range(1300) if s not in (20, 30))
+        self.assertEqual(len(got), len(expected))
+        self.assertTrue(got == expected, "the samples, bit for bit")
+        self.assertEqual(self.requests(), [{"op": "start"}, {"op": "stop"}], "it started the stream, so it stops it")
+
+    def test_a_stream_already_running_is_joined_from_now_and_left_running(self):
+        words = {s: noise_words(s) for s in range(300)}
+        self.send_slices(range(100), words)
+        self.wait_newest(100)
+        path = os.path.join(self.tmp, "joined.cf32")
+        process = self.tool_start(self.args("--running"), "read:CF32:%d:%s" % (150 * SLICE + 100, path))
+        self.reading(process)
+        self.send_slices(range(100, 300), words)
+        report = self.finish(process)
+        self.assertEqual((report["samples"], report["overflows"], report["time_errors"]), (150 * SLICE + 100, 0, 0))
+        with open(path, "rb") as f:
+            got = struct.unpack("<%df" % (2 * report["samples"]), f.read())
+        expected = struct.unpack("<%dh" % (4096 * 151), b"".join(samples_of(words[s]) for s in range(100, 251)))
+        self.assertEqual(list(got), [v / 8192 for v in expected[:len(got)]], "full scale 1.0, nothing before it joined")
+        self.assertEqual(self.requests(), [], "another consumer's stream is not this device's to stop")
+
+    def test_a_device_that_only_listens(self):
+        words = {s: noise_words(s) for s in range(200)}
+        path = os.path.join(self.tmp, "listen.cs16")
+        process = self.tool_start(self.args(None), "freq=5300000000", "read:CS16:%d:%s" % (200 * SLICE, path))
+        self.assertIn("only listens", json.loads(process.stdout.readline())["error"])
+        self.reading(process)
+        self.send_slices(range(200), words)
+        out, _ = process.communicate(timeout=60)
+        report = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual((report["samples"], report["overflows"]), (200 * SLICE, 0))
+        with open(path, "rb") as f:
+            self.assertTrue(f.read() == b"".join(samples_of(words[s]) for s in range(200)))
+
+    def test_without_a_stream_service_opening_says_what_is_missing(self):
+        (line,), _ = self.run_tool("driver=w1700k,stream=/w1700k-soapytest-none,service=none", "state")
+        self.assertIn("no stream service at /w1700k-soapytest-none", line["error"])
+
+    def test_a_stream_service_named_in_the_arguments_is_started_and_ends_with_the_device(self):
+        name = self.name + "-own"
+        service = "%s --bind 127.0.0.1 --port %d --name %s --ring-mib 16 --workers 2 --rx-threads 2" % (
+            STREAM_BINARY, free_udp_port(), name)
+        (state,), _ = self.run_tool("driver=w1700k,stream=%s,controller=none,service=%s" % (name, service), "state")
+        self.assertEqual(state["sensors"]["service"], "true")
+        self.assertFalse(stream_ready(name), "the service it started went with it, and took its shared memory")
+
+    def test_a_stream_service_that_does_not_come_up_is_reported(self):
+        (line,), _ = self.run_tool("driver=w1700k,stream=%s-none,controller=none,service=false" % self.name, "state")
+        self.assertIn("did not come up", line["error"])
+
+if __name__ == "__main__":
+    unittest.main()

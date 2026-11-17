@@ -1,0 +1,133 @@
+SPDX-License-Identifier: GPL-2.0-only
+Subject: [PATCH] net: dsa: mt7530: busy-wait for a PHY register access
+
+This kernel has no high-resolution timers, so the sleep between the polls of
+MT7531_PHY_IAC in the indirect PHY accessors is a whole tick, 4 ms at HZ=250,
+and a clause-45 access (two transactions) takes 8 ms where the bus needs well
+under a tenth of that. The 10 GbE PHYs sit on this bus, and the RTL8261C's
+firmware is 4714 register writes: bringing the IQ port up took 38 s on a
+W1700K2, at boot before the SSH server starts. Poll with udelay() between
+reads, as 0012 does for the NAND.
+
+--- a/drivers/net/dsa/mt7530.c
++++ b/drivers/net/dsa/mt7530.c
+@@ -545,8 +545,9 @@
+ 
+ 	mt7530_mutex_lock(priv);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -556,8 +557,9 @@
+ 	      MT7531_MDIO_DEV_ADDR(devad) | regnum;
+ 	mt7530_mii_write(priv, MT7531_PHY_IAC, reg | MT7531_PHY_ACS_ST);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -567,8 +569,9 @@
+ 	      MT7531_MDIO_DEV_ADDR(devad);
+ 	mt7530_mii_write(priv, MT7531_PHY_IAC, reg | MT7531_PHY_ACS_ST);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -590,8 +593,9 @@
+ 
+ 	mt7530_mutex_lock(priv);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -601,8 +605,9 @@
+ 	      MT7531_MDIO_DEV_ADDR(devad) | regnum;
+ 	mt7530_mii_write(priv, MT7531_PHY_IAC, reg | MT7531_PHY_ACS_ST);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -612,8 +617,9 @@
+ 	      MT7531_MDIO_DEV_ADDR(devad) | data;
+ 	mt7530_mii_write(priv, MT7531_PHY_IAC, reg | MT7531_PHY_ACS_ST);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -633,8 +639,9 @@
+ 
+ 	mt7530_mutex_lock(priv);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -645,8 +652,9 @@
+ 
+ 	mt7530_mii_write(priv, MT7531_PHY_IAC, val | MT7531_PHY_ACS_ST);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, val,
+-				       !(val & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, val,
++					      !(val & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -668,8 +676,9 @@
+ 
+ 	mt7530_mutex_lock(priv);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, reg,
+-				       !(reg & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, reg,
++					      !(reg & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;
+@@ -680,8 +689,9 @@
+ 
+ 	mt7530_mii_write(priv, MT7531_PHY_IAC, reg | MT7531_PHY_ACS_ST);
+ 
+-	ret = regmap_read_poll_timeout(priv->regmap, MT7531_PHY_IAC, reg,
+-				       !(reg & MT7531_PHY_ACS_ST), 20, 100000);
++	ret = regmap_read_poll_timeout_atomic(priv->regmap, MT7531_PHY_IAC, reg,
++					      !(reg & MT7531_PHY_ACS_ST), 20,
++					      100000);
+ 	if (ret < 0) {
+ 		dev_err(priv->dev, "poll timeout\n");
+ 		goto out;

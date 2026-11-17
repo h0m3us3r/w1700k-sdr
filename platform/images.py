@@ -19,11 +19,15 @@ Outputs in platform/build/images/:
 The FITs are parsed only by our loader, so their hashes are SHA-256.
 """
 import gzip
+import hashlib
+import io
+import json
 import os
 from pathlib import Path
 import stat
 import struct
 import sys
+import tarfile
 import tempfile
 import uuid
 import zlib
@@ -39,6 +43,8 @@ import uboot
 SYSTEM_FIT = IMAGES / 'w1700k-system.itb'
 RECOVERY_FIT = IMAGES / 'w1700k-recovery.itb'
 ROOTFS = IMAGES / 'rootfs.squashfs'
+LOADER_B = IMAGES / 'w1700k-loader-b.itb'    # platform/loader/build.py
+UPDATE = IMAGES / 'w1700k-update.tar'
 BOOTSTRAP = BUILD / 'bootstrap/bootstrap.cpio.gz'
 RECOVERY_INITRD = BUILD / 'bootstrap/recovery.cpio.gz'
 BUSYBOX = BUILDROOT_OUT / 'target/bin/busybox'
@@ -205,8 +211,27 @@ def durable(nand):
         write_if_changed(durable_image(nand), normalize_ubifs(raw.read_bytes()))
 
 
+def update_archive(root):
+    """w1700k-update.tar: what an installed unit takes over ssh in one go (init/flash --bundle):
+    the second loader and the generic root, with a manifest of their digests and of the flash
+    layout they are built for. The same bytes from the same sources: no times, no owners."""
+    files = {LOADER_B.name: LOADER_B.read_bytes(), ROOTFS.name: root}
+    manifest = {'format': 1, 'what': 'W1700K SDR update: second loader and root',
+                'partitions': {name: list(span) for name, span in partitions.GEOMETRY.items()},
+                'files': {name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)}
+                          for name, data in files.items()}}
+    files = {'manifest.json': (json.dumps(manifest, indent=1) + '\n').encode(), **files}
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode='w', format=tarfile.USTAR_FORMAT) as archive:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size, info.mode, info.mtime = len(data), 0o644, 0
+            archive.addfile(info, io.BytesIO(data))
+    write_if_changed(UPDATE, out.getvalue())
+
+
 def main():
-    for path in (KERNEL_IMAGE, DTB, ROOTFS_IMAGE, BUSYBOX, MKIMAGE):
+    for path in (KERNEL_IMAGE, DTB, ROOTFS_IMAGE, BUSYBOX, MKIMAGE, LOADER_B):
         require(path.is_file(), f'{path} is missing; build it first (see the top-level Makefile)')
     IMAGES.mkdir(parents=True, exist_ok=True)
     root = ROOTFS_IMAGE.read_bytes()
@@ -220,7 +245,8 @@ def main():
     build_fit(RECOVERY_FIT, 'W1700K SDR recovery', RECOVERY_INITRD)
     for nand in partitions.NANDS:
         durable(nand)
-    for path in (SYSTEM_FIT, ROOTFS, RECOVERY_FIT,
+    update_archive(root)
+    for path in (SYSTEM_FIT, ROOTFS, RECOVERY_FIT, UPDATE,
                  *(durable_image(nand) for nand in partitions.NANDS)):
         print(f'images: {path} ({path.stat().st_size} bytes)')
     return 0

@@ -42,6 +42,8 @@ MAGIC = 0x31524453
 SLICE_SAMPLES = 2048
 TONE_HZ = 5185e6     # the RF frequency of the exporter's tone
 FFT_SIZE = 4096
+DUMP_SECONDS = 0.01  # the length of a SIGUSR1 snapshot here
+DUMP_BEHIND = 64     # slices a snapshot ends short of the newest (serve.cpp)
 
 
 def build_problem():
@@ -331,7 +333,7 @@ class ServerFixture:
                 raise AssertionError("w1700k-stream did not start")
             time.sleep(0.05)
         command = [BINARY, "--listen", "127.0.0.1:0", "--stream", self.stream_name, "--fft-threads", "2",
-                   "--dump-dir", self.dir, "--dump-seconds", "0.01", *extra]
+                   "--dump-dir", self.dir, "--dump-seconds", str(DUMP_SECONDS), *extra]
         if controller:
             command += ["--controller", "exec %s %s --log %s --tuning-file %s --progress-delay %g"
                         % (shlex.quote(sys.executable), shlex.quote(FAKE_CONTROLLER), shlex.quote(self.log),
@@ -473,6 +475,14 @@ class SpectrumServerTest(unittest.TestCase):
         s.wait_op(lambda r: r["op"] == "filter" and r["mhz"] == 80)
         ws.send({"t": "set", "filter": 320})                # any filter at any width
         s.wait_op(lambda r: r["op"] == "filter" and r["mhz"] == 320)
+        ws.wait(lambda: self.controller(ws)["state"]["rf"].get("filter_follows_rate") is False,
+                what="a filter set by hand no longer follows the rate")
+        ws.send({"t": "set", "filter_follow": True})        # every band's filter at its sample rate again
+        s.wait_op(lambda r: r["op"] == "filter_follow" and r["on"] is True)
+        ws.wait(lambda: self.controller(ws)["state"]["rf"].get("filter_follows_rate") is True,
+                what="the filters following the rate")
+        ws.send({"t": "set", "filter_follow": "yes"})
+        ws.wait_notice("filter_follow must be true or false")
 
         # A rate the radio does not have is refused before the controller sees it.
         ws.send({"t": "set", "band": 2, "sample_rate": 640e6})
@@ -510,7 +520,16 @@ class SpectrumServerTest(unittest.TestCase):
         self.assertEqual(ws.status["stream"]["lost"], 0)
         self.assertEqual(ws.status["stream"]["bad"], 0)
 
-        # SIGUSR1: a snapshot labelled with the current tuning.
+        # SIGUSR1: a snapshot labelled with the current tuning. It is the newest DUMP_SECONDS of the
+        # stream, and its tuning is steady only if every slice of it came after the change took
+        # effect. The frame labelled with the new tuning, above, did: once the stream has moved on
+        # by a snapshot's length from there (twice that here), the snapshot has too. At the fake
+        # exporter's 2000 slices a second that is a second and a half, which a busy machine does
+        # not always let pass by itself.
+        span = 2 * (int(DUMP_SECONDS * 320e6 / SLICE_SAMPLES) + DUMP_BEHIND)
+        seen = ws.status["stream"]["slices"]
+        ws.wait(lambda: ws.status["stream"]["slices"] >= seen + span, timeout=30,
+                what="the stream to move a snapshot's length past the retune")
         s.process.send_signal(signal.SIGUSR1)
         deadline = time.monotonic() + 10
         while not glob.glob(os.path.join(s.dir, "w1700k-dump-*.json")) and time.monotonic() < deadline:
@@ -536,6 +555,9 @@ class SpectrumServerTest(unittest.TestCase):
         ws = s.ws
         ws.wait(lambda: self.controller(ws).get("state"), what="the controller's state")
         first = self.controller(ws)["pid"]
+        # The controller publishes its state by itself, which can come before the server's first
+        # request has reached it: it is not killed until that request is on record.
+        s.wait_op(lambda r: r["op"] == "status", what="the first controller's status request")
         os.kill(s.requests()[0]["pid"], signal.SIGKILL)
         ws.wait(lambda: not self.controller(ws)["alive"], what="the controller's death in the status")
         ws.send({"t": "set", "lo": 5200e6})

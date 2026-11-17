@@ -47,33 +47,32 @@ static uint32_t wa_start(void)
 	return 0;
 }
 
-/* STREAM: the route and ICAP0 armed, the result page and the go word cleared, then the producer
- * of the packing schedule (linked at WM_PRODUCER_*) until the host's stop word; afterwards the
- * route released, unless the WA never left the packer (a route change under a core that still
- * reads the pool hangs it). Returns the producer's status. */
+_Static_assert(SCHEDULE_COUNT == RADIO_PACKINGS, "one schedule per RADIO_PACKING_* code");
+
+/* STREAM: the WA started if the packing schedule has it pack, the route and ICAP0 armed, the
+ * result page and the go word cleared, then the producer (linked at WM_PRODUCER) with that
+ * schedule until the host's stop word; afterwards the route released, unless the WA never left
+ * the packer (a route change under a core that still reads the pool hangs it). Returns the
+ * producer's status. */
 static uint32_t stream(uint32_t packing)
 {
-	void (*producer)(void);
-	uint32_t res;
+	void (*producer)(uint32_t) = (void (*)(uint32_t))(uintptr_t)WM_PRODUCER;
+	uint32_t res, wa;
 
-	if (packing == RADIO_PACKING_RAW) {
-		producer = (void (*)(void))(uintptr_t)WM_PRODUCER_RAW;
-	} else if (packing == RADIO_PACKING_HALF) {
-		if ((res = wa_start()))
-			return res;
-		producer = (void (*)(void))(uintptr_t)WM_PRODUCER_HALF;
-	} else {
+	if (packing >= SCHEDULE_COUNT)
 		return RADIO_ERR_ARG;
-	}
+	wa = schedules[packing].wa_mask != 0;
+	if (wa && (res = wa_start()))
+		return res;
 	stream_arm();
 	for (uint32_t i = 0; i < 4; i++)
 		R32(DONE_AT + 4 * i) = 0;
 	R32(GO_ADDR) = 0;
 	asm volatile("fence" ::: "memory");
-	producer();
+	producer(packing);
 	asm volatile("csrci mstatus, %0" : : "n"(MT7996_MCU_MSTATUS_MIE) : "memory");
 	res = RES->status;
-	if (packing == RADIO_PACKING_RAW || (RES->wa_status & RES_WA_EXITED))
+	if (!wa || (RES->wa_status & RES_WA_EXITED))
 		stream_disarm();
 	return res;
 }

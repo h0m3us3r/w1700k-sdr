@@ -19,7 +19,7 @@ build copies them into each source tree):
 | `airoha_bmt_mtd_write.h` | the MTD read/write/erase paths of both bindings, shared |
 | `../loader/airoha_bmt_layer.c`, `../linux/sdr_bmt_layer.c` | the U-Boot and Linux MTD bindings |
 
-Writes are allowed only from `system` to the end of `scratch` (generated into
+Writes are allowed only from `system` to the end of `durable` (generated into
 `airoha_bmt_policy.h` from `platform/partitions.py`); the vendor partitions and
 the reserve pool are written only by the engine itself. Marking a block bad from
 outside returns `-EOPNOTSUPP`/`-EROFS`; a failed program or erase starts a

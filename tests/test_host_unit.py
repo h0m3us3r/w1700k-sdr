@@ -69,5 +69,33 @@ class Batch(unittest.TestCase):
         self.assertIsNone(third)
 
 
+class Configuration(unittest.TestCase):
+    def test_link_mbps(self):
+        """export.link_mbps: the link's capacity where it is less than the port's speed."""
+        self.assertIsNone(config.parse({}).export.link_mbps)
+        self.assertEqual(config.parse({'export': {'link_mbps': 7000}}).export.link_mbps, 7000)
+        for bad in (0, -1, 2.5, '5000', True):
+            with self.assertRaises(config.ConfigError):
+                config.parse({'export': {'link_mbps': bad}})
+
+    def test_packing(self):
+        """export.packing: set by hand; absent or null: automatic."""
+        self.assertIsNone(config.parse({}).export.packing)
+        self.assertIsNone(config.parse({'export': {'packing': None}}).export.packing)
+        for name in config.PACKINGS:
+            self.assertEqual(config.parse({'export': {'packing': name}}).export.packing, name)
+        for bad in ('auto', 'FULL', 28, True):
+            with self.assertRaises(config.ConfigError):
+                config.parse({'export': {'packing': bad}})
+
+    def test_piece(self):
+        """export.piece: a slice's bytes per datagram; absent or null: whole slices."""
+        self.assertIsNone(config.parse({}).export.piece)
+        self.assertEqual(config.parse({'export': {'piece': 1456}}).export.piece, 1456)
+        for bad in (0, 255, 8193, True, '1456'):
+            with self.assertRaises(config.ConfigError):
+                config.parse({'export': {'piece': bad}})
+
+
 if __name__ == '__main__':
     unittest.main()

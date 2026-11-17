@@ -4,9 +4,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 #include <fftw3.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 namespace {
 
@@ -16,6 +22,15 @@ constexpr uint64_t kHorizon = 2048;    // slices: a slice still missing this far
 // receive threads, and the unit's export lag behind its DMA ring.
 constexpr uint64_t kSettleSlices = 1024;
 constexpr size_t kHistory = 256;       // segments kept for tuning_over()
+// The FFT workers take what CPU is left: they run at this nice level, so the stream service's
+// receive threads, the web thread and a browser on the same host are served first. A spectrum
+// that covers fewer samples is a small loss; a receive thread kept waiting loses slices.
+constexpr int kWorkerNice = 15;
+// "Every sample" on a host that cannot transform them all: frames keep coming at their rate with
+// a share of their blocks, rather than whole frames being skipped. The share eases down while
+// frames find the queue half full, falls by kShareDown when one finds it full (and is skipped),
+// and recovers by kShareUp per frame that finds it empty.
+constexpr double kShareEase = 0.97, kShareDown = 0.85, kShareUp = 0.01;
 
 // Cosine-sum windows: w[n] = sum_k (-1)^k a_k cos(2 pi k n / N), periodic.
 const std::vector<std::pair<std::string, std::vector<double>>> &window_table()
@@ -36,10 +51,42 @@ const std::vector<std::pair<std::string, std::vector<double>>> &window_table()
 
 std::mutex planner;  // FFTW's planner is not thread-safe; executing a plan is
 
-// A sample word: I in [29:16], Q in [13:0], 14-bit two's complement.
+// A plan FFTW has measured runs the largest sizes about 40 % faster than one it estimates, and
+// takes seconds to find; with a time limit that cuts the search short it can come out slower
+// than the estimate. So measured plans are found once, in the background, and kept here for
+// later runs (FFTW's "wisdom"). "": no cache directory.
+constexpr double kMeasureLimit = 120;  // seconds: far beyond what any size here needs
 
+std::string wisdom_path(bool create)
+{
+    std::string dir;
+    if (const char *cache = getenv("XDG_CACHE_HOME"); cache && *cache) dir = cache;
+    else if (const char *home = getenv("HOME"); home && *home) dir = std::string(home) + "/.cache";
+    else return "";
+    if (create) mkdir(dir.c_str(), 0700);
+    dir += "/w1700k";
+    if (create) mkdir(dir.c_str(), 0700);
+    return dir + "/fftwf-wisdom";
+}
+
+// With the planner held.
+void load_wisdom()
+{
+    const std::string path = wisdom_path(false);
+    if (!path.empty()) fftwf_import_wisdom_from_filename(path.c_str());
+}
+
+void save_wisdom()
+{
+    const std::string path = wisdom_path(true);
+    if (path.empty()) return;
+    const std::string fresh = path + ".new";
+    if (fftwf_export_wisdom_to_filename(fresh.c_str())) std::rename(fresh.c_str(), path.c_str());
+}
 
 }  // namespace
+
+float spectrum_db(float power) { return 10 * std::log10(power + 1e-20f); }
 
 const std::vector<std::string> &spectrum_windows()
 {
@@ -79,14 +126,40 @@ void SpectrumSettings::validate() const
     if (averaging > 100000) throw std::runtime_error("averaging must be at most 100000 blocks");
 }
 
-// One FFT size and window, shared by the workers: each runs the plan on its own arrays.
+// The plan of one FFT size, in place (a worker's block then stays in 2 MiB at the largest size,
+// not 4): the measured one where FFTW knows it, else its estimate, ready at once.
+struct SpectrumEngine::Plan {
+    fftwf_plan plan;
+    bool measured;
+
+    explicit Plan(unsigned n)
+    {
+        std::lock_guard<std::mutex> lock(planner);
+        fftwf_complex *in = fftwf_alloc_complex(n);
+        fftwf_set_timelimit(FFTW_NO_TIMELIMIT);
+        plan = fftwf_plan_dft_1d(int(n), in, in, FFTW_FORWARD, FFTW_MEASURE | FFTW_WISDOM_ONLY);
+        measured = plan != nullptr;
+        if (!plan) plan = fftwf_plan_dft_1d(int(n), in, in, FFTW_FORWARD, FFTW_ESTIMATE);
+        fftwf_free(in);
+    }
+    ~Plan()
+    {
+        std::lock_guard<std::mutex> lock(planner);
+        fftwf_destroy_plan(plan);
+    }
+    Plan(const Plan &) = delete;
+    Plan &operator=(const Plan &) = delete;
+};
+
+// One FFT size and window, shared by the workers: each runs the plan on its own array.
 struct SpectrumEngine::Transform {
     unsigned size;
     std::vector<float> window;
     double scale;              // |X|^2 of a full-scale complex tone -> 1
-    fftwf_plan plan;
+    std::shared_ptr<const Plan> plan;
 
-    Transform(unsigned n, const std::string &name) : size(n), window(n)
+    Transform(unsigned n, const std::string &name, std::shared_ptr<const Plan> p)
+        : size(n), window(n), plan(std::move(p))
     {
         const std::vector<double> *terms = nullptr;
         for (const auto &entry : window_table())
@@ -100,19 +173,6 @@ struct SpectrumEngine::Transform {
             sum += w;
         }
         scale = 1 / ((kFullScale * sum) * (kFullScale * sum));
-        std::lock_guard<std::mutex> lock(planner);
-        fftwf_complex *in = fftwf_alloc_complex(n), *out = fftwf_alloc_complex(n);
-        // Measuring finds a faster plan; the time limit keeps a new size from stalling the
-        // stream for long (FFTW remembers plans it has made).
-        fftwf_set_timelimit(1.0);
-        plan = fftwf_plan_dft_1d(int(n), in, out, FFTW_FORWARD, FFTW_MEASURE);
-        fftwf_free(in);
-        fftwf_free(out);
-    }
-    ~Transform()
-    {
-        std::lock_guard<std::mutex> lock(planner);
-        fftwf_destroy_plan(plan);
     }
 };
 
@@ -128,13 +188,9 @@ struct SpectrumEngine::Job {
 struct SpectrumEngine::Worker {
     std::thread thread;
     unsigned size = 0;
-    fftwf_complex *in = nullptr, *out = nullptr;
+    fftwf_complex *in = nullptr;  // the block, transformed in place
     std::vector<float> power;
-    ~Worker()
-    {
-        fftwf_free(in);
-        fftwf_free(out);
-    }
+    ~Worker() { fftwf_free(in); }
 };
 
 SpectrumEngine::SpectrumEngine(const StreamClient &stream, const Tuning &tuning, unsigned workers, Output output)
@@ -143,7 +199,12 @@ SpectrumEngine::SpectrumEngine(const StreamClient &stream, const Tuning &tuning,
     latest_.tuning = tuning;
     history_.push_back(latest_);
     stats_.workers = std::max(1u, workers);
+    {
+        std::lock_guard<std::mutex> lock(planner);
+        load_wisdom();
+    }
     transform(settings_.size, settings_.window);  // planned now, not while the stream runs past
+    refiner_ = std::thread([this] { refine(); });
     for (unsigned i = 0; i < stats_.workers; ++i) workers_.push_back(std::make_unique<Worker>());
     for (auto &w : workers_) w->thread = std::thread([this, p = w.get()] { work(*p); });
     scheduler_ = std::thread([this] { schedule(); });
@@ -158,6 +219,12 @@ SpectrumEngine::~SpectrumEngine()
     work_ready_.notify_all();
     scheduler_.join();
     for (auto &w : workers_) w->thread.join();
+    {
+        std::lock_guard<std::mutex> lock(transforms_mutex_);
+        refine_stop_ = true;
+    }
+    refine_ready_.notify_all();
+    refiner_.join();  // a measurement under way finishes first: its plan is kept for the next run
 }
 
 void SpectrumEngine::configure(const SpectrumSettings &settings)
@@ -239,9 +306,55 @@ std::optional<Tuning> SpectrumEngine::tuning_over(uint64_t run, uint64_t first, 
 std::shared_ptr<const SpectrumEngine::Transform> SpectrumEngine::transform(unsigned size, const std::string &window)
 {
     std::lock_guard<std::mutex> lock(transforms_mutex_);
+    auto &plan = plans_[size];
+    if (!plan) {
+        plan = std::make_shared<const Plan>(size);
+        if (!plan->measured) {
+            refine_.push_back(size);
+            refine_ready_.notify_all();
+        }
+    }
     auto &t = transforms_[{size, window}];
-    if (!t) t = std::make_shared<const Transform>(size, window);
+    if (!t || t->plan != plan) t = std::make_shared<const Transform>(size, window, plan);
     return t;
+}
+
+// Measures the plans that were only estimated, one size at a time, saves them and has the
+// scheduler take them up. The workers go on with the estimate meanwhile; only planning another
+// new size waits for a measurement to end.
+void SpectrumEngine::refine()
+{
+    for (;;) {
+        unsigned n;
+        {
+            std::unique_lock<std::mutex> lock(transforms_mutex_);
+            refine_ready_.wait(lock, [this] { return refine_stop_ || !refine_.empty(); });
+            if (refine_stop_) return;
+            n = refine_.front();
+            refine_.pop_front();
+        }
+        bool found;
+        {
+            std::lock_guard<std::mutex> lock(planner);
+            fftwf_complex *in = fftwf_alloc_complex(n);
+            fftwf_set_timelimit(kMeasureLimit);
+            const auto started = std::chrono::steady_clock::now();
+            const fftwf_plan plan = fftwf_plan_dft_1d(int(n), in, in, FFTW_FORWARD, FFTW_MEASURE);
+            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            fftwf_set_timelimit(FFTW_NO_TIMELIMIT);
+            if (plan) fftwf_destroy_plan(plan);
+            fftwf_free(in);
+            found = plan && took < 0.9 * kMeasureLimit;  // not one a time limit cut short
+            if (found) save_wisdom();
+        }
+        if (!found) continue;
+        {
+            std::lock_guard<std::mutex> lock(transforms_mutex_);
+            plans_.erase(n);  // the next transform() of this size plans again, from what FFTW now knows
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++settings_version_;  // the scheduler fetches its transform again
+    }
 }
 
 // Moves the frontier over the ring (every slot before it holds its slice or an event, or was
@@ -255,6 +368,7 @@ void SpectrumEngine::schedule()
     uint64_t run = 0, frontier = 0, next = 0, sequence = 0, applied = 0;  // next: first sample of the next frame
     uint64_t frame_pairs = 1, stride = 0;
     unsigned blocks = 1;
+    double share = 1;  // of `blocks`, what the workers keep up with (every-sample mode)
     bool replan = true;
     SpectrumSettings active;
     std::shared_ptr<const Transform> t;
@@ -287,7 +401,7 @@ void SpectrumEngine::schedule()
             frontier = next = 0;
         }
         if (version != applied || !t) {
-            if (!t || t->size != s.size || s.window != active.window) t = transform(s.size, s.window);
+            t = transform(s.size, s.window);  // also when only its plan was measured since
             active = s;
             applied = version;
             replan = true;
@@ -340,13 +454,20 @@ void SpectrumEngine::schedule()
                 if (!current.valid) {
                     ++retuned;
                 } else if (jobs_.size() < 2 * workers_.size()) {
+                    // Every sample, as far as the workers manage: fewer blocks, spread evenly.
+                    unsigned use = blocks;
+                    if (!active.averaging && blocks > 1) {
+                        if (jobs_.empty()) share = std::min(1.0, share + kShareUp);
+                        else if (jobs_.size() >= workers_.size()) share = std::max(1.0 / blocks, share * kShareEase);
+                        use = std::clamp(unsigned(std::lround(blocks * share)), 1u, blocks);
+                    }
                     Job job;
                     job.view = view;
                     job.sequence = sequence++;
                     job.run = run;
                     job.first = next;
-                    job.stride = stride;
-                    job.blocks = blocks;
+                    job.stride = use == blocks ? stride : use > 1 ? (frame_pairs - active.size) / (use - 1) : 0;
+                    job.blocks = use;
                     job.transform = t;
                     job.tuning = current.tuning;
                     job.peak = active.peak;
@@ -355,9 +476,11 @@ void SpectrumEngine::schedule()
                     queued = true;
                 } else {
                     dropped += frame_pairs;
+                    if (!active.averaging) share = std::max(1.0 / blocks, share * kShareDown);
                 }
                 next = end;
             }
+            stats_.share = active.averaging ? 1 : share;
             stats_.slices_lost += lost;
             stats_.slices_skipped += skipped;
             stats_.pairs_dropped += dropped;
@@ -372,6 +495,8 @@ void SpectrumEngine::schedule()
 
 void SpectrumEngine::work(Worker &w)
 {
+    // This thread alone (on Linux a nice level is per thread); refused: it runs as the others do.
+    setpriority(PRIO_PROCESS, id_t(syscall(SYS_gettid)), kWorkerNice);
     for (;;) {
         Job job;
         {
@@ -385,9 +510,7 @@ void SpectrumEngine::work(Worker &w)
         const unsigned n = t.size;
         if (w.size != n) {
             fftwf_free(w.in);
-            fftwf_free(w.out);
             w.in = fftwf_alloc_complex(n);
-            w.out = fftwf_alloc_complex(n);
             w.power.assign(n, 0.0f);
             w.size = n;
         }
@@ -439,8 +562,8 @@ void SpectrumEngine::work(Worker &w)
                 missing += n;
                 continue;
             }
-            fftwf_execute_dft(t.plan, w.in, w.out);
-            const fftwf_complex *out = w.out;
+            fftwf_execute_dft(t.plan->plan, w.in, w.in);
+            const fftwf_complex *out = w.in;
             float *power = w.power.data();
             if (job.peak) {
                 for (unsigned k = 0; k < n; ++k)
@@ -460,13 +583,15 @@ void SpectrumEngine::work(Worker &w)
             frame->sample_rate = job.tuning.sample_rate;
             frame->blocks = used;
             frame->peak = job.peak;
-            frame->db.resize(n);
+            frame->power.resize(n);
             // I + jQ is RF minus LO (a carrier below the LO has a negative frequency): display
-            // bin i is RF offset (i - n/2) * rate / n, FFT bin (i - n/2) mod n.
-            const double scale = t.scale / (job.peak ? 1 : used);
+            // bin i is RF offset (i - n/2) * rate / n, FFT bin (i - n/2) mod n: the two halves
+            // change places.
+            const float scale = float(t.scale / (job.peak ? 1 : used));
             const float *power = w.power.data();
-            for (unsigned i = 0; i < n; ++i)
-                frame->db[i] = float(10 * std::log10(power[(i + n / 2) & (n - 1)] * scale + 1e-20));
+            float *shown = frame->power.data();
+            for (unsigned i = 0; i < n / 2; ++i) shown[i] = power[i + n / 2] * scale;
+            for (unsigned i = 0; i < n / 2; ++i) shown[i + n / 2] = power[i] * scale;
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);

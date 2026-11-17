@@ -53,7 +53,11 @@ struct w1700k_stream_header {
 	uint64_t tags_offset, samples_offset, total_bytes;
 	uint64_t service_pid;
 	uint64_t heartbeat_ns;		/* CLOCK_MONOTONIC, refreshed about every 100 ms */
-	uint64_t reserved0[8];
+	uint64_t receive_cpu;		/* 1 + the CPU that takes every datagram of the stream's interface,
+					 * where one CPU does (an adapter with one receive queue): a
+					 * consumer does well to keep its threads off it, as the service
+					 * keeps its own; 0: none */
+	uint64_t reserved0[7];
 
 	/* the published position */
 	uint64_t position_seq;		/* odd while the service writes run and newest */
@@ -66,6 +70,7 @@ struct w1700k_stream_header {
 	/* counters since the service started */
 	uint64_t datagrams, bytes;
 	uint64_t slices, packed, events, lost;	/* completions filed: samples (packed among them), events, lost */
+	/* pieces: slices sent as several datagrams of which not all arrived */
 	uint64_t pieces, bad, late, before_start, duplicates, socket_drops;
 	/* the export's integrity: raw slices with spare bits set (words), and slices or 32-byte lines
 	 * equal to the same slice or line one lap (128 completions) earlier: a capture or packer
@@ -74,7 +79,10 @@ struct w1700k_stream_header {
 	uint64_t flattened, saturated;	/* slices the correction produced; samples clipped to int16 */
 	uint64_t overruns;		/* of the lost: arrived, but overwritten in the service's receive
 					 * ring before it was published (the service fell behind) */
-	uint64_t reserved2[12];
+	uint64_t reduced;		/* of the slices: sent with fewer bits than 14 per component */
+	uint64_t suspect;		/* of a split stream's radio chunks: beside a slice louder than their
+					 * shift holds, so samples in them may have wrapped (counted, not dropped) */
+	uint64_t reserved2[10];
 
 	/* control: written by consumers, read by the service */
 	uint64_t restart_requests;	/* +1: the next completion starts a new run */

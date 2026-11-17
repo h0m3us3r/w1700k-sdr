@@ -12,6 +12,9 @@ from .console import StepFailed
 from .session import open_session
 
 
+NOT_INSTALLED = 'stock does not boot our loader; install the unit with init/install'
+
+
 def detect(settings):
     """Report the console state; transmits one Ctrl-C and nothing else."""
     with open_session(settings, 'detect', passive=True) as session:
@@ -21,7 +24,7 @@ def detect(settings):
 
 
 def run(settings, serial=None, fit=False, rootfs=False, durable=False, loader=False,
-        recovery=False, boot=True, authorized_key=None):
+        recovery=False, boot=True, authorized_key=None, no_login_key=False):
     wanted = [config.SYSTEM_FIT] if fit else []
     wanted += [config.ROOTFS] if rootfs else []
     wanted += list(config.DURABLES) if durable else []
@@ -32,15 +35,32 @@ def run(settings, serial=None, fit=False, rootfs=False, durable=False, loader=Fa
     if rootfs:
         serial = config.pick_unit(settings.data_dir, serial)
         image, _ = provision.provision(config.unit_dir(settings.data_dir, serial),
-                                       authorized_key, address=settings.device_ip)
+                                       authorized_key, address=settings.device_ip, no_login_key=no_login_key)
     with open_session(settings, 'flash', write=not recovery) as session:
         console, log = session.console, session.log
         state = unit.identify(console, log)
         print(f'flash: the unit is at: {state}')
         if loader:
+            # The layout is read from the loader the unit has, before one for this build's
+            # layout takes its place. A loader that does not come up is the one case it cannot
+            # be read in, and the one a loader update is there to mend.
+            unit.to_stock(console, log, state)
+            if layout.bootcmd_extent(stock.environment(console).get('bootcmd')) is None:
+                raise StepFailed(NOT_INSTALLED)
+            try:
+                unit.to_installed_loader(console, log, 'stock')
+            except StepFailed:
+                print('flash: the installed loader did not come up, so how the unit is laid out '
+                      'could not be read from it; writing the loader as asked')
+                state = None
+            else:
+                steps.check_layout(session)
+                state = 'loader'
             update_loader(session, state)
             state = 'loader'
         unit.to_installed_loader(console, log, state)
+        if not (loader or recovery):        # recovery writes nothing and attaches no flash
+            steps.check_layout(session)
         if recovery:
             status = steps.boot_recovery(session)
             print(f'flash: recovery system running from RAM; {status}')
@@ -70,7 +90,7 @@ def update_loader(session, state):
     unit.to_stock(console, log, state)
     installed = layout.bootcmd_extent(stock.environment(console).get('bootcmd'))
     if installed is None:
-        raise StepFailed('stock does not boot our loader; install the unit with init/install')
+        raise StepFailed(NOT_INSTALLED)
     extent = steps.write_loader_slot(session)
     if extent != installed:
         unit.to_stock(console, log, 'loader')

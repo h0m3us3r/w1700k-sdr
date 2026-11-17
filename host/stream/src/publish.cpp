@@ -12,15 +12,22 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "convert.h"
+
 namespace {
 
 constexpr unsigned kChunk = 16;            // slots per job
-constexpr uint64_t kHorizon = 1024;        // a slot this far behind the newest completion received is lost
+constexpr uint64_t kHorizon = 1024;        // a slot this far behind the newest completion received is overdue
+// An overdue slot is given this long to arrive before it counts as lost: on a busy host a receive
+// thread can be kept off its CPU for tens of milliseconds while the others run on, and what it
+// then delivers is late, not lost; and the two halves of a split stream leave the unit by different
+// paths (at 320 Msps on a 5 Gbit/s link each was seen 0.035 s behind at worst over five minutes,
+// and 0.14 s and 0.21 s while the unit's senders still shared their CPUs). A slot is given up at
+// once when the newest completion is half the receive ring ahead of it, before its place there is
+// written again.
+constexpr uint64_t kLateNs = 250000000;
 constexpr uint64_t kIdleNs = 5000000;      // nothing new for this long: publish what has arrived
 constexpr uint64_t kReportNs = 100000000;  // heartbeat and counters
-
-int16_t i_of(uint32_t w) { return int16_t(int32_t(w << 2) >> 18); }   // bits [29:16], sign-extended
-int16_t q_of(uint32_t w) { return int16_t(int32_t(w << 18) >> 18); }  // bits [13:0]
 
 template <class T> void store(T *p, T v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 template <class T> T load(const T *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
@@ -88,11 +95,18 @@ SharedRing::~SharedRing()
 
 // ---- the publisher --------------------------------------------------------------------------------
 
+// A run of a correction job's input samples: `count` sample words, or as many zeros.
+struct Span {
+    const uint32_t *words;
+    unsigned count;
+};
+
 struct Publisher::Worker {
     std::thread thread;
     FlattenRun flatten;
     std::vector<Slot> kinds;
-    std::vector<float> in, out;
+    std::vector<Span> spans;         // a correction job's input samples, in order
+    std::vector<int16_t *> targets;  // ... and where each of its sample slots' output goes (nullptr: lost)
 };
 
 Publisher::Publisher(const SampleRing &raw, Ingest &ingest, w1700k_stream_header *out, unsigned workers)
@@ -146,6 +160,8 @@ void Publisher::report()
     store(&out_->bytes, s.bytes);
     store(&out_->slices, s.slices);
     store(&out_->packed, s.packed);
+    store(&out_->reduced, s.reduced);
+    store(&out_->suspect, s.suspect);
     store(&out_->events, s.events);
     store(&out_->pieces, s.pieces);
     store(&out_->bad, s.bad);
@@ -167,7 +183,9 @@ void Publisher::report()
 }
 
 // One thread walks the receive ring in order: a slot is resolved when its completion (samples or
-// an event) is in, or when kHorizon newer ones are and it is not (lost). Whole chunks of resolved
+// an event) is in, or when it is given up as lost: kHorizon newer ones have been in for kLateNs
+// (one wait covers every slot that was overdue when it began), or half the ring is newer.
+// Whole chunks of resolved
 // slots go to the workers, with one more resolved slot after them when the correction needs
 // samples beyond the chunk; an idle stream's tail goes as it is. Finished chunks are published in
 // order.
@@ -175,6 +193,7 @@ void Publisher::schedule()
 {
     uint64_t run = 0, resolved = 0, dispatched = 0, published = 0, sequence = 0, next_publish = 0;
     uint64_t seen_newest = 0, seen_at = 0, reported = 0, restarts = load(&out_->restart_requests);
+    uint64_t late_since = 0, late_newest = 0;  // the wait for overdue slots: its start, and the newest then
     const Flatten *active = nullptr;
     for (;;) {
         const uint64_t t = w1700k_stream_now_ns();
@@ -204,6 +223,7 @@ void Publisher::schedule()
             run = p.run;
             resolved = dispatched = published = 0;
             seen_newest = 0;
+            late_since = 0;
             publish_position(run, 0);
         }
         if (p.newest != seen_newest) {
@@ -212,14 +232,33 @@ void Publisher::schedule()
         }
         const bool idle = t - seen_at > kIdleNs;
 
+        bool overdue = false;
         while (resolved < p.newest) {
             const uint64_t tag = raw_.tag(resolved);
-            if (tag == SampleRing::tag_of(run, resolved) || tag == SampleRing::event_tag_of(run, resolved) ||
-                p.newest > resolved + kHorizon)
+            if (tag == SampleRing::tag_of(run, resolved) || tag == SampleRing::event_tag_of(run, resolved)) {
                 ++resolved;
-            else
-                break;
+                continue;
+            }
+            if (p.newest <= resolved + kHorizon) break;
+            if (p.newest > resolved + raw_.capacity_slices() / 2) {  // too far behind to wait for
+                ++resolved;
+                continue;
+            }
+            overdue = true;
+            if (!late_since) {
+                late_since = t;
+                late_newest = p.newest;
+            }
+            if (t - late_since < kLateNs) break;
+            if (late_newest > resolved + kHorizon) {  // overdue for the whole wait: lost
+                ++resolved;
+                continue;
+            }
+            late_since = t;  // it fell overdue during the last wait: its own begins
+            late_newest = p.newest;
+            break;
         }
+        if (!overdue) late_since = 0;
 
         const Flatten *f = correction();
         if (f != active) {  // what applies, as soon as it changes
@@ -327,12 +366,7 @@ void Publisher::process(Worker &w, const Job &job)
             }
             if (kind == Slot::Data) {
                 claim(s);
-                const uint32_t *words = raw_.slice(s);
-                int16_t *dst = w1700k_stream_slice(out_, s);
-                for (unsigned k = 0; k < kSliceSamples; ++k) {
-                    dst[2 * k] = i_of(words[k]);
-                    dst[2 * k + 1] = q_of(words[k]);
-                }
+                words_to_int16(raw_.slice(s), kSliceSamples, w1700k_stream_slice(out_, s));
                 if (raw_.tag(s) == SampleRing::tag_of(job.run, s)) {
                     finish(s, 0);
                     continue;
@@ -349,78 +383,102 @@ void Publisher::process(Worker &w, const Job &job)
 
     // The correction: the chunk's samples with kDelay before and after it. Events take no sample
     // time (skipped); lost completions and anything before the run or not yet arrived are zeros.
+    // The samples are never laid out as one array: each transform block is filled from the receive
+    // ring and its outputs rounded straight into the shared ring, so a worker's working set is the
+    // block (16 KiB), not the job's samples twice over as floats.
     const unsigned D = Flatten::kDelay;
-    auto samples_of = [&](uint64_t s, unsigned from, unsigned count, float *out) {
-        if (s < job.first || s >= job.last ? classify(job.run, s, false) == Slot::Data : w.kinds[s - job.first] == Slot::Data) {
-            const uint32_t *words = raw_.slice(s);
-            for (unsigned k = 0; k < count; ++k) {
-                out[2 * k] = i_of(words[from + k]);
-                out[2 * k + 1] = q_of(words[from + k]);
-            }
-        } else {
-            std::fill(out, out + 2 * count, 0.0f);
-        }
-    };
-    size_t n = 0;
-    for (const Slot k : w.kinds) n += k == Slot::Event ? 0 : kSliceSamples;
-    w.in.assign(2 * (n + 2 * D), 0.0f);
-    // before: walk back over the slots that hold samples (an event holds none)
+    auto words_of = [&](uint64_t s, Slot kind) { return kind == Slot::Data ? raw_.slice(s) : nullptr; };
+    w.spans.clear();
+    w.targets.clear();
     {
+        // before: walk back over the slots that hold samples (an event holds none)
         unsigned need = D;
+        const size_t at = w.spans.size();
         for (uint64_t s = job.first; need && s-- > 0;) {
-            if (classify(job.run, s, false) == Slot::Event) continue;
+            const Slot kind = classify(job.run, s, false);
+            if (kind == Slot::Event) continue;
             const unsigned take = std::min(need, kSliceSamples);
             need -= take;
-            samples_of(s, kSliceSamples - take, take, &w.in[2 * need]);
+            const uint32_t *words = words_of(s, kind);
+            w.spans.push_back({words ? words + (kSliceSamples - take) : nullptr, take});
         }
+        if (need) w.spans.push_back({nullptr, need});  // before the run's first slot
+        std::reverse(w.spans.begin() + at, w.spans.end());
+    }
+    size_t n = 0;
+    for (uint64_t s = job.first; s < job.last; ++s) {
+        const Slot kind = w.kinds[s - job.first];
+        if (kind == Slot::Event) continue;
+        w.spans.push_back({words_of(s, kind), kSliceSamples});
+        if (kind == Slot::Data) claim(s);
+        w.targets.push_back(kind == Slot::Data ? w1700k_stream_slice(out_, s) : nullptr);
+        n += kSliceSamples;
     }
     {
-        float *at = &w.in[2 * D];
-        for (uint64_t s = job.first; s < job.last; ++s) {
-            if (w.kinds[s - job.first] == Slot::Event) continue;
-            samples_of(s, 0, kSliceSamples, at);
-            at += 2 * kSliceSamples;
-        }
         unsigned need = D;
         for (uint64_t s = job.last; need && s < job.last + 4; ++s) {
-            if (classify(job.run, s, false) == Slot::Event) continue;
+            const Slot kind = classify(job.run, s, false);
+            if (kind == Slot::Event) continue;
             const unsigned take = std::min(need, kSliceSamples);
-            samples_of(s, 0, take, at);
-            at += 2 * take;
+            w.spans.push_back({words_of(s, kind), take});
             need -= take;
         }
+        if (need) w.spans.push_back({nullptr, need});  // not in yet
     }
-    w.out.resize(2 * n);
-    w.flatten.apply(*job.flatten, w.in.data(), n, w.out.data());
 
-    uint64_t lost = 0, overruns = 0, flat = 0, clipped = 0;
-    const float *y = w.out.data();
+    // Overlap-save (flatten.h): block j takes inputs [j, j + kFft) of the n + 2 kDelay laid out
+    // above and gives outputs [j, j + kBlock), output t centred on input t + kDelay.
+    uint64_t clipped = 0;
+    size_t span = 0, offset = 0;  // where input j is
+    fftwf_complex *const block = w.flatten.block();
+    for (size_t j = 0; j < n; j += Flatten::kBlock) {
+        size_t filled = 0, sp = span, off = offset;
+        while (filled < Flatten::kFft && sp < w.spans.size()) {
+            const Span &a = w.spans[sp];
+            const unsigned take = unsigned(std::min<size_t>(Flatten::kFft - filled, a.count - off));
+            if (a.words) words_to_float(a.words + off, take, block[filled]);
+            else std::memset(block[filled], 0, take * sizeof(fftwf_complex));
+            filled += take;
+            off += take;
+            if (off == a.count) {
+                ++sp;
+                off = 0;
+            }
+        }
+        if (filled < Flatten::kFft) std::memset(block[filled], 0, (Flatten::kFft - filled) * sizeof(fftwf_complex));
+        for (size_t step = Flatten::kBlock; step && span < w.spans.size();) {  // input j + kBlock, for the next block
+            const size_t take = std::min<size_t>(step, w.spans[span].count - offset);
+            step -= take;
+            offset += take;
+            if (offset == w.spans[span].count) {
+                ++span;
+                offset = 0;
+            }
+        }
+        w.flatten.filter(*job.flatten);
+        const float *y = block[Flatten::kTaps - 1];
+        for (size_t at = j, left = std::min<size_t>(Flatten::kBlock, n - j); left;) {
+            const size_t slot = at / kSliceSamples, o = at % kSliceSamples, take = std::min<size_t>(left, kSliceSamples - o);
+            if (int16_t *dst = w.targets[slot]) clipped += floats_to_int16(y, unsigned(2 * take), dst + 2 * o);
+            y += 2 * take;
+            at += take;
+            left -= take;
+        }
+    }
+
+    uint64_t lost = 0, overruns = 0, flat = 0;
     for (uint64_t s = job.first; s < job.last; ++s) {
         const Slot kind = w.kinds[s - job.first];
         if (kind == Slot::Event) {
             finish(s, W1700K_STREAM_TAG_EVENT);
-            continue;
+        } else if (kind == Slot::Data && raw_.tag(s) == SampleRing::tag_of(job.run, s)) {
+            finish(s, W1700K_STREAM_TAG_FLAT);
+            ++flat;
+        } else {
+            finish(s, W1700K_STREAM_TAG_LOST);  // never arrived, or overwritten while it was read
+            ++lost;
+            if (overrun(job.run, s)) ++overruns;
         }
-        if (kind == Slot::Data) {
-            claim(s);
-            int16_t *dst = w1700k_stream_slice(out_, s);
-            for (unsigned k = 0; k < 2 * kSliceSamples; ++k) {
-                const float v = std::nearbyint(y[k]);
-                const float c = std::min(std::max(v, -32768.0f), 32767.0f);
-                clipped += c != v;
-                dst[k] = int16_t(c);
-            }
-            if (raw_.tag(s) == SampleRing::tag_of(job.run, s)) {
-                finish(s, W1700K_STREAM_TAG_FLAT);
-                ++flat;
-                y += 2 * kSliceSamples;
-                continue;
-            }
-        }
-        finish(s, W1700K_STREAM_TAG_LOST);
-        ++lost;
-        if (overrun(job.run, s)) ++overruns;
-        y += 2 * kSliceSamples;
     }
     if (lost) lost_ += lost;
     if (overruns) overruns_ += overruns;

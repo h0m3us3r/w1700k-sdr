@@ -6,6 +6,8 @@ the exact sequences can be tested without a unit. All offsets are vendor-logical
 stock's `flash` commands and our loader's `mtd`/`ubi` commands translate them
 through the vendor bad-block tables identically.
 """
+import re
+
 from .config import partitions
 
 STOCK_STAGE = 0x89000000     # where stock receives and reads the loader
@@ -104,3 +106,30 @@ def write_volume(volume, name, size, digest, fit=False):
 def recovery_bootargs():
     """Kernel arguments for the recovery FIT: root from RAM, no UBI attached."""
     return 'console=ttyS0,115200 earlycon panic=5 ro rdinit=/init'
+
+
+LISTED = re.compile(r'0x([0-9a-f]+)-0x([0-9a-f]+) : "([^"]+)"')
+LISTED_DEVICE = re.compile(r'^\s*\* (\S+)', re.M)
+
+
+def listed(text):
+    """{partition: (offset, length)} from a loader's `mtd list`. The chip itself (`* spi-nand0`),
+    listed by its own name before its partitions, is left out."""
+    devices = set(LISTED_DEVICE.findall(text))
+    return {name: (int(start, 16), int(end, 16) - int(start, 16))
+            for start, end, name in LISTED.findall(text) if name not in devices}
+
+
+def differing(found, wanted):
+    """The partitions that are not the same in both, by name."""
+    return sorted(name for name in set(found) | set(wanted) if found.get(name) != wanted.get(name))
+
+
+def laid_out_differently(names):
+    """What a tool says of a unit whose flash is divided otherwise than this build's images
+    expect, before it has written anything. A root built for another layout looks for its
+    durable storage in the wrong place, a kernel for its root, and a loader would write there."""
+    return ("the unit's flash is not laid out as these images expect (" + ', '.join(names)
+            + '): it was installed from another version. Install it again over the serial '
+            'console (init/install --force); init/README.md says what else an older '
+            'installation needs')

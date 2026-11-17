@@ -52,6 +52,10 @@ def write_loader_slot(session):
         command(console, line, limit=300)
     verify_fit(console, layout.READBACK)
     stock.boot(console, 'loader', layout.READBACK, interrupt=True)
+    # What is written here is the loader from now on: a second loader delivered earlier
+    # (init/flash --loader --ssh), or whatever stock left in that megabyte, must not be
+    # started in its place.
+    command(console, f"mtd erase loader-b 0x0 {config.partitions.GEOMETRY['loader-b'][1]:#x}", limit=120)
     session.log.event('loader_written', extent=extent)
     return extent
 
@@ -103,6 +107,22 @@ def attach(session, partition):
 
 def detach(session):
     command(session.console, 'ubi detach', limit=60)
+
+
+def check_layout(session):
+    """At the installed loader, before anything is written: the unit's flash is divided as this
+    build's images expect. The loader knows the layout it was installed under."""
+    listing = session.console.must_run('mtd list', limit=30)
+    session.log.text('mtd-list.txt', listing)
+    found = layout.listed(listing)
+    waiting = ("Nothing was written. The unit is at its loader's prompt: a power cycle starts the "
+               'system it has')
+    if not found:
+        raise StepFailed('the loader listed no partitions (`mtd list`), so how this unit is laid out '
+                         f'cannot be told. {waiting}')
+    differ = layout.differing(found, config.partitions.GEOMETRY)
+    if differ:
+        raise StepFailed(f'{layout.laid_out_differently(differ)}. {waiting}')
 
 
 def loader_nand(session):

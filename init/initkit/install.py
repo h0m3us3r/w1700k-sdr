@@ -50,13 +50,14 @@ def examine(console, log, backup_only, accept_untested):
 
 
 def run(settings, expect_serial=None, authorized_key=None, import_host_key=None,
-        force=False, backup_only=False, accept_untested=False):
+        force=False, backup_only=False, accept_untested=False, no_login_key=False):
     if backup_only:
         config.require_images(config.DUMPER)
     else:
         config.require_images(config.LOADER, config.DUMPER, config.SYSTEM_FIT,
                               config.ROOTFS, *config.DURABLES)
-        provision.authorized_key(authorized_key)   # fail before touching the unit
+        if not no_login_key:
+            provision.authorized_key(authorized_key)   # fail before touching the unit
     with open_session(settings, 'install', write=not backup_only) as session:
         console, log = session.console, session.log
         # Stock's own boot is seen, for the vendor pool it reports.
@@ -94,7 +95,7 @@ def run(settings, expect_serial=None, authorized_key=None, import_host_key=None,
             return 0
 
         rootfs, host_key = provision.provision(directory, authorized_key, import_host_key,
-                                             address=settings.device_ip)
+                                             address=settings.device_ip, no_login_key=no_login_key)
 
         print('install: writing our loader')
         unit.to_stock(console, log, 'dumper')
@@ -109,7 +110,9 @@ def run(settings, expect_serial=None, authorized_key=None, import_host_key=None,
 
         print('install: booting the installed system')
         status = steps.boot_installed(session)
-    print(f'install: done; {status}. Log in with: ssh root@{settings.device_ip}\n'
+    login = (f'Log in with: ssh root@{settings.device_ip}' if not no_login_key else
+             'It has no login key: give it one with its reset button (init/key)')
+    print(f'install: done; {status}. {login}\n'
           f'install: unit host key {provision.fingerprint(host_key)} '
           f'(known_hosts line in {directory / provision.KNOWN_HOSTS})\n'
           f'install: backup {existing}')

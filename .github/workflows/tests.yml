@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: MIT
+# The test suite, on every push and every pull request.
+#
+# A push runs it in the repository pushed to, so a fork shows its own result before a pull request
+# is opened. A pull request from a fork runs it here as well; one from a branch of this repository
+# does not, since the push to that branch already has.
+#
+# What runs: `make check`, after building the two things the tests cannot do without, the radio
+# firmware and the host programs (seconds each). That is every test that needs no unit and no
+# full platform build. The tests that need the kernel, the root filesystem or the boot images
+# built skip here and say so: those builds take hours and gigabytes, and `make` then `make check`
+# on a development machine is where they run.
+#
+# The page `make check` writes, every test with its outcome, time and reason if skipped, is kept
+# with each run as an artifact.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Build and test (Python ${{ matrix.python }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Python the READMEs promise, and a current one.
+        python: ['3.10', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install what the tests build with
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld llvm pkg-config \
+            libfftw3-dev libsoapysdr-dev zlib1g-dev libssl-dev
+          python3 -m pip install pyserial
+
+      - name: Build the firmware and the host programs
+        run: make firmware host
+
+      - name: Run the tests
+        id: check
+        run: |
+          set -o pipefail
+          make check 2>&1 | tee check.log
+      # GitHub lists jobs and steps, not tests. This puts the tests on the run's summary page: the
+      # count, a line a module, the skipped ones with their reasons, the failed ones with what
+      # they said; and each failed test as an annotation, which a pull request's checks show.
+      - name: Say what the tests did
+        if: always() && steps.check.outcome != 'skipped'
+        run: python3 tools/ci_report.py check.log
+
+      - name: Keep the test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-report-python-${{ matrix.python }}
+          path: |
+            tests/build/report.html
+            tests/build/report.json
+          if-no-files-found: warn

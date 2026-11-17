@@ -6,6 +6,7 @@
     init/restore --unit SERIAL         # the same, and stop unless the unit is SERIAL
     init/restore --backup FILE         # another backup of the connected unit
     init/restore --backup FILE --force # another unit's, or with a damaged calibration
+    init/restore --stock-slot          # only stock's second firmware slot and data; our system stays
 
 Stock U-Boot boots the restorer from RAM (our installed loader is not needed).
 The restorer receives the backup, compares it with the NAND block by block, and
@@ -38,6 +39,10 @@ def main():
                              'calibration differ from the backup (those are never written)')
     parser.add_argument('--no-boot', action='store_true',
                         help='stay at the restorer prompt afterwards')
+    parser.add_argument('--stock-slot', action='store_true',
+                        help="write back only stock's second firmware slot and its data (the "
+                             '`stock` partition), which an installation before November 2026 '
+                             'partly overwrote; the installed system stays and boots again')
     parser.add_argument(nand.UNTESTED_FLAG, dest='accept_untested', action='store_true',
                         help='write a NAND part this project has never run on a unit '
                              '(the W25N04LV), at the risk of corrupting it')
@@ -45,7 +50,8 @@ def main():
     settings = session.settings_from(args)
     try:
         return restore.run(settings, args.backup, args.unit, boot=not args.no_boot,
-                           force=args.force, accept_untested=args.accept_untested)
+                           force=args.force, accept_untested=args.accept_untested,
+                           stock_only=args.stock_slot)
     except (StepFailed, RuntimeError) as error:
         sys.exit(f'restore: {error}')
     except KeyboardInterrupt:
