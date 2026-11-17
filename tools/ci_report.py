@@ -8,10 +8,12 @@ Run by the workflow after `make check`, whether that passed or failed. LOG is wh
 REPORT is the record tools/test_report.py leaves (default tests/build/report.json).
 
 GitHub lists a run by its jobs and their steps, and `make check` is one step: it shows no tests.
-This writes the run's summary instead: how many tests passed, failed and were skipped, a line for
-each test module, every skipped test with its reason (they are the tests that did not run there),
-and every failed test with the end of what it said. The count is also a notice on the run, and
-each failed test an error annotation, which is what a pull request's checks show.
+This says what they did, in three places. Its own output, which is the step's log on the job's
+page: the count, a line for each test module, every skipped test with its reason (they are the
+tests that did not run there) and every failed test with the end of what it said. The run's
+summary page: the same, as a table. And annotations, which a pull request's checks show: the
+count as a notice, each failed test as an error. An annotation is shown under its step's name on
+the job's page and under its own title on the run's, so its text says everything by itself.
 
 GitHub shows at most ten error annotations from one step: the first nine failed tests are
 annotated and the tenth says how many more there are. The summary has every one. When there is
@@ -68,13 +70,38 @@ def annotations(report, log):
         tail = '\n'.join(log.splitlines()[-LOG_LINES:]) or 'the run printed nothing'
         return [f'::error title={value("make check left no record of its tests")}::{data(tail)}']
     tests = named(report, BAD)
-    lines = [f'::{"error" if tests else "notice"} title={value(counted(report))}::{data(report.get("host", ""))}']
-    lines += [f'::error title={value(name)}::{data(detail[-DETAIL_MOST:] or "failed")}'
+    lines = [f'::{"error" if tests else "notice"} title={value(report.get("host", "tests"))}::{data(counted(report))}']
+    lines += [f'::error title={value(name)}::{data(name + chr(10) + (detail[-DETAIL_MOST:] or "failed"))}'
               for name, detail in tests[:SHOWN - 1]]
     if len(tests) > SHOWN - 1:
         rest = ', '.join(name for name, _ in tests[SHOWN - 1:])
         lines.append(f'::error title={value(f"and {len(tests) - SHOWN + 1} more")}::{data(rest[:DETAIL_MOST])}')
     return lines
+
+
+def plain(report, log):
+    """The step's own log: the same as the summary, as text."""
+    if report is None:
+        return ['make check left no record of its tests; the end of what it printed:', '',
+                *log.splitlines()[-LOG_LINES:]]
+    lines = [f'{counted(report)}   ({report.get("host", "")})', '']
+    modules = report.get('modules', [])
+    width = max((len(module['name']) for module in modules), default=0)
+    for module in modules:
+        counts = module.get('counts', {})
+        bad = sum(counts.get(key, 0) for key in BAD)
+        notes = ', '.join(f'{number} {word}' for number, word in ((bad, 'failed'), (counts.get('skipped', 0), 'skipped'))
+                          if number)
+        lines.append(f'  {"FAIL" if bad else "ok  "}  {module["name"]:<{width}}  {len(module.get("tests", [])):>4} tests'
+                     f'  {module.get("seconds", 0):>6.1f} s  {notes}'.rstrip())
+    skipped = named(report, ('skipped',))
+    if skipped:
+        lines += ['', f'::group::{len(skipped)} skipped, and why']
+        lines += [f'  {name}: {" ".join(detail.split())}' for name, detail in skipped]
+        lines.append('::endgroup::')
+    for name, detail in named(report, BAD):
+        lines += ['', f'FAILED {name}', *('    ' + line for line in detail[-DETAIL_MOST:].splitlines())]
+    return lines + ['']
 
 
 def summary(report, log):
@@ -112,7 +139,7 @@ def main(argv):
         report = json.loads(path.read_text())
     except (OSError, ValueError):
         report = None
-    for line in annotations(report, text):
+    for line in plain(report, text) + annotations(report, text):
         print(line)
     where = os.environ.get('GITHUB_STEP_SUMMARY')
     if where:

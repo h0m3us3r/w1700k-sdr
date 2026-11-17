@@ -246,9 +246,10 @@ Every push and every pull request has it run on GitHub
 shows its own result first: `make firmware host`, then `make check`, on
 the oldest Python the project promises and on a current one, with the report
 page kept with each run. GitHub lists a run by its jobs, one a Python, and
-not by its tests: the run's summary page has the breakdown
-(`tools/ci_report.py`), the count, a line for each test module, each skipped
-test with its reason and each failed test with what it said. The tests that need the kernel, the root filesystem
+not by its tests: the breakdown is in each job's step "Say what the tests did"
+and on the run's summary page (`tools/ci_report.py`), the count, a line for
+each test module, each skipped test with its reason and each failed test with
+what it said. The tests that need the kernel, the root filesystem
 or the boot images built skip there and say so; they run where `make` has
 been run.
 
