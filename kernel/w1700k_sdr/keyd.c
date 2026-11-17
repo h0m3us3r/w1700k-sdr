@@ -2,7 +2,7 @@
 /*
  * w1700k-key [--chip DEV] [--line N] [--state FILE] [--slot-state FILE] [--slot PROGRAM]
  *            [--listen ADDRESS] [--port N] [--toggle S] [--program S] [--purge S] [--window S]
- *            [--confirm S] [--pending S] [--buttons FILE]
+ *            [--confirm S] [--apply S] [--pending S] [--buttons FILE]
  *
  * The paperclip key (keyd.h): watches the reset button and does what a press means.
  *
@@ -16,6 +16,7 @@
  * within=S": nothing is written and nothing logs in with it. The button decides:
  *
  *   held 3 s, released    the key goes into the slot; its sender is told "ok ..."
+ *   held 5 s              the same, without waiting for the button to be let go
  *   a shorter press       it is discarded; "error: ..."
  *   a minute, no press    it is discarded; "error: ..."
  *
@@ -34,7 +35,7 @@
  *
  * The button is line N (default 0) of the GPIO chip DEV (default /dev/gpiochip0), low when
  * pressed. --buttons reads presses from FILE instead (a FIFO: `d` down, `u` up), and --toggle,
- * --program, --purge, --window, --confirm and --pending shorten the times: both for tests.
+ * --program, --purge, --window, --confirm, --apply and --pending shorten the times: both for tests.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -227,7 +228,7 @@ struct wait {
 	char key[KEY_LINE_MAX];	/* that key, as the slot would hold it */
 	double key_until;	/* it is discarded then */
 	int holder;		/* its sender, kept open for the outcome; -1 when there is none */
-	double confirm, patience;
+	double confirm, apply, patience;
 };
 
 static struct sender *sender_free(struct wait *w)
@@ -354,7 +355,7 @@ static int usage(void)
 {
 	fprintf(stderr, "usage: w1700k-key [--chip DEV] [--line N] [--state FILE] [--slot-state FILE] [--slot PROGRAM]\n"
 		"       [--listen ADDRESS] [--port N] [--toggle S] [--program S] [--purge S] [--window S]\n"
-		"       [--confirm S] [--pending S] [--buttons FILE]\n");
+		"       [--confirm S] [--apply S] [--pending S] [--buttons FILE]\n");
 	return 2;
 }
 
@@ -365,7 +366,7 @@ int main(int argc, char **argv)
 	double toggle = KEY_TOGGLE_SECONDS, program = KEY_PROGRAM_SECONDS, purge = KEY_PURGE_SECONDS;
 	double window = KEY_WINDOW_SECONDS;
 	struct wait w = { .listener = -1, .holder = -1, .confirm = KEY_CONFIRM_SECONDS,
-			  .patience = KEY_PENDING_SECONDS };
+			  .apply = KEY_APPLY_SECONDS, .patience = KEY_PENDING_SECONDS };
 	double pressed = 0, t;
 	int line = 0, port = KEY_PORT, button, down = 0, ignore, i, change, got;
 	char word[16] = "empty", answer[64];
@@ -389,13 +390,14 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--purge")) purge = atof(value);
 		else if (!strcmp(argv[i], "--window")) window = atof(value);
 		else if (!strcmp(argv[i], "--confirm")) w.confirm = atof(value);
+		else if (!strcmp(argv[i], "--apply")) w.apply = atof(value);
 		else if (!strcmp(argv[i], "--pending")) w.patience = atof(value);
 		else if (!strcmp(argv[i], "--buttons")) buttons = value;
 		else return usage();
 		i++;
 	}
 	if (line < 0 || port <= 0 || port > 65535 || toggle <= 0 || program <= toggle || purge <= program ||
-	    window <= 0 || w.confirm <= 0 || w.patience <= 0)
+	    window <= 0 || w.confirm <= 0 || w.apply <= w.confirm || w.patience <= 0)
 		return usage();
 	button = buttons ? open(buttons, O_RDWR | O_CLOEXEC) : button_open(chip, (unsigned int)line);
 	if (button < 0) {
@@ -453,7 +455,7 @@ int main(int argc, char **argv)
 					wait_keep(&w);
 				} else {
 					wait_end(&w, "error: the key was discarded: the button was pressed, not held");
-					say("closed", t, "-");
+					say("discarded", t, "-");
 				}
 			} else if (change == 0 && down) {
 				down = 0;
@@ -511,9 +513,12 @@ int main(int argc, char **argv)
 			if (whole || t >= s->until)
 				sender_judge(&w, s, whole > 0, t);
 		}
-		if (w.pending && !down && t >= w.key_until) {
+		if (w.pending && down && t - pressed >= w.apply) {	/* held long enough: no need to let go */
+			wait_keep(&w);
+			ignore = 1;
+		} else if (w.pending && !down && t >= w.key_until) {
 			wait_end(&w, "error: the key was discarded: nobody held the button for it in time");
-			say("closed", now(), "-");
+			say("discarded", now(), "-");
 		} else if (!w.pending && now() >= w.until) {
 			wait_end(&w, NULL);
 			say("closed", now(), "-");

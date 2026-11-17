@@ -356,12 +356,13 @@ by how long you held it, and the LED says which stretch you are in
 | 10 s | a flash, then blue pulsing | opens the slot for a new key: three minutes, blue breathing |
 | 15 s | a flash, then red blinking hard | erases the slot's key |
 
-and once a key has come (cyan, two beats and a rest):
+and once a key has come (magenta, two flashes and a rest):
 
 | Held | The LED while held | Letting go |
 | --- | --- | --- |
-| under 3 s | green rising | discards the key |
-| 3 s | a flash, then green pulsing | keeps the key |
+| under 3 s | green rising | discards the key: red, twice up and down |
+| 3 s | a flash, then green pulsing | keeps the key: a flash, then steady green |
+| 5 s | a flash, then steady green | nothing more: the key was kept at 5 s |
 
 The first five seconds already say which way the key would be switched, in
 colour and in direction: green rising out of the dark when it is off and would
@@ -377,15 +378,17 @@ refused and the wait goes on; a press ends the wait.
 **A key that arrives is held, not kept.** Nothing is written and nothing logs
 in with it until you say so on the button:
 
-- The LED changes from blue breathing to cyan in two beats and a rest, and the
-  unit tells `init/key` which key it holds.
+- The LED changes from blue breathing to magenta in two flashes and a rest,
+  and the unit tells `init/key` which key it holds.
 - `init/key` says whether that is the key it sent. When it is, **hold the
   button three seconds**, until the LED flashes and pulses green, and let go:
-  the key goes into the slot, switched on, and `init/key` logs in with it. A
-  new key replaces the one the slot held.
+  the key goes into the slot, switched on, the LED flashes and stays green a
+  moment, and `init/key` logs in with it. Held on to five seconds, the key is
+  kept there and then. A new key replaces the one the slot held.
 - When it is not, somebody else's key reached the unit first. `init/key` says
   so, with that key's fingerprint, and you **tap the button**: a press shorter
-  than three seconds discards the key. So does a minute without a press.
+  than three seconds discards the key, and the LED pulses red twice. So does a
+  minute without a press.
 - Either way that was the one key of this wait. Another needs the ten seconds
   again.
 

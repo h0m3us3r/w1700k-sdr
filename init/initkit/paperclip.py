@@ -109,7 +109,7 @@ def send(address, line, port=PORT, wait=WAIT_SECONDS, connect=socket.create_conn
             if clock() >= deadline:
                 raise KeyProblem(f'the unit at {address} did not open its slot in {wait:.0f} s ({error}). '
                                 'Hold the reset button ten seconds, until the LED pulses blue, and let go. If you '
-                                'did, and the LED went on to beat cyan in pairs without this having sent a key, '
+                                'did, and the LED went on to flash magenta in pairs without this having sent a key, '
                                 'the unit is holding a key from somewhere else: tap the button once to discard it')
             if not told:
                 say('key: waiting for the unit. Hold its reset button with a paperclip until the LED flashes and '
@@ -121,13 +121,13 @@ def send(address, line, port=PORT, wait=WAIT_SECONDS, connect=socket.create_conn
         try:
             words = _line(reader)
         except OSError as error:
-            raise KeyProblem(f'the unit did not answer ({error}). If its LED beats cyan in pairs it is holding a '
+            raise KeyProblem(f'the unit did not answer ({error}). If its LED flashes magenta in pairs it is holding a '
                              'key, and nothing here says it is yours: tap the button once to discard it, and start '
                              'again')
         if words[:1] == ['busy']:
             theirs, _ = _held(words)
             raise KeyProblem(f'the unit is holding another key, not yours: {theirs}. Somebody else sent one first. '
-                             'DO NOT HOLD THE BUTTON. Tap it once: that discards the key (the LED goes out). Then '
+                             'DO NOT HOLD THE BUTTON. Tap it once: that discards the key (the LED pulses red twice). Then '
                              'find out who else reaches this unit before you start again')
         if words[:1] == ['pending']:
             theirs, held = _held(words)
@@ -135,7 +135,7 @@ def send(address, line, port=PORT, wait=WAIT_SECONDS, connect=socket.create_conn
                 raise KeyProblem(f'the unit says it holds {theirs}, which is not the key sent. DO NOT HOLD THE '
                                  'BUTTON. Tap it once: that discards the key')
             hold, within = _number(words, 'hold', 3), _number(words, 'within', 60)
-            say(f'key: the unit holds your key ({theirs}) and has not kept it yet. Its LED beats cyan in pairs.')
+            say(f'key: the unit holds your key ({theirs}) and has not kept it yet. Its LED flashes magenta in pairs.')
             say(f'key: HOLD the reset button {hold:.0f} s, until the LED flashes and pulses green, and let go: that '
                 f'keeps it. A tap discards it, and so do {within:.0f} s without a press.')
             link.settimeout(within + OUTCOME_MARGIN)

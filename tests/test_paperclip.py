@@ -7,8 +7,9 @@ given presses through a FIFO), the slot's program on the unit (w1700k-keyslot, o
 standing in for durable storage), the loader handing the slot to the next boot (the model of
 tests/test_loader_update.py), and the host's end (init/key).
 
-A key that arrives is only held: the button keeps it (three seconds) or discards it (a tap, or a
-minute). The service's tests say that from the unit's side and the host's from the tool's."""
+A key that arrives is only held: the button keeps it (three seconds and let go, or five) or
+discards it (a tap, or a minute). The service's tests say that from the unit's side and the
+host's from the tool's."""
 import base64
 import os
 import shutil
@@ -205,11 +206,12 @@ class Led(Built):
             self.assertEqual(rows[-1][0], 0.0)
 
     def test_every_flourish_ends_and_gives_the_led_back(self):
-        for record, colour in (('on 0', 120), ('off 0', 0), ('taken 0', 120), ('failed 0', 0), ('closed 0', 225)):
+        for record, colour in (('on 0', 120), ('off 0', 0), ('taken 0', 120), ('failed 0', 0), ('closed 0', 225),
+                               ('discarded 0', 0)):
             with self.subTest(record):
                 self.assertEqual(self.at(record, 0.5)[0], 1.0)
                 self.assertEqual(self.at(record, 3.0)[0], 0.0)
-                self.assertEqual(self.at(record, 1.5 if record != 'closed 0' else 0.3)[1], colour)
+                self.assertEqual(self.at(record, {'closed 0': 0.3, 'discarded 0': 1.0}.get(record, 1.5))[1], colour)
         self.assertEqual(self.at('empty 0', 1.0)[0], 0.0)
 
     def test_switched_on_rises_twice_and_off_sinks_into_the_dark(self):
@@ -227,18 +229,14 @@ class Led(Built):
         self.assertEqual(self.at('window 0', 179.0)[0], 1.0)
         self.assertEqual(self.at('window 0', 190.0)[0], 0.0, 'a record nobody ended')
 
-    def test_a_key_that_has_come_beats_cyan_in_pairs_until_the_hand_answers(self):
-        beats = self.at('pending 0 -', 0.15, 0.45, 0.3, 0.9, 1.2, 1.55, 28.15)
-        for own, hue, saturation, _ in beats:
-            self.assertEqual((own, hue, saturation), (1, 180, 1), 'cyan: neither the blue of waiting nor the green of kept')
-        first, second, between, rest, rest_again, next_first, later = (b[3] for b in beats)
-        self.assertGreater(first, 0.95)
-        self.assertGreater(second, 0.95, 'two beats')
-        self.assertLess(between, 0.15)
-        self.assertLess(rest, 0.15, 'and a rest as long as both')
-        self.assertLess(rest_again, 0.15)
-        self.assertGreater(next_first, 0.95)
-        self.assertAlmostEqual(later, first, places=2, msg='the same for as long as the key waits')
+    def test_a_key_that_has_come_flashes_magenta_in_pairs_until_the_hand_answers(self):
+        times = (0.05, 0.2, 0.35, 0.5, 0.9, 1.3, 1.45, 28.05)
+        rows = self.at('pending 0 -', *times)
+        for own, hue, saturation, _ in rows:
+            self.assertEqual((own, hue, saturation), (1, 300, 1), 'magenta: the button says nothing else in it')
+        self.assertEqual([row[3] > 0.5 for row in rows], [True, False, True, False, False, False, True, True],
+                         'lit, dark, lit, and a rest as long as both: then the same again')
+        self.assertEqual({row[3] for row in rows}, {1.0, 0.06}, 'lit and dark, nothing between: not the breath of the wait')
         self.assertEqual(self.at('pending 0 -', 70)[0], 0, 'a record nobody ended: the LED is given back')
 
     def test_held_for_that_key_green_rises_three_seconds_then_flashes_and_pulses(self):
@@ -252,13 +250,20 @@ class Led(Built):
         self.assertEqual((own, hue, saturation), (1, 120, 1))
         self.assertEqual(self.at('confirm 0 -', 70)[0], 0)
 
-    def test_a_key_taken_turns_the_blue_through_cyan_to_green(self):
+    def test_a_key_taken_is_a_flash_then_green_steady_for_two_seconds(self):
         self.assertEqual(self.at('taken 0', 0.05)[2:], (0.0, 1.0), 'a flash first')
-        hues = [row[1] for row in self.at('taken 0', *[0.15 + k / 20 for k in range(22)])]
-        self.assertEqual(hues, sorted(hues, reverse=True))
-        self.assertLessEqual(hues[0], 225)
-        self.assertEqual(hues[-1], 120.0)
-        self.assertTrue(any(170 < hue < 190 for hue in hues), 'by way of cyan, not of red')
+        steady = self.at('taken 0', *[0.25 + k / 10 for k in range(19)])
+        self.assertEqual(set(steady), {(1.0, 120.0, 1.0, 1.0)}, 'green and still: the pulsing of the hold has stopped')
+        self.assertEqual(self.at('taken 0', 2.8)[0], 0.0, 'and the LED is given back')
+
+    def test_a_key_discarded_is_red_twice_up_and_down_and_not_the_three_blinks_of_a_fault(self):
+        rows = self.at('discarded 0 -', 0.3, 0.6, 0.9, 1.2, 0.15, 0.45)
+        self.assertTrue(all((own, hue, saturation) == (1, 0, 1) for own, hue, saturation, _ in rows))
+        up, down, up_again, out, rising, falling = (row[3] for row in rows)
+        self.assertEqual((up, down, up_again, out), (1.0, 0.0, 1.0, 0.0))
+        self.assertTrue(0.3 < rising < 0.7 and 0.3 < falling < 0.7, 'up and down, not lit and dark')
+        self.assertEqual(self.at('discarded 0 -', 1.8)[0], 0.0)
+        self.assertEqual([self.at('failed 0', t)[3] for t in (0.1, 0.5, 0.9)], [1.0, 1.0, 1.0], 'a fault is three, lit and dark')
 
     def test_a_button_down_for_a_minute_says_nothing_more(self):
         self.assertEqual(self.at('held 0 on', 30.0)[0], 1.0)
@@ -272,7 +277,7 @@ class Led(Built):
 class Service(Built):
     """w1700k-key with presses from a FIFO, short times, and a slot program that only takes notes."""
     TOGGLE, PROGRAM, PURGE, WINDOW = 0.3, 0.7, 1.2, 2.5
-    CONFIRM, PENDING = 0.4, 1.5
+    CONFIRM, APPLY, PENDING = 0.4, 1.2, 1.5
     LONGER = {'test_a_sender_that_trickles_is_cut_off_and_holds_nothing_up': 6.0}       # where the times above are too short
 
     def setUp(self):
@@ -301,7 +306,8 @@ esac
              '--slot-state', str(self.dir / 'slot-state'), '--slot', str(slot), '--listen', '127.0.0.1',
              '--port', str(self.port), '--toggle', str(self.TOGGLE), '--program', str(self.PROGRAM),
              '--purge', str(self.PURGE), '--window', str(self.LONGER.get(self._testMethodName, self.WINDOW)),
-             '--confirm', str(self.CONFIRM), '--pending', str(self.LONGER.get(self._testMethodName, self.PENDING))],
+             '--confirm', str(self.CONFIRM), '--apply', str(self.APPLY),
+             '--pending', str(self.LONGER.get(self._testMethodName, self.PENDING))],
             stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop)
         self.buttons = open(self.dir / 'buttons', 'w')
@@ -425,6 +431,25 @@ esac
         with self.assertRaises(OSError, msg='one key, and the slot is closed again'):
             socket.create_connection(('127.0.0.1', self.port), timeout=1)
 
+    def test_held_on_the_key_is_kept_without_waiting_for_the_button_to_be_let_go(self):
+        self.open_slot()
+        sender = self.sender(ed25519(7))
+        self.assertTrue(sender.readline().startswith('pending '))
+        self.buttons.write('d'); self.buttons.flush()
+        began = time.monotonic()
+        self.phase('confirm')
+        self.assertEqual(sender.readline().strip(), 'ok persist=1 hostkey=ssh-ed25519:HOSTKEY', 'the button is still down')
+        self.assertAlmostEqual(time.monotonic() - began, self.APPLY, delta=0.4)
+        self.phase('taken')
+        self.assertEqual(self.calls(), ['program'])
+        time.sleep(0.3)
+        self.buttons.write('u'); self.buttons.flush()
+        time.sleep(0.3)
+        self.assertEqual(self.phase('taken')[0], 'taken', 'letting go then means nothing more')
+        self.assertEqual(self.calls(), ['program'])
+        self.press(0.1)
+        self.phase('drain')
+
     def test_a_tap_discards_the_key_that_came(self):
         self.open_slot()
         sender = self.sender(ed25519(7))
@@ -432,7 +457,7 @@ esac
         self.phase('pending')
         self.press(0.1)
         self.assertEqual(sender.readline().strip(), 'error: the key was discarded: the button was pressed, not held')
-        self.phase('closed')
+        self.phase('discarded')
         self.assertEqual(self.calls(), [])
         with self.assertRaises(OSError, msg='that was the one key of this wait'):
             socket.create_connection(('127.0.0.1', self.port), timeout=1)
@@ -446,7 +471,7 @@ esac
         began = time.monotonic()
         self.assertEqual(sender.readline().strip(), 'error: the key was discarded: nobody held the button for it in time')
         self.assertAlmostEqual(time.monotonic() - began, self.PENDING, delta=0.5)
-        self.phase('closed')
+        self.phase('discarded')
         self.assertEqual(self.calls(), [])
         with self.assertRaises(OSError):
             socket.create_connection(('127.0.0.1', self.port), timeout=1)
@@ -533,7 +558,8 @@ esac
         self.phase('failed')
 
     def test_usage(self):
-        for arguments in (['--nonsense', '1'], ['--toggle', '5', '--program', '3'], ['--purge', '8'], ['--port']):
+        for arguments in (['--nonsense', '1'], ['--toggle', '5', '--program', '3'], ['--purge', '8'], ['--port'],
+                          ['--confirm', '5'], ['--apply', '2'], ['--pending', '0']):
             result = subprocess.run([self.service, *arguments], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2)
             self.assertIn('usage', result.stderr)

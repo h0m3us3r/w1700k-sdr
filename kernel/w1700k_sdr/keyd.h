@@ -18,6 +18,8 @@
  * A key that arrives is held, not kept: the network may offer one, only the hand takes it.
  *
  *   held KEY_CONFIRM_SECONDS, released    the key that arrived goes into the slot
+ *   held KEY_APPLY_SECONDS                the same, there and then: the hand has said yes for
+ *                                         long enough, and letting go means nothing more
  *   a shorter press                       it is discarded
  *   KEY_PENDING_SECONDS with no press     it is discarded
  *
@@ -34,6 +36,7 @@
 #define KEY_PURGE_SECONDS	15.0
 #define KEY_WINDOW_SECONDS	180.0
 #define KEY_CONFIRM_SECONDS	3.0
+#define KEY_APPLY_SECONDS	5.0
 #define KEY_PENDING_SECONDS	60.0
 #define KEY_PORT		7722
 #define KEY_LINE_MAX		1100	/* a 4096-bit RSA key and a comment */
