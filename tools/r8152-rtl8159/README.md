@@ -64,8 +64,8 @@ sudo init/host/link keep IFACE 10.77.0.10/24 9216
 ```
 
 That gives the interface the stream's address and a jumbo MTU, and spreads its packets over the
-CPUs, now and whenever the adapter appears again (it writes them into the interface's
-NetworkManager connection and a hook beside it; see [`init/host/link`](../../init/host/link)).
+CPUs, now and whenever the adapter appears again (NetworkManager holds them in a connection
+the command makes for the interface, with a hook beside it; see [`init/host/link`](../../init/host/link)).
 All three matter with this adapter:
 
 - **The MTU.** Plugged in again, the adapter is back at 1500 and drops every stream packet
