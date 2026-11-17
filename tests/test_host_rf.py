@@ -33,7 +33,7 @@ class Mirrors(unittest.TestCase):
         names = ('END', 'W32', 'RMW32', 'R32', 'DELAY', 'POLL', 'AW', 'AR', 'ARMW', 'APOLL', 'SAR', 'RF')
         self.assertEqual([getattr(rf, n) for n in names], [h[f'MT7996_PROBE_CTL_OP_{n}'] for n in names])
         self.assertEqual(rf.SOFT, h['MT7996_PROBE_CTL_OP_SOFT'])
-        codes = ('BAD_OP', 'TIMEOUT', 'TOO_MANY', 'SEMA', 'BUSY', 'SPI', 'BAD_ARG')
+        codes = ('BAD_OP', 'TIMEOUT', 'TOO_MANY', 'SEMA', 'BUSY', 'SPI', 'BAD_ARG', 'DENIED')
         self.assertEqual(sorted(rf.STATUS), [h[f'MT7996_PROBE_CTL_{c}'] for c in codes])
         commands = ('TUNE', 'GAIN', 'FILTER', 'TRIM', 'STATUS', 'LOCKS', 'BAND')
         self.assertEqual([getattr(rf, f'RF_{c}') for c in commands], [h[f'MT7996_PROBE_CTL_RF_{c}'] for c in commands])

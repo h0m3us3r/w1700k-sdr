@@ -27,6 +27,15 @@
  * a 12-bit register number). Each A-die access is one SPI transaction under CONN semaphore 12,
  * taken and released around it, as the ROM does. The words, opcodes and codes are
  * MT7996_PROBE_CTL_* (hw/mt7996/probe_page.h).
+ *
+ * The guard. A raw op reaches any MCU address and any A-die register, and a few of those are
+ * not a host's to reach by mistake: what would let the radio transmit, what programs an eFuse,
+ * and the accesses the headers mark HAZARD because they wedge a die or the MCU until a power
+ * cycle. A posted program's raw ops are judged before they run (ctl_denied) and such an op ends
+ * the program with MT7996_PROBE_CTL_DENIED (which ops: guard.h), unless the host has unlocked the WM
+ * (MT7996_PROBE_OWN_WM_UNLOCK: for development, until the next load). The firmware's own
+ * programs, an RF op's, are not judged: they are ours. This keeps a mistake out; it is no wall
+ * against the host, which loads the firmware and can unlock it.
  */
 #include "hw/adie/adie.h"
 #include "hw/adie/mt7977.h"
@@ -35,6 +44,7 @@
 #include "hw/mt7996/probe_page.h"
 
 #include "adie_spi.h"
+#include "guard.h"
 #include "../radio/rfctl.h"
 
 struct ctl {
@@ -217,6 +227,13 @@ static uint32_t ctl_rf(struct ctl *c, uint32_t t0, uint32_t a, uint32_t b, uint3
 	return 0;
 }
 
+/* ---- The guard (see the head of this file) ---- */
+
+static int ctl_unlocked(void)
+{
+	return R32(MT7996_PROBE_OWN_WM_UNLOCK) == MT7996_PROBE_OWN_WM_UNLOCK_MAGIC;
+}
+
 /* One op of the posted program, at `at`. */
 static uint32_t ctl_op(struct ctl *c, uint32_t t0, uint32_t at, uint32_t *res)
 {
@@ -224,6 +241,8 @@ static uint32_t ctl_op(struct ctl *c, uint32_t t0, uint32_t at, uint32_t *res)
 
 	if (HW_GET(MT7996_PROBE_CTL_OP_CODE, op) == MT7996_PROBE_CTL_OP_RF)
 		return ctl_rf(c, t0, a, b, cc, res);
+	if (ctl_denied(op, a, b, cc) && !ctl_unlocked())
+		return MT7996_PROBE_CTL_DENIED;
 	return ctl_exec(c, op, a, b, cc, res);
 }
 

@@ -29,7 +29,10 @@ IOCTL_WORDS = 64                  # W1700K_SDR_CTL_MAX
 END, W32, RMW32, R32, DELAY, POLL, AW, AR, ARMW, APOLL, SAR, RF = range(12)
 SOFT = 0x100                      # a POLL/APOLL timeout is counted, not fatal
 STATUS = {1: 'bad op', 2: 'timeout', 3: 'too many ops', 4: 'RF-SPI semaphore not granted',
-          5: 'SPI master busy', 6: 'SPI transfer did not finish', 7: 'RF command or argument refused'}
+          5: 'SPI master busy', 6: 'SPI transfer did not finish', 7: 'RF command or argument refused',
+          9: 'refused by the guard: it reaches a register our WM keeps from raw programs while it is locked '
+             '(what could transmit, an eFuse, an access that wedges a die). For development, unlock it: '
+             '"raw_access": true in the configuration'}
 # RF commands (include/hw/mt7996/probe_page.h "RF commands"): op RF, a = command | band << 8.
 RF_TUNE, RF_GAIN, RF_FILTER, RF_TRIM, RF_STATUS, RF_LOCKS, RF_BAND = range(1, 8)
 RF_GAIN_AGC = 0xFFFFFFFF

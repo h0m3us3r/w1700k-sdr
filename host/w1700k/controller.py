@@ -575,6 +575,10 @@ class Controller:
         wm.load(self.radio, fw, self.config.unit.module, self.config.unknown_rom)
         w = self._wm()
         w.wait_running()
+        if self.config.raw_access:
+            w.unlock()
+            self._log('warn', 'our WM is unlocked, as the configuration says (raw_access): raw programs and calls '
+                              'reach anything, what could transmit and the eFuse included')
         self._progress('bringing the radio up', 0.3)
         w.put_eeprom(eeprom)
         self._command('bringup')

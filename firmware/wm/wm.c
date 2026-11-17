@@ -145,6 +145,8 @@ void wm_main(void)
 	ST(WM_WA_START) = 0;
 	ST(WM_RADIO_EE) = (uint32_t)(uintptr_t)radio_ee;
 	ST(WM_RF_BUILD) = (uint32_t)(uintptr_t)rfctl_build;
+	ST(WM_UNLOCK) = 0;	/* locked at every start: the guard is lifted by the host, for a load at a time */
+	ST(WM_DENIED) = 0;
 	ST(WM_RADIO_STATE) = 0;
 	ST(WM_RADIO_ACK) = ST(WM_RADIO_REQ);
 	R32(MT7996_WF_WM_CLK_DIV) = clk_720;
@@ -175,12 +177,20 @@ void wm_main(void)
 			ctl_init(&c);
 		}
 		if (!c.active && ST(WM_CALL)) {
-			uint32_t (*fn)(uint32_t, uint32_t, uint32_t, uint32_t) =
-				(void *)(uintptr_t)ST(WM_CALL);
+			uint32_t at = ST(WM_CALL);
+			uint32_t (*fn)(uint32_t, uint32_t, uint32_t, uint32_t) = (void *)(uintptr_t)at;
 
 			ST(WM_CALL) = 0;
-			ST(WM_RET) = fn(ST(WM_ARG(0)), ST(WM_ARG(1)), ST(WM_ARG(2)), ST(WM_ARG(3)));
-			asm volatile("csrci mstatus, %0" : : "n"(MT7996_MCU_MSTATUS_MIE) : "memory");
+			/* Locked, a call goes into our own image and nowhere else: the ROM is callable
+			 * code too, an eFuse writer among it, and so is whatever a host wrote somewhere.
+			 * A refused call is counted, returns nothing, and counts as served. */
+			if (ctl_unlocked() || (at >= WM_ENTRY && at < WM_LIMIT) || (at >= WM_CRAM_BASE && at < WM_CRAM_LIMIT)) {
+				ST(WM_RET) = fn(ST(WM_ARG(0)), ST(WM_ARG(1)), ST(WM_ARG(2)), ST(WM_ARG(3)));
+				asm volatile("csrci mstatus, %0" : : "n"(MT7996_MCU_MSTATUS_MIE) : "memory");
+			} else {
+				ST(WM_RET) = 0;
+				ST(WM_DENIED) = ST(WM_DENIED) + 1;
+			}
 			ST(WM_CALLS) = ST(WM_CALLS) + 1;
 			/* What the callee served stays served. */
 			ctl_init(&c);

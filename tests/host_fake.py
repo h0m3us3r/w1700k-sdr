@@ -55,7 +55,11 @@ ARITY = {'selftest': 0, 'identify': 0, 'bringup': 0, 'setup': 4, 'step': 2, 'cap
 EE_BUFFER = 0xE0100000            # where our WM's radio_ee lands in CRAM (any address will do)
 RF_BUILD = 0xE0050000             # its RF command builder
 # probe_page.h CTL status codes
-CTL_OK, CTL_BAD_OP, CTL_TIMEOUT, CTL_TOO_MANY, CTL_BAD_ARG = 0, 1, 2, 3, 7
+CTL_OK, CTL_BAD_OP, CTL_TIMEOUT, CTL_TOO_MANY, CTL_BAD_ARG, CTL_DENIED = 0, 1, 2, 3, 7, 9
+OWN_IMAGE = (0x00916400, 0x00938000)                      # our WM in ULM1 (firmware/wm/wm.h)
+GUARDED_MMIO = {0x70021008, 0x7C070030}                   # read or written: the eFuse control word, semaphore 12
+GUARDED_MMIO_WRITES = {0x820F3000}                        # written: band 1's ARB_SCR
+GUARDED_ADIE_READS = {1 << 16 | 15 << 12 | 0x222}         # die 1's TOP 0x222
 CTL_ACK, CTL_STATUS, CTL_SOFT, CTL_SERVED = rf.CTL_BASE + 4, rf.CTL_BASE + 8, rf.CTL_BASE + 0x24, rf.CTL_BASE + 0x14
 ICAP0_CR9 = 0x800230B4            # ICAP0's write pointer (hw/mt7996/icap.h)
 RING = 0x100000
@@ -126,7 +130,7 @@ class FakeDevice:
         """Our WM after the set's download (wm_main): status block, mailbox served."""
         for name in wm.STATUS_WORDS:
             self.set_st(name, 0)
-        self.set_st('version', 6)
+        self.set_st('version', 7)
         self.set_st('radio_ee', EE_BUFFER)
         self.set_st('rf_build', RF_BUILD)
         self.set_st('state', wm.STATE_RUNNING)
@@ -145,9 +149,13 @@ class FakeDevice:
             self._run_program()
         elif addr == wm.CALL and value:
             args = [self.mem.get(wm.ARGS + 4 * i, 0) for i in range(4)]
-            self.calls.append((value, args))
             self.mem[wm.CALL] = 0
-            self.set_st('ret', sum(args))
+            if self.unlocked() or OWN_IMAGE[0] <= value < OWN_IMAGE[1]:
+                self.calls.append((value, args))
+                self.set_st('ret', sum(args))
+            else:                                         # locked: a call goes into our own image alone
+                self.set_st('ret', 0)
+                self.set_st('denied', self.st('denied') + 1)
             self.set_st('calls', self.st('calls') + 1)
         elif addr == wm.WA_START and value == wm.WA_START_REQ:
             self._start_wa()
@@ -331,9 +339,18 @@ class FakeDevice:
         self.mem[CTL_SERVED] = self.mem.get(CTL_SERVED, 0) + 1
         self.mem[CTL_ACK] = self.mem[rf.CTL_REQ]
 
+    def unlocked(self):
+        return self.st('unlock') == wm.UNLOCK_MAGIC
+
     def _op(self, op, a, b, c):
         """One op: (status, result)."""
         code, mem, adie = op & 0xFF, self.mem, self.adie
+        # The guard, as far as these tests go to it: the firmware's own list is tested as it is
+        # (tests/test_firmware_guard.py).
+        if not self.unlocked() and ((code in (rf.W32, rf.RMW32, rf.R32, rf.POLL) and a in GUARDED_MMIO) or
+                                    (code in (rf.W32, rf.RMW32) and a in GUARDED_MMIO_WRITES) or
+                                    (code == rf.AR and a in GUARDED_ADIE_READS)):
+            return CTL_DENIED, 0
         if code in (rf.W32, rf.RMW32):
             value = b if code == rf.W32 else (mem.get(a, 0) & ~b) | c
             mask = rf.ROUTE_GRANTS.get(a & ~3, 0)

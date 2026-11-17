@@ -148,6 +148,15 @@ class Load(ControllerTest):
             self.ctl.load()
         self.assertEqual(self.dev.downloads, [('acquire',), ('--reset',), ('acquire',), ('rom',)])
 
+    def test_our_wm_is_unlocked_after_a_load_only_when_the_configuration_says_so(self):
+        self.ctl.load()
+        self.assertEqual(self.dev.st('unlock'), 0, 'locked: the guard on raw programs and calls is on')
+        self.assertFalse(any('unlocked' in line for line in self.logs()))
+        ctl = Controller(replace(self.config, raw_access=True), emit=self.events.append, unit=self.unit)
+        ctl.load()
+        self.assertEqual(self.dev.st('unlock'), 0x4B4C4E55)
+        self.assertTrue(any('our WM is unlocked' in line and 'raw_access' in line for line in self.logs()), self.logs())
+
     def test_download_failure(self):
         self.dev.download_failure = 'w1700k_wm.bin'
         with self.assertRaisesRegex(RuntimeError, 'wm download failed: phase_name WAIT_DOWNLOAD, errno Timer expired'):

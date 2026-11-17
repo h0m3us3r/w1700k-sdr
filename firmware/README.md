@@ -145,3 +145,26 @@ two producers, CRAM), the WA container two (entry, packer).
 - A read of an address that does not answer faults our WM's load; the trap handler skips it,
   and such a read returns nothing usable.
 - Register hazards are marked `HAZARD:` in `include/hw/`.
+
+### The guard
+
+Our WM runs raw programs for a host: any MCU address, any A-die register, and a call to any
+address. A few of those are not a host's to reach by mistake, so our WM starts **locked** at
+every load, and locked it does not run a raw op of a host's program that reaches
+(`stream/guard.h`, the list as it is):
+
+- the MAC's transmit and receive disables (written by the radio code alone), a chain's
+  transmit blocks or transmit detectors, and the external front end's pins;
+- the eFuse controller, read or written;
+- the CONN semaphores, read or written (a read takes one), a capture route grant, a raw
+  chip-select, and the A-die reads and writes that the headers mark as wedging a die.
+
+Such an op ends its program with status 9, "denied". A call (`WM_CALL`) goes into our own
+image and nowhere else; a refused one is counted in the status block. The firmware's own
+programs, which an RF command is made of, are not judged.
+
+`"raw_access": true` in the host's configuration writes the unlock word after every load, and
+the guard is lifted until the next one: for development, such as code of your own loaded and
+called on the WM. The guard keeps a mistake out. It is no protection against the host, which
+loads the firmware and can unlock it, and it lists what is known to be dangerous, not
+everything that might be.
