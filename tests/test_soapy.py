@@ -38,6 +38,14 @@ def samples_of(words):
     return struct.pack("<4096h", *(v for iq in unpacked(words) for v in iq))
 
 
+class Arguments(str):
+    """A device's arguments, and what the environment holds beside them."""
+    def __new__(cls, text, **environment):
+        made = super().__new__(cls, text)
+        made.environment = environment
+        return made
+
+
 @unittest.skipIf(soapy_problem(), soapy_problem())
 class SoapyTest(unittest.TestCase):
     counter = 0
@@ -77,16 +85,19 @@ class SoapyTest(unittest.TestCase):
         self.service.send_signal(signal.SIGINT)
         self.service.wait(10)
 
-    def args(self, controller=""):
-        """The device's arguments: this test's stream, and the fake controller (None: none)."""
+    def args(self, controller="", more=""):
+        """The device's arguments: this test's stream, with the fake controller in the environment
+        the tool is then started in (None: no controller). Commands are the environment's to give,
+        not an argument's."""
         if controller is None:
-            return "driver=w1700k,stream=%s,controller=none" % self.name
-        return "driver=w1700k,stream=%s,controller=exec %s %s --log %s --progress-delay 0.01 %s" % (
-            self.name, sys.executable, FAKE_CONTROLLER, self.log, controller)
+            return Arguments("driver=w1700k,stream=%s,controller=none%s" % (self.name, more))
+        return Arguments("driver=w1700k,stream=%s%s" % (self.name, more),
+                         W1700K_CONTROLLER="exec %s %s --log %s --progress-delay 0.01 %s" % (
+                             sys.executable, FAKE_CONTROLLER, self.log, controller))
 
     def tool_start(self, args, *ops):
         return subprocess.Popen([self.tool, args, *ops], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                env=self.env)
+                                env=dict(self.env, **getattr(args, "environment", {})))
 
     def run_tool(self, args, *ops):
         """Each op's JSON line."""
@@ -249,17 +260,50 @@ class SoapyTest(unittest.TestCase):
         (line,), _ = self.run_tool("driver=w1700k,stream=/w1700k-soapytest-none,service=none", "state")
         self.assertIn("no stream service at /w1700k-soapytest-none", line["error"])
 
-    def test_a_stream_service_named_in_the_arguments_is_started_and_ends_with_the_device(self):
+    def test_a_stream_service_named_in_the_environment_is_started_and_ends_with_the_device(self):
         name = self.name + "-own"
         service = "%s --bind 127.0.0.1 --port %d --name %s --ring-mib 16 --workers 2 --rx-threads 2" % (
             STREAM_BINARY, free_udp_port(), name)
-        (state,), _ = self.run_tool("driver=w1700k,stream=%s,controller=none,service=%s" % (name, service), "state")
+        (state,), _ = self.run_tool(Arguments("driver=w1700k,stream=%s,controller=none" % name, W1700K_STREAM_SERVICE=service),
+                                    "state")
         self.assertEqual(state["sensors"]["service"], "true")
         self.assertFalse(stream_ready(name), "the service it started went with it, and took its shared memory")
 
     def test_a_stream_service_that_does_not_come_up_is_reported(self):
-        (line,), _ = self.run_tool("driver=w1700k,stream=%s-none,controller=none,service=false" % self.name, "state")
+        (line,), _ = self.run_tool(Arguments("driver=w1700k,stream=%s-none,controller=none" % self.name,
+                                             W1700K_STREAM_SERVICE="false"), "state")
         self.assertIn("did not come up", line["error"])
+
+    def test_a_packing_reaches_the_controller_as_a_word_of_its_own(self):
+        (state,), _ = self.run_tool(self.args(more=",packing=half"), "state")
+        self.assertNotIn("error", state)
+        with open(self.log) as f:
+            self.assertEqual(json.loads(f.readline())["packing"], "half")
+
+    def test_no_argument_is_a_command_or_becomes_part_of_one(self):
+        """A device's arguments may be anybody's text (SoapyRemote makes a device from its clients'):
+        the two commands come from the environment, and the rest is checked before anything runs."""
+        mark = os.path.join(self.tmp, "ran-%d" % self.counter)
+        touch = "touch %s" % mark
+        for what, arguments, says in (
+                ("a packing that closes its quote", self.args(more=",packing=raw'; %s; echo '" % touch), "packing= is one of raw, half"),
+                ("a packing that is not one", self.args(more=",packing=$(%s)" % touch), "packing= is one of"),
+                ("a stream name that closes its quote", Arguments("driver=w1700k,stream=/x'; %s; '" % touch,
+                                                                  W1700K_STREAM_SERVICE="none"), "stream= names"),
+                ("a stream name with no slash", Arguments("driver=w1700k,stream=w1700k-stream"), "stream= names"),
+                ("a controller given as an argument", "driver=w1700k,stream=%s,controller=%s" % (self.name, touch),
+                 "controller= is not taken from a device's arguments (only controller=none is): a command is the "
+                 "environment's to give, W1700K_CONTROLLER=COMMAND"),
+                ("a service given as an argument", "driver=w1700k,stream=%s-none,controller=none,service=%s" % (self.name, touch),
+                 "service= is not taken from a device's arguments (only service=none is)"),
+                ("both, and the service not needed", "driver=w1700k,stream=%s,controller=none,service=%s" % (self.name, touch),
+                 "service= is not taken")):
+            with self.subTest(what):
+                (line,), _ = self.run_tool(arguments, "state")
+                self.assertIn(says, line["error"])
+                self.assertFalse(os.path.exists(mark), "nothing of it ran")
+                self.assertFalse(os.path.exists(self.log), "and nothing else was started for it")
+
 
 if __name__ == "__main__":
     unittest.main()

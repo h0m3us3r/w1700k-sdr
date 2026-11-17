@@ -22,8 +22,8 @@ double now_s()
 
 }  // namespace
 
-Control::Control(std::string command, Log log, double start_timeout_s)
-    : command_(std::move(command)), log_(std::move(log))
+Control::Control(std::string command, std::vector<std::string> arguments, Log log, double start_timeout_s)
+    : command_(std::move(command)), arguments_(std::move(arguments)), log_(std::move(log))
 {
     spawn(start_timeout_s);
 }
@@ -37,14 +37,19 @@ void Control::spawn(double timeout_s)
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair))
         throw std::runtime_error(std::string("socketpair: ") + std::strerror(errno));
-    const char *text = command_.c_str();
+    // sh -c 'COMMAND "$@"' sh ARGUMENT...: the arguments reach the command as they are.
+    const std::string text = arguments_.empty() ? command_ : command_ + " \"$@\"";
+    std::vector<char *> argv = {const_cast<char *>("sh"), const_cast<char *>("-c"), const_cast<char *>(text.c_str()),
+                                const_cast<char *>("sh")};
+    for (const auto &word : arguments_) argv.push_back(const_cast<char *>(word.c_str()));
+    argv.push_back(nullptr);
     pid_ = fork();
     if (pid_ == 0) {
         // Async-signal-safe calls only until exec: the application has other threads.
         setpgid(0, 0);  // a Ctrl-C at the application's terminal is the application's to handle
         signal(SIGPIPE, SIG_DFL);
         if (dup2(pair[1], STDIN_FILENO) < 0 || dup2(pair[1], STDOUT_FILENO) < 0) _exit(127);
-        execl("/bin/sh", "sh", "-c", text, static_cast<char *>(nullptr));
+        execv("/bin/sh", argv.data());
         _exit(127);
     }
     const int e = errno;

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include <sys/types.h>
 
@@ -18,7 +19,9 @@ public:
 
     // Starts `sh -c command` and waits for the controller's first state (it has then read what the
     // unit holds). Throws std::runtime_error with what the controller said was wrong.
-    Control(std::string command, Log log, double start_timeout_s = 30);
+    // `command` is run by sh -c; `arguments` are appended to what it runs as words of their own
+    // (the shell's "$@"), whatever they hold.
+    Control(std::string command, std::vector<std::string> arguments, Log log, double start_timeout_s = 30);
     ~Control();
     Control(const Control &) = delete;
     Control &operator=(const Control &) = delete;
@@ -43,6 +46,7 @@ private:
     bool is_reply(const JsonValue &m);
 
     const std::string command_;
+    const std::vector<std::string> arguments_;
     Log log_;
     pid_t pid_ = -1;
     int fd_ = -1;               // one socket: the child's stdin and stdout
