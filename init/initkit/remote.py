@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import time
 
-from . import bundle, config, provision
+from . import bundle, config, layout, provision
 from .console import StepFailed
 
 SCRIPT = config.ROOT / 'platform/rootfs/overlay/usr/sbin/system-update'
@@ -183,11 +183,7 @@ def check_layout(link, expected=None):
     found = {name: int(size, 16) for size, name in MTD_LINE.findall(text)}
     wanted = {name: size for name, (_, size) in expected.items()}
     if found != wanted:
-        differ = sorted(name for name in set(found) | set(wanted) if found.get(name) != wanted.get(name))
-        raise StepFailed("the unit's flash is not laid out as these images expect (" + ', '.join(differ)
-                         + '): it was installed from another version. Install it again over the serial '
-                         'console (init/install --force); init/README.md says what else an older '
-                         'installation needs')
+        raise StepFailed(layout.laid_out_differently(layout.differing(found, wanted)))
 
 
 def run_joint(settings, serial=None, authorized_key=None, bundle_path=None, link=None,

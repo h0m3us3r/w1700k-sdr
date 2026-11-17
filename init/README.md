@@ -308,9 +308,12 @@ storage reached 18 MiB into stock's second firmware slot, the copy of the
 stock firmware that stock keeps beside the one it boots; everything of ours
 now lies in the first slot. And the megabyte for loaders was divided in two
 for the second loader, which moved `system` down by one (`platform/README.md`
-has the table). The network tools compare a unit's partitions with the build's
-and stop before sending anything to one laid out differently. Such a unit is
-moved in two steps, both over the serial console:
+has the table). Every update compares a unit's partitions with the build's and
+stops before writing anything to one laid out differently: over the network
+from what its Linux lists, over the serial console from what its installed
+loader lists (`mtd list`), which for `init/flash --loader` is read before that
+loader is replaced. Such a unit is moved in two steps, both over the serial
+console:
 
 ```sh
 init/install --force       # the same backup is kept; `system` and `durable` are made again, smaller

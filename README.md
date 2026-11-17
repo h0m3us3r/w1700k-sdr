@@ -211,8 +211,9 @@ who has the tools but does not build. Either command takes about a minute.
   root is written back, the second loader is removed. A unit that does not
   come back from an update is recovered by a power cycle.
 - **An archive built for another flash layout is not sent**, nor is this
-  build to a unit installed under an older one: the tool compares the unit's
-  partitions first, and says how such a unit is moved.
+  build to a unit installed under an older one, over the network or the serial
+  console: the tool compares the unit's partitions first, and says how such a
+  unit is moved.
 
 The kernel image and a unit's first installation still take the serial
 console. A unit's login key does not: `init/key` and a paperclip set it

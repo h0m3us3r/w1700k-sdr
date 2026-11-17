@@ -87,8 +87,10 @@ class FakeLine:
 class FakeUnit:
     def __init__(self, served, chip_bytes=0x420000, installed=False,
                  translation='vendor BBT/BMT', part=partitions.KV, stock_pool=None,
-                 loadb=True, line='clean'):
+                 loadb=True, line='clean', layout=None):
         self.served = Path(served)
+        # The partitions the installed loader was built with, as its `mtd list` names them.
+        self.layout = dict(layout or partitions.GEOMETRY)
         # Stock's `loadb`: whether it has the command, the address a transfer is
         # going to, and what the serial line does to one ('clean', 'dead',
         # 'corrupting', 'short').
@@ -493,7 +495,9 @@ class FakeUnit:
     def loader_mtd(self, line, words):
         if words[1] == 'list':
             return (f'* spi-nand0\n{self.geometry()}'
-                    f'  - 0x000000000000-0x{self.chip_bytes:012x} : "spi-nand0"'), 0
+                    f'  - 0x000000000000-0x{self.chip_bytes:012x} : "spi-nand0"\n'
+                    + '\n'.join(f'\t  - 0x{offset:012x}-0x{offset + length:012x} : "{name}"'
+                                for name, (offset, length) in self.layout.items())), 0
         assert words[1] == 'erase', line
         self.erased.append((words[2], int(words[3], 16), int(words[4], 16)))
         self.ubi[words[2]] = {}

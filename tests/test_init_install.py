@@ -447,6 +447,75 @@ class Flash(Bench):
     def test_durable_storage_gets_the_w25n04lv_image(self):
         self.durable_for(LV)
 
+    # The layout upstream had until November 2026: a 2 MiB loader, `system` a megabyte further
+    # up, `durable` reaching into stock's second slot, and the rest of the chip as `scratch`.
+    OLDER = {'bootloader': (0x00000000, 0x00200000), 'uenv': (0x00200000, 0x00200000),
+             'calibration': (0x00400000, 0x00200000), 'loader': (0x00600000, 0x00200000),
+             'system': (0x00800000, 0x03000000), 'durable': (0x03800000, 0x02000000),
+             'scratch': (0x05800000, 0x16600000), 'reserved-bmt': (0x1be00000, 0x04200000)}
+    WRITES = r'(ubi (write|create)|mtd erase|flash (erase|write)|saveenv)'
+
+    def test_a_unit_laid_out_by_an_older_version_is_told_so_before_anything_is_written(self):
+        """Over the serial console, as over the network: every kind of update stops at the
+        loader's own list of partitions and says how such a unit is moved."""
+        for what in ({'fit': True, 'rootfs': True}, {'fit': True}, {'rootfs': True}, {'durable': True},
+                     {'loader': True}):
+            for state in ('linux', 'loader', 'stock'):
+                with self.subTest(what=what, state=state):
+                    # A run's log is named by the second: each run here gets its own place.
+                    self.settings.data_dir = self.work / f'data-{"-".join(what)}-{state}'
+                    config.unit_dir(self.settings.data_dir, 'W1700KTEST0001').mkdir(parents=True)
+                    unit = self.make_unit(installed=True, layout=self.OLDER)
+                    unit.state = state
+                    with self.assertRaisesRegex(StepFailed, r'not laid out as these images expect \(durable, loader, '
+                                                            r'loader-b, scratch, stock, system\).*init/install --force'):
+                        self.flash(**what)
+                    self.assertFalse(any(re.match(self.WRITES, line) for line in self.commands()))
+
+    def test_the_layout_is_read_before_the_loader_is_replaced(self):
+        unit = self.make_unit(installed=True)
+        unit.state = 'linux'
+        self.flash(loader=True, boot=False)
+        self.assertLess(self.index(r'^mtd list$'), self.index(r'^flash erase '))
+
+    def test_a_unit_laid_out_as_the_build_expects_is_updated(self):
+        unit = self.make_unit(installed=True)
+        unit.state = 'loader'
+        self.flash(fit=True)
+        self.assertIn('mtd list', self.commands('loader'))
+        self.assertEqual(unit.ubi['system']['fit'], config.SYSTEM_FIT.read_bytes())
+
+    def test_recovery_reads_no_layout(self):
+        """It writes nothing and attaches no flash, and is how a unit in any state is looked at."""
+        unit = self.make_unit(installed=True, layout=self.OLDER)
+        unit.state = 'linux'
+        self.flash(recovery=True)
+        self.assertNotIn('mtd list', self.commands())
+
+    def test_a_loader_that_lists_no_partitions_stops_the_run(self):
+        unit = self.make_unit(installed=True, layout={'spi-nand0': (0, 0x420000)})
+        unit.state = 'loader'
+        with self.assertRaisesRegex(StepFailed, 'listed no partitions'):
+            self.flash(fit=True)
+        self.assertFalse(any(re.match(self.WRITES, line) for line in self.commands()))
+
+    def test_a_loader_that_does_not_come_up_can_still_be_replaced(self):
+        """The one case the layout cannot be read in is the one a loader update mends."""
+        unit = self.make_unit(installed=True)
+        unit.state = 'stock'
+        reach, calls = update.unit.to_installed_loader, []
+
+        def dead_once(console, log, state):
+            calls.append(state)
+            if len(calls) == 1:
+                raise StepFailed('the loader did not answer')
+            return reach(console, log, state)
+
+        with mock.patch.object(update.unit, 'to_installed_loader', dead_once):
+            self.flash(loader=True, boot=False)
+        self.assertTrue(unit.loader_slot.startswith(config.LOADER.read_bytes()))
+        self.assertTrue(any('did not come up' in str(call) for call in print.call_args_list))
+
     def test_an_uninstalled_unit_cannot_take_a_loader_update(self):
         unit = self.make_unit()
         unit.state = 'stock'

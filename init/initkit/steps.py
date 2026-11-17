@@ -109,6 +109,20 @@ def detach(session):
     command(session.console, 'ubi detach', limit=60)
 
 
+def check_layout(session):
+    """At the installed loader, before anything is written: the unit's flash is divided as this
+    build's images expect. The loader knows the layout it was installed under."""
+    listing = session.console.must_run('mtd list', limit=30)
+    session.log.text('mtd-list.txt', listing)
+    found = layout.listed(listing)
+    if not found:
+        raise StepFailed('the loader listed no partitions (`mtd list`), so how this unit is laid out '
+                         'cannot be told; nothing was written')
+    differ = layout.differing(found, config.partitions.GEOMETRY)
+    if differ:
+        raise StepFailed(layout.laid_out_differently(differ))
+
+
 def loader_nand(session):
     """At the loader: the NAND part, from `mtd list`."""
     listing = session.console.must_run('mtd list', limit=30)
