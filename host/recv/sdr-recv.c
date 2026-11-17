@@ -152,7 +152,12 @@ int main(int argc, char **argv)
 			if (h && w1700k_stream_alive(h))
 				break;
 			if (w1700k_stream_now_ns() > deadline) {
-				fprintf(stderr, "sdr-recv: no stream service at %s\n", name);
+				if (!h && (errno == EACCES || errno == EPROTO))
+					fprintf(stderr, "sdr-recv: %s is not a stream service's of this user (%s)\n", name,
+						errno == EACCES ? "it belongs to someone else, or others may write it"
+								: "its layout is not the ring's");
+				else
+					fprintf(stderr, "sdr-recv: no stream service at %s\n", name);
 				return 1;
 			}
 			usleep(100000);
