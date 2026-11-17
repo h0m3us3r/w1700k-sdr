@@ -85,9 +85,15 @@ which is where the idea came from.
 
 For the 10 GbE IQ link (unit `eth1`, 10.77.0.1), give the host side its
 address and jumbo frames: `sudo init/host/link keep IFACE10G 10.77.0.10/24 9216`.
-`up` sets them until the interface goes away; `keep` also writes them into the
-NetworkManager connection of that interface, so a reboot or a USB adapter
-plugged in again comes up the same way. Both also spread the packets of an
+`up` sets them until the interface goes away; `keep` also has NetworkManager
+hold them, so a reboot or a USB adapter plugged in again comes up the same
+way. It makes a connection of its own for the interface, `w1700k-IFACE`, with
+the address set by hand, and has NetworkManager prefer it to the one it made
+for the adapter itself: that one asks for an address by DHCP, which no unit
+answers, and when the request times out NetworkManager takes every address
+off the interface. (A connection of yours that already manages the interface
+with a static address is used as it is.) `init/host/link down` removes what
+`keep` made. Both also spread the packets of an
 interface with a single receive queue (a USB adapter) over the CPUs: its
 interrupt on a CPU of its own, the IP and UDP work on the others, which took
 such an adapter from 53 missed datagrams a second to between 1 and 5 at

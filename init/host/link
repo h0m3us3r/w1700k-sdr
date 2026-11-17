@@ -28,37 +28,54 @@
 #
 # `up` lasts until the interface goes away: a reboot, or a USB adapter pulled and
 # plugged in again, which comes back with an MTU of 1500 and drops the stream's
-# 8 KiB packets without a word. `keep` also writes the address, the MTU and the
-# ring into the NetworkManager connection that manages IFACE (made if there is
-# none), and the spreading into a hook NetworkManager runs when IFACE comes up
-# (/etc/NetworkManager/dispatcher.d/60-w1700k-IFACE; delete it to undo), so that
+# 8 KiB packets without a word. `keep` also has NetworkManager hold the address,
+# the MTU and the ring, and writes the spreading into a hook NetworkManager runs
+# when IFACE comes up (/etc/NetworkManager/dispatcher.d/60-w1700k-IFACE), so that
 # all of it is applied whenever the interface appears. Without NetworkManager it
 # says so, and `up` has to be repeated.
+#
+# Where NetworkManager keeps them: in a connection of its own for the interface,
+# `w1700k-IFACE`, with the address set by hand (ipv4.method manual) and a higher
+# autoconnect priority than a connection NetworkManager made for the interface
+# itself, and it has NetworkManager bring that connection up. A connection that
+# asks for an address by DHCP cannot keep one: no unit answers DHCP, and when the
+# request times out NetworkManager takes every address off the interface. Nor
+# can the connection NetworkManager assumes when an address is set by hand
+# ("connected (externally)"): it is gone when the interface is. Only a connection
+# of your own that already manages IFACE with its address set by hand is used as
+# it is, with this address added to it. While `w1700k-IFACE` exists the interface
+# asks for no address by DHCP; `down` removes it, and the hook.
+#
+# `up` beside a NetworkManager that is still waiting for DHCP on IFACE stops that
+# request, and says so: the address would otherwise go when it times out.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "$0: run as root (sudo)" >&2; exit 1; }
 [ $# -ge 2 ] || { echo "usage: $0 up|down|keep IFACE [CIDR [MTU]]" >&2; exit 2; }
 action=$1 iface=$2 cidr=${3:-192.168.1.10/24} mtu=${4:-}
+sysroot=${W1700K_LINK_SYSROOT:-}	# where /sys, /proc and /etc are, for the tests
+ours=w1700k-$iface			# the NetworkManager connection `keep` makes
+hook=$sysroot/etc/NetworkManager/dispatcher.d/60-w1700k-$iface
 
 # spread IFACE on|off, as text: `keep` writes the same lines into NetworkManager's hook.
 spread_source=$(cat <<'SPREAD'
 spread() {
-	net=/sys/class/net/$1
+	net=${W1700K_LINK_SYSROOT:-}/sys/class/net/$1
 	[ -e "$net/queues/rx-0/rps_cpus" ] && [ ! -e "$net/queues/rx-1" ] || return 0
 	cpus=$(nproc --all)
 	[ "$cpus" -ge 2 ] && [ "$cpus" -le 32 ] || return 0
 	last=$((cpus - 1))
 	# The interrupt behind the interface: its own, or that of the controller it hangs from.
 	dev=$(readlink -f "$net/device") irq=
-	while [ "$dev" != /sys/devices ] && [ "$dev" != / ]; do
+	while [ "$dev" != "${W1700K_LINK_SYSROOT:-}/sys/devices" ] && [ "$dev" != / ] && [ "$dev" != . ]; do
 		if [ -d "$dev/msi_irqs" ]; then irq=$(ls "$dev/msi_irqs" | head -1); break; fi
 		if [ -r "$dev/irq" ] && [ "$(cat "$dev/irq")" != 0 ]; then irq=$(cat "$dev/irq"); break; fi
 		dev=$(dirname "$dev")
 	done
 	if [ "$2" = on ]; then
-		[ -z "$irq" ] || echo "$last" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
+		[ -z "$irq" ] || echo "$last" > "${W1700K_LINK_SYSROOT:-}/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
 		printf '%x\n' $(( ((1 << cpus) - 1) & ~(1 << last) )) > "$net/queues/rx-0/rps_cpus"
 	else
-		[ -z "$irq" ] || echo "0-$last" > "/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
+		[ -z "$irq" ] || echo "0-$last" > "${W1700K_LINK_SYSROOT:-}/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
 		echo 0 > "$net/queues/rx-0/rps_cpus"
 	fi
 }
@@ -66,22 +83,64 @@ SPREAD
 )
 eval "$spread_source"
 
-keep()	# the connection that manages $iface keeps $cidr, $mtu and the largest receive ring
+nm_runs() { command -v nmcli >/dev/null && nmcli -t general status >/dev/null 2>&1; }
+nm_get() { nmcli -g "$1" connection show "$2" 2>/dev/null; }		# one setting of a connection
+nm_has() { nmcli -g connection.id connection show "$1" >/dev/null 2>&1; }
+nm_state() { nmcli -g GENERAL.STATE device show "$iface" 2>/dev/null; }
+nm_active() { nmcli -g GENERAL.CONNECTION device show "$iface" 2>/dev/null; }
+holds() { nm_get ipv4.addresses "$1" | tr ',' '\n' | grep -q "^ *${cidr%/*}/"; }	# connection $1 has $cidr
+
+add_address()
 {
-	command -v nmcli >/dev/null && nmcli -t general status >/dev/null 2>&1 || {
+	ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/" || ip address add "$cidr" dev "$iface"
+}
+
+# The connection that keeps the address: ours if `keep` has made it before; else the one that
+# manages $iface now, if NetworkManager will bring it up again by itself and its address is set by
+# hand; else nothing, and ours is made. Not one that asks for DHCP (it loses every address when the
+# request times out), and not one NetworkManager assumed from an address set by hand (it goes with
+# the interface; on a netplan host its file is under /run like every other, so its state tells).
+keeper()
+{
+	if nm_has "$ours"; then echo "$ours"; return 0; fi
+	con=$(nm_active)
+	[ -n "$con" ] || return 0
+	case $(nm_state) in *externally*) return 0 ;; esac
+	[ "$(nm_get connection.autoconnect "$con")" = yes ] || return 0
+	case $(nm_get ipv4.method "$con") in
+	manual|disabled|link-local) echo "$con" ;;
+	esac
+}
+
+# An earlier `keep` added the address to the connection it found, a DHCP one included. Such a
+# connection gets its address back out, so that it is again what NetworkManager made.
+tidy()
+{
+	nmcli -g NAME connection show 2>/dev/null | sed 's/\\:/:/g' | while IFS= read -r other; do
+		[ "$other" != "$ours" ] && [ "$(nm_get connection.interface-name "$other")" = "$iface" ] &&
+			[ "$(nm_get ipv4.method "$other")" = auto ] && holds "$other" || continue
+		nmcli connection modify "$other" -ipv4.addresses "$cidr" 2>/dev/null &&
+			echo "$0: took $cidr back out of \"$other\", which asks for its address by DHCP"
+	done
+}
+
+keep()	# NetworkManager keeps $cidr, $mtu and the largest receive ring on $iface
+{
+	nm_runs || {
+		add_address
 		echo "$0: NetworkManager does not run here: nothing kept; repeat \`$0 up\` when $iface comes back" >&2
 		return 1
 	}
-	[ -e "/sys/class/net/$iface" ] || { echo "$0: no interface $iface" >&2; return 1; }
-	con=$(nmcli -g GENERAL.CONNECTION device show "$iface" 2>/dev/null)
+	[ -e "$sysroot/sys/class/net/$iface" ] || { echo "$0: no interface $iface" >&2; return 1; }
+	con=$(keeper)
 	if [ -z "$con" ]; then
-		con="w1700k-$iface"
-		nmcli -t connection add type ethernet ifname "$iface" con-name "$con" autoconnect yes \
+		con=$ours
+		# autoconnect off until it is whole: NetworkManager brings it up once, below.
+		nmcli -t connection add type ethernet ifname "$iface" con-name "$con" autoconnect no \
 			ipv4.method manual ipv4.addresses "$cidr" ipv4.never-default yes ipv6.method disabled >/dev/null
 	else
-		nmcli -g ipv4.addresses connection show "$con" | tr ',' '\n' | grep -q "^ *${cidr%/*}/" ||
-			nmcli connection modify "$con" +ipv4.addresses "$cidr"
-		case $(nmcli -g ipv4.method connection show "$con") in
+		holds "$con" || nmcli connection modify "$con" +ipv4.addresses "$cidr"
+		case $(nm_get ipv4.method "$con") in
 		disabled|link-local) nmcli connection modify "$con" ipv4.method manual ;;
 		esac
 	fi
@@ -91,19 +150,51 @@ keep()	# the connection that manages $iface keeps $cidr, $mtu and the largest re
 		[ -z "$rx" ] || nmcli connection modify "$con" ethtool.ring-rx "$rx" 2>/dev/null ||
 			echo "$0: this NetworkManager does not keep the receive ring" >&2
 	fi
+	if [ "$con" = "$ours" ]; then
+		# Above NetworkManager's own "Wired connection N" (-999) and a connection left at 0.
+		nmcli connection modify "$con" connection.autoconnect yes connection.autoconnect-priority 10
+		tidy
+		# NetworkManager brings it up: the address is then its own, and it stops whatever
+		# it was doing on the interface (a DHCP request, or a connection it had assumed).
+		# Not where it is up already with the address on: that would only interrupt a stream.
+		if [ "$(nm_active)" = "$con" ] && ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/"; then
+			:
+		elif nmcli connection up "$con" ifname "$iface" >/dev/null 2>&1; then
+			add_address	# there already, unless this NetworkManager leaves it to us
+		else
+			add_address
+			echo "$0: NetworkManager did not bring \"$con\" up now; it will when $iface next appears" >&2
+		fi
+	else
+		add_address
+	fi
 	echo "$0: kept in the NetworkManager connection \"$con\""
-	[ -n "$mtu" ] && [ -d /etc/NetworkManager/dispatcher.d ] || return 0
-	hook=/etc/NetworkManager/dispatcher.d/60-w1700k-$iface
+	[ -n "$mtu" ] && [ -d "$(dirname "$hook")" ] || return 0
 	{
 		echo '#!/bin/sh'
 		echo "# Written by init/host/link keep $iface: the W1700K stream link's packets are spread"
-		echo '# over the CPUs whenever the interface comes up. Delete this file to undo.'
+		echo "# over the CPUs whenever the interface comes up. \`init/host/link down $iface\` removes it."
 		echo "[ \"\$1\" = \"$iface\" ] && [ \"\$2\" = up ] || exit 0"
 		echo "$spread_source"
 		echo "spread \"$iface\" on"
 	} > "$hook"
 	chmod 755 "$hook"
 	echo "$0: and in $hook"
+}
+
+# `up` beside a NetworkManager that is asking $iface for an address by DHCP and has none yet: when
+# the request times out it takes every address off the interface, the one added here included.
+stop_dhcp()
+{
+	nm_runs || return 0
+	case $(nm_state) in *connecting*) ;; *) return 0 ;; esac
+	con=$(nm_active)
+	[ -n "$con" ] && [ "$(nm_get ipv4.method "$con")" = auto ] || return 0
+	nmcli device disconnect "$iface" >/dev/null 2>&1 || return 0
+	ip link set dev "$iface" up
+	echo "$0: NetworkManager was waiting for an address by DHCP on $iface (\"$con\") and would have" >&2
+	echo "$0: taken this one away when that failed: stopped it, until $iface next appears." >&2
+	echo "$0: \`$0 keep $iface $cidr${mtu:+ $mtu}\` makes the address stay." >&2
 }
 
 case "$action" in
@@ -119,14 +210,30 @@ up|keep)
 	fi
 	[ -z "$mtu" ] || spread "$iface" on
 	ip link set dev "$iface" up
-	ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/" ||
-		ip address add "$cidr" dev "$iface"
-	[ "$action" = up ] || keep
+	if [ "$action" = keep ]; then
+		keep
+	else
+		stop_dhcp
+		add_address
+	fi
 	;;
 down)
+	if nm_runs; then
+		# What `keep` set: its own connection, or the address it added to one of yours.
+		if nm_has "$ours"; then
+			nmcli connection delete "$ours" >/dev/null &&
+				echo "$0: removed the NetworkManager connection \"$ours\""
+		fi
+		con=$(nm_active)
+		if [ -n "$con" ] && holds "$con"; then
+			nmcli connection modify "$con" -ipv4.addresses "$cidr" 2>/dev/null ||
+				echo "$0: the NetworkManager connection \"$con\" still has $cidr: it is its only address" >&2
+		fi
+	fi
 	! ip -4 -o address show dev "$iface" | grep -q " ${cidr%/*}/" ||
 		ip address del "$cidr" dev "$iface"
 	spread "$iface" off
+	[ ! -e "$hook" ] || { rm -f "$hook"; echo "$0: removed $hook"; }
 	;;
 *)
 	echo "usage: $0 up|down|keep IFACE [CIDR [MTU]]" >&2
