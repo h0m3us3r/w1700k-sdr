@@ -19,6 +19,13 @@
  * The line is driven and then let go. This pin controller leaves a line as it was last driven
  * when its holder lets go (seen on a unit: the receiver stays off), which is what `off` relies
  * on; `status` reads the line as it is, without driving it.
+ *
+ * That is the W1700K. The same loader and root run on the XR1710G, which has no receiver:
+ * line 43 there is the green LED of a 1 GbE port. The loader tells the board from the serial
+ * number in the unit's factory identity and hands its name to the system in the device tree
+ * (`/chosen/w1700k,board`: w1700k, xr1710g or unknown); on the XR1710G it puts the LED out
+ * again after `gps_off`. On a board named as one without a receiver this does nothing and
+ * says so, whatever it was asked. A board the loader could not name is treated as a W1700K.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -32,6 +39,32 @@
 
 enum { OFF, ON, STATUS };
 
+/* The board's name, as the loader hands it over. */
+#ifndef BOARD_NAME
+#define BOARD_NAME "/proc/device-tree/chosen/w1700k,board"
+#endif
+
+/* Boards this system runs on that carry no GPS receiver (platform/boards.py: gps_line None). */
+static const char *const no_receiver[] = { "xr1710g" };
+
+/* The board's name if it is one without a receiver, else NULL: also where no name was handed
+ * over (a loader from before boards were told apart, which ran on the W1700K alone). */
+static const char *board_without_receiver(void)
+{
+	char name[32] = "";
+	FILE *handed = fopen(BOARD_NAME, "r");
+
+	if (!handed)
+		return NULL;
+	if (!fgets(name, sizeof(name), handed))		/* a device-tree string: up to its NUL */
+		name[0] = 0;
+	fclose(handed);
+	for (size_t i = 0; i < sizeof(no_receiver) / sizeof(no_receiver[0]); i++)
+		if (!strcmp(name, no_receiver[i]))
+			return no_receiver[i];
+	return NULL;
+}
+
 static int usage(void)
 {
 	fprintf(stderr, "usage: w1700k-gps off | on | status [--chip DEV] [--line N]\n");
@@ -43,6 +76,7 @@ int main(int argc, char **argv)
 	struct gpio_v2_line_request request = { .num_lines = 1 };
 	struct gpio_v2_line_values values = { .mask = 1 };
 	const char *chip = "/dev/gpiochip0";
+	const char *board;
 	long line = 43;
 	int what, fd;
 	char *end;
@@ -68,6 +102,11 @@ int main(int argc, char **argv)
 		} else {
 			return usage();
 		}
+	}
+	board = board_without_receiver();
+	if (board) {
+		fprintf(stderr, "w1700k-gps: this board (%s) has no GPS receiver; nothing done\n", board);
+		return 1;
 	}
 	fd = open(chip, O_RDONLY);
 	if (fd < 0) {

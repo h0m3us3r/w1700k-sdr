@@ -17,6 +17,7 @@ import sys
 UNIT = Path(__file__).resolve().parent
 sys.path.insert(0, str(UNIT.parent))
 from buildlib import BUILD, IMAGES, LOGS, kconfig, main_guard, require, write_if_changed
+import boards
 import partitions
 import uboot
 
@@ -106,6 +107,18 @@ def compress(image):
     return bytes(payload)
 
 
+def check_boards(image):
+    """One loader for every board in platform/boards.py: the GPS receiver's line is driven low
+    first, then the unit is named from its serial, by each board's prefix."""
+    require(image.count(b'bootcmd=run gps_off; run board_id; ') == 1,
+            'loader: the built-in environment does not switch the GPS receiver off and then '
+            'name the board, first of all')
+    named = image[image.index(b'board_id='):].split(b'\0', 1)[0].decode()
+    missing = [board.key for board in boards.ALL
+               if f'"x{board.serial_prefix}"' not in named or f'setenv board {board.key};' not in named]
+    require(not missing, 'loader: board_id does not name: ' + ', '.join(missing))
+
+
 def main():
     partitions.check('platform/loader/an7581-w1700k-sdr-loader.dts', 'loader')
     src = uboot.prepare('loader', patches(), FILES,
@@ -115,6 +128,7 @@ def main():
     config = kconfig(out / '.config')
     uboot.require_config('loader', config, ENABLED, DISABLED)
     image, dtb, linked = uboot.check_image('loader', out, config, STAGING)
+    check_boards(image)
     missing = [name for name in LINKED if name not in linked]
     require(not missing, 'loader: not linked: ' + ', '.join(missing))
     # OpenWrt's mtk_bmt rewrites a vendor BMT it fails to parse.

@@ -4,12 +4,15 @@ of the root (update_apply), and of the loader itself, which goes to a second par
 first loader starts (loader_next). The scripts are sh-compatible, so a POSIX shell executes them
 here with U-Boot's commands (ubi, ubifsload, mtd, fdt, hash, env, saveenv, bootm ...) standing in
 as functions over a model of the flash: the durable filesystem as a directory, the root volume and
-the `loader-b` partition as files, the saved environment as a file. Each boot starts from what the
-last one left."""
+the `loader-b` partition as files, the saved environment as a file, the first page of the factory
+`calibration` partition as a file (absent: erased). Each boot starts from what the
+last one left. The system is started as the loader starts it, one stage of `bootm` at a time,
+and what is added to the device tree's /chosen on the way is kept in `chosen`."""
 import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,7 +34,7 @@ saveenv() {
     for name in update_tried update_failed loader_tried loader_failed loader_booted; do
         eval "[ -z \"\${$name+x}\" ]" || eval "echo \"$name=\$$name\""
     done > "$M/saved"
-    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on gps_v; do
+    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on gps_v serial_number; do
         eval "[ -z \"\${$name+x}\" ]" || { echo "saved a scratch variable: $name" >> "$M/log"; }
     done
 }
@@ -43,7 +46,7 @@ env() {
         [ "$2" = -t ] || return 1
         addr=$3; shift 4
         for name; do
-            value=$(tr -d '\000' < "$M/ram/$addr" | sed -n "s/^$name=//p")
+            value=$(tr -d '\000' < "$M/ram/$addr" | LC_ALL=C sed -n "s/^$name=//p")
             [ -z "$value" ] || eval "$name=\$value"
         done ;;
     *) echo "env $*: not modelled" >&2; return 1 ;;
@@ -110,6 +113,18 @@ hash() {
     eval "$4=\$(head -c \"\$((0x$3))\" \"\$M/ram/$2\" | sha256sum | cut -d' ' -f1)"
 }
 mtd() {
+    # The factory identity is only ever read, a page from the start of its partition.
+    if [ "$2" = calibration ]; then
+        [ "$1 $4" = "read 0" ] && [ $# = 5 ] || { echo "mtd $*: not modelled" >&2; return 1; }
+        note "read calibration"
+        [ ! -e "$M/calibration-unreadable" ] || return 1
+        if [ -f "$M/calibration" ]; then
+            { cat "$M/calibration"; head -c "$((0x${5#0x}))" /dev/zero | tr '\000' '\377'; } | head -c "$((0x${5#0x}))" > "$M/ram/$3"
+        else
+            head -c "$((0x${5#0x}))" /dev/zero | tr '\000' '\377' > "$M/ram/$3"
+        fi
+        return 0
+    fi
     [ "$2" = loader-b ] || { echo "mtd $*: not modelled" >&2; return 1; }
     case $1 in
     erase) note "erase loader-b"; rm -f "$M/loaderb" ;;
@@ -133,6 +148,10 @@ mtd() {
 fdt() {
     case $1 in
     addr) [ "$(head -c 4 "$M/ram/$2")" = FIT: ] && fdt_at=$2 ;;
+    set)
+        # Only the system's tree takes a property, and only once it is where it will be handed over.
+        [ "$stage" = fdt ] && [ "$2" = /chosen ] && [ $# = 4 ] || { echo "fdt $*: not modelled" >&2; return 1; }
+        printf '%s=%s\n' "$3" "$4" >> "$M/chosen" ;;
     get)
         [ "$2 $4 $5" = "value / description" ] || { echo "fdt $*: not modelled" >&2; return 1; }
         # The names of a tree's properties are at its end: nothing is found by name in an
@@ -144,26 +163,42 @@ fdt() {
 }
 iminfo() { [ "$(tail -n 1 "$M/ram/$1")" = END ]; }
 bootm() {
+    # The system, a stage at a time and in order; `go` is the boot.
+    case $1 in
+    start) [ "$stage" = none ] && [ "$2" = "$loadaddr#$bootconf" ] || return 1; stage=start; return 0 ;;
+    loados) [ "$stage" = start ] || return 1; stage=loados; return 0 ;;
+    ramdisk) [ "$stage" = loados ] || return 1; stage=ramdisk; return 0 ;;
+    fdt) [ "$stage" = ramdisk ] || return 1; stage=fdt; return 0 ;;
+    prep) [ "$stage" = fdt ] || return 1; stage=prep; prepared=$bootargs; return 0 ;;
+    go)
+        [ "$stage" = prep ] || return 1
+        for name in key_line key_on gps_v serial_number; do
+            eval "[ -z \"\${$name+x}\" ]" || note "left a scratch variable: $name"
+        done
+        echo "$prepared" >> "$M/bootargs"
+        note "booted $(sha256sum < "$M/rootfs" | cut -d' ' -f1)${SLOT:+ by the second loader}"
+        exit 0 ;;
+    esac
     [ "$1" = "$loader_b_at" ] && [ -z "$SLOT" ] || { echo "bootm $*: not modelled" >&2; return 1; }
     if [ -e "$M/second-hangs" ]; then note "the second loader hangs"; exit 0; fi
     note "the second loader starts"
     SLOT=b sh "$M/harness.sh"
     exit $?
 }
-attached=none mode=ro mounted=0 fdt_at=
+attached=none mode=ro mounted=0 fdt_at= stage=none prepared=
 mkdir -p "$M/ram"
+rm -f "$M/chosen"
 . "$M/defaults"
 [ ! -f "$M/saved" ] || . "$M/saved"
 [ -z "$SLOT" ] || loader_slot=$SLOT
 run gps_off
+run board_id
 run loader_next
 run update_apply
 run key_pass
-for name in key_line key_on gps_v; do
-    eval "[ -z \"\${$name+x}\" ]" || note "left a scratch variable: $name"
-done
-echo "$bootargs" >> "$M/bootargs"
-note "booted $(sha256sum < "$M/rootfs" | cut -d' ' -f1)${SLOT:+ by the second loader}"
+run system_start
+echo "the system was not started" >&2
+exit 1
 '''
 
 
@@ -218,7 +253,11 @@ class Model(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('not found', result.stderr)
         self.assertNotIn('not modelled', result.stderr)
-        self.lines = log.read_text().splitlines()
+        lines = log.read_text().splitlines()
+        # Every boot reads the unit's identity, once in each loader that runs; what it makes of
+        # it is BoardName's business, and the rest of a boot is told without it.
+        self.identity_reads = lines.count('read calibration')
+        self.lines = [line for line in lines if line != 'read calibration']
         self.assertNotIn('saved a scratch variable', ' '.join(self.lines))
         return self.lines
 
@@ -232,9 +271,13 @@ class Model(unittest.TestCase):
 class LoaderUpdate(Model):
     def test_the_boot_command_applies_updates_first_and_then_boots_as_before(self):
         bootcmd = (self.model / 'env' / 'bootcmd').read_text()
-        self.assertTrue(bootcmd.startswith('run gps_off; run loader_next; run update_apply; run key_pass; '
+        self.assertTrue(bootcmd.startswith('run gps_off; run board_id; run loader_next; run update_apply; run key_pass; '
                                            'ubi part.ro ${bootpart} && ubi read'))
-        self.assertTrue(bootcmd.endswith('bootm ${loadaddr}#${bootconf}'))
+        self.assertTrue(bootcmd.endswith('iminfo ${loadaddr} && run system_start'))
+        start = (self.model / 'env' / 'system_start').read_text()
+        self.assertEqual(start, 'if bootm start ${loadaddr}#${bootconf} && bootm loados && bootm ramdisk && bootm fdt; '
+                                'then run board_pass; bootm prep && bootm go; fi',
+                         "the same boot, a stage at a time, with the board's name put in before the last two")
 
     def test_nothing_staged_nothing_written(self):
         self.assertEqual(self.boot(), [f'booted {digest(self.OLD)}'])
@@ -518,6 +561,150 @@ class GpsReceiver(Model):
         self.assertNotIn('gps', ' '.join(self.saved()))
 
 
+class BoardName(GpsReceiver):
+    """One set of images runs on the W1700K and on the XR1710G, and the loader tells the unit
+    which it is: by the serial number in the factory identity, the first page of `calibration`,
+    which it only ever reads. The name goes to the system in the device tree and on the command
+    line. The XR1710G has no GPS receiver, and line 43 is a port LED there, lit when low: the
+    loader puts it out again after `gps_off`, which stays first and is run on every board."""
+    test_the_line_is_driven_low_and_no_other_line_is_touched = None
+    test_it_is_done_again_at_every_boot_and_by_the_second_loader = None
+    test_the_line_is_made_an_output_before_its_level_is_set = None
+    test_it_comes_first_and_nothing_of_it_is_saved = None
+    # As a unit's identity is laid out: `name=value` lines, the serial among them, then erased flash.
+    IDENTITY = ('admin_password=not-a-real-one\nadmin_username=admin\nwan_mac=00:11:22:33:44:55\n'
+                'lan_mac=00:11:22:33:44:56\nserial_number={serial}\nmanufacturer=Gemtek\nfan_id=0\n'
+                'wifi_passphrase=nor-is-this\nwifi_wps_pin=00000000\n')
+    AS_THE_BOARD_COMES_UP = dict(DATA=0x00004800, ENABLE=0x00004000, DIRECTION=0x10000000)
+
+    def identity(self, serial=None, text=None):
+        path = self.model / 'calibration'
+        if serial is None and text is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(text if text is not None else self.IDENTITY.format(serial=serial).encode())
+
+    def named(self):
+        """One boot: the name on the command line, which is also what went into the device tree."""
+        (self.model / 'bootargs').unlink(missing_ok=True)
+        self.registers(**self.AS_THE_BOARD_COMES_UP)
+        self.boot()
+        line, = (self.model / 'bootargs').read_text().splitlines()
+        self.assertNotIn('left a scratch variable', ' '.join(self.lines))
+        chosen = dict(entry.split('=', 1) for entry in (self.model / 'chosen').read_text().splitlines())
+        self.assertEqual(line.count(' w1700k.board='), 1)
+        self.assertTrue(line.endswith(' w1700k.board=' + chosen['w1700k,board']))
+        return chosen['w1700k,board']
+
+    def led_or_receiver_line(self):
+        """Line 43: (driven as an output, its level)."""
+        return bool(self.register('ENABLE') & 0x800), bool(self.register('DATA') & 0x800)
+
+    def test_the_table_and_the_loader_tell_a_serial_the_same_way(self):
+        sys.path.insert(0, str(ROOT / 'platform'))
+        import boards
+        for serial in ('W1700KTEST0001', 'W1700K2TEST0001', 'XR1710GTEST0001', 'XR1710G', 'W1700K', 'W1700L000001',
+                       'XR1710H000001', 'XR1710', 'xr1710gtest0001', 'GTK0000000001', 'AXR1710GTEST0001'):
+            with self.subTest(serial=serial):
+                self.identity(serial)
+                self.assertEqual(self.named(), boards.for_serial(serial))
+        self.assertEqual({boards.for_serial('W1700KTEST0001'), boards.for_serial('W1700K2TEST0001')}, {'w1700k'},
+                         'a serial does not tell a W1700K2 from a W1700K')
+        self.assertEqual(boards.for_serial('XR1710GTEST0001'), 'xr1710g')
+
+    def test_the_loader_knows_the_prefixes_the_table_lists(self):
+        sys.path.insert(0, str(ROOT / 'platform'))
+        import boards
+        script = (self.model / 'env' / 'board_id').read_text()
+        for board in boards.ALL:
+            with self.subTest(board=board.key):
+                prefix = board.serial_prefix
+                beyond = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+                self.assertIn(f'if test "x${{serial_number}}" ">" "x{prefix}" && test "x${{serial_number}}" "<" "x{beyond}"; '
+                              f'then setenv board {board.key};', script)
+        self.assertTrue(script.startswith(f'setenv board {boards.UNKNOWN}; '))
+        self.assertEqual(script.count('setenv board '), 1 + len(boards.ALL))
+
+    def test_on_a_w1700k_the_receiver_stays_off(self):
+        self.identity('W1700KTEST0001')
+        self.assertEqual(self.named(), 'w1700k')
+        self.assertEqual(self.led_or_receiver_line(), (True, False))
+        self.assertEqual(self.register('DATA'), 0x00004000, 'and no other line is touched')
+
+    def test_on_an_xr1710g_the_port_led_is_put_out_again(self):
+        """`gps_off` drove the line low, which lights the LED; it is left an output, driven high,
+        which is how stock holds the LED when the port has no link."""
+        self.identity('XR1710GTEST0001')
+        self.assertEqual(self.named(), 'xr1710g')
+        self.assertEqual(self.led_or_receiver_line(), (True, True))
+        self.assertEqual(self.register('DATA'), 0x00004800, 'and no other line is touched')
+        self.assertEqual(self.register('DIRECTION'), 0x10400000)
+
+    def test_a_unit_that_cannot_be_named_is_taken_for_one_with_a_receiver(self):
+        """Erased flash, a partition that cannot be read, an identity with no serial, a serial of
+        some other board, and bytes that are no text at all: the receiver's line stays low."""
+        cases = {'erased': None,
+                 'no serial': b'wan_mac=00:11:22:33:44:55\nmanufacturer=Gemtek\n',
+                 'another board': self.IDENTITY.format(serial='ZZ9000TEST0001').encode(),
+                 'an empty serial': b'serial_number=\nmanufacturer=Gemtek\n',
+                 'a serial cut short': b'serial_number=XR1710',
+                 'not text': bytes(range(1, 256)) * 8,
+                 'the name inside another value': b'wifi_ssid=serial_number=XR1710GTEST0001\n'}
+        for what, text in cases.items():
+            with self.subTest(what=what):
+                self.identity(text=text)
+                self.assertEqual(self.named(), 'unknown')
+                self.assertEqual(self.led_or_receiver_line(), (True, False))
+        self.identity('XR1710GTEST0001')
+        (self.model / 'calibration-unreadable').touch()
+        self.assertEqual(self.named(), 'unknown')
+        self.assertEqual(self.led_or_receiver_line(), (True, False))
+
+    def test_the_receiver_is_switched_off_before_the_unit_is_named(self):
+        bootcmd = (self.model / 'env' / 'bootcmd').read_text()
+        self.assertTrue(bootcmd.startswith('run gps_off; run board_id; run loader_next; '),
+                        'off first, whatever the identity turns out to say; named before a second loader is started')
+        self.assertNotIn('gps_off', (self.model / 'env' / 'board_id').read_text())
+
+    def test_only_the_serial_is_taken_from_the_identity_and_it_is_not_kept(self):
+        """The identity holds the unit's passwords. One variable is asked for by name, it is gone
+        again before anything else runs, and nothing of it is saved or handed to the system."""
+        script = (self.model / 'env' / 'board_id').read_text()
+        self.assertIn('env import -t ${update_spare} 0x800 serial_number;', script)
+        self.assertTrue(script.endswith('; setenv serial_number'))
+        self.identity('XR1710GTEST0001')
+        self.stage(self.NEW, self.OLD)
+        self.assertEqual(self.named(), 'xr1710g')
+        self.assertIn('saveenv', self.lines)
+        self.assertNotIn('board', ' '.join(self.saved()))
+        handed = (self.model / 'bootargs').read_text() + (self.model / 'chosen').read_text()
+        for secret in ('XR1710GTEST0001', 'not-a-real-one', 'nor-is-this', '00:11:22:33:44:55'):
+            self.assertNotIn(secret, handed)
+
+    def test_the_identity_is_read_and_never_written(self):
+        """The harness models no write to `calibration`: one would stop the boot as not modelled."""
+        self.identity('XR1710GTEST0001')
+        before = (self.model / 'calibration').read_bytes()
+        self.named()
+        self.assertEqual((self.model / 'calibration').read_bytes(), before)
+        self.assertEqual(self.identity_reads, 1)
+
+    def test_each_loader_names_the_unit_for_itself(self):
+        self.identity('XR1710GTEST0001')
+        (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
+        self.assertEqual(self.named(), 'xr1710g')
+        self.assertIn('the second loader starts', self.lines)
+        self.assertEqual(self.identity_reads, 2)
+        self.assertEqual(self.led_or_receiver_line(), (True, True))
+
+    def test_every_boot_names_it_anew(self):
+        self.identity('XR1710GTEST0001')
+        self.assertEqual(self.named(), 'xr1710g')
+        self.identity('W1700KTEST0001')
+        self.assertEqual(self.named(), 'w1700k')
+        self.assertEqual(self.led_or_receiver_line(), (True, False))
+
+
 class KeySlot(Model):
     """The paperclip key's slot (durable `key/slot`, written by w1700k-keyslot): the loader reads it
     at every boot and hands it to Linux on the kernel command line, which never opens durable
@@ -537,7 +724,10 @@ class KeySlot(Model):
         lines = handed.read_text().splitlines()
         self.assertEqual(len(lines), 1, 'one system is booted, with one command line')
         self.assertNotIn('left a scratch variable', ' '.join(self.lines))
-        return lines[0]
+        # The board's name is the last word, always (BoardName); the tests here are of the rest.
+        rest, _, self.board = lines[0].rpartition(' w1700k.board=')
+        self.assertRegex(self.board, r'^[a-z0-9]+$')
+        return rest
 
     def test_no_slot_is_said_to_be_empty(self):
         self.assertEqual(self.bootargs(), self.PLAIN + ' w1700k.keyslot=empty')
