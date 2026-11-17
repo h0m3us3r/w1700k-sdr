@@ -182,6 +182,26 @@ Then open `http://HOST:8073/` and press ▶. The first start loads the radio
 firmware and brings the radio up (about 2 s). Without the browser, the same
 operations are `host/bin/w1700k load|start|band|tune|gain|filter|stop|status`.
 
+## Updating from an older version
+
+The flash layout changed on 17 November 2026. A unit installed from a checkout
+older than that cannot take this version as an update: `init/flash` compares
+the unit's partitions with the build's first, and stops without writing
+anything. Move such a unit once, over the serial console, with the host set up
+as for a first installation:
+
+```sh
+make
+init/install --force       # installs again on the new layout; the NAND backup you have is kept
+init/restore --stock-slot  # puts back stock's second firmware slot, which the old layout reached into
+```
+
+The first takes about a minute and a half and empties the unit's durable
+storage. The second rewrites only the blocks that differ from the backup, and
+boots the installed system again. From then on the unit updates over ssh
+(below). [init/README.md](init/README.md#a-unit-installed-from-an-earlier-version)
+has the details.
+
 ## Updating over ssh
 
 Once installed, a unit takes its updates over the Ethernet cable to `lan3`
