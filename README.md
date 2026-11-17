@@ -245,8 +245,10 @@ Every push and every pull request has it run on GitHub
 (`.github/workflows/tests.yml`), a push in the repository pushed to, so a fork
 shows its own result first: `make firmware host`, then `make check`, on
 the oldest Python the project promises and on a current one, with the report
-page kept with each run. A run that fails names each failed test, with what it
-said, on the run's own page (`tools/ci_failures.py`). The tests that need the kernel, the root filesystem
+page kept with each run. GitHub lists a run by its jobs, one a Python, and
+not by its tests: the run's summary page has the breakdown
+(`tools/ci_report.py`), the count, a line for each test module, each skipped
+test with its reason and each failed test with what it said. The tests that need the kernel, the root filesystem
 or the boot images built skip there and say so; they run where `make` has
 been run.
 

@@ -57,14 +57,16 @@ jobs:
         run: make firmware host
 
       - name: Run the tests
+        id: check
         run: |
           set -o pipefail
           make check 2>&1 | tee check.log
-      # Each failed test as an annotation on the run and in its summary, so the reason is read
-      # without opening the log.
-      - name: Say what failed
-        if: failure()
-        run: python3 tools/ci_failures.py check.log
+      # GitHub lists jobs and steps, not tests. This puts the tests on the run's summary page: the
+      # count, a line a module, the skipped ones with their reasons, the failed ones with what
+      # they said; and each failed test as an annotation, which a pull request's checks show.
+      - name: Say what the tests did
+        if: always() && steps.check.outcome != 'skipped'
+        run: python3 tools/ci_report.py check.log
 
       - name: Keep the test report
         if: always()
