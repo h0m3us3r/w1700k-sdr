@@ -32,6 +32,13 @@ constexpr size_t kMinSliceBytes = 4096;          // shorter completions are firm
 constexpr uint64_t kRunGapNs = 1000000000;       // silence that ends a run
 constexpr uint64_t kRunJumpBack = 1 << 20;       // slices back: a new run (the driver was reloaded)
 constexpr uint64_t kRunJumpForward = uint64_t(1) << 39;  // keeps slot indices below the tag's run field
+// A slice this far ahead of the newest one filed is not the next of its stream: within a run no
+// second passes without a slice (kRunGapNs), and at 320 Msps a second is 312,500 of them. One
+// datagram saying so is not believed (it was once: a single forged index then put every real
+// slice a ring behind "the newest", and they were dropped as late for good); kFarConfirm of them
+// in a row at one receiver, agreeing with each other, are a stream that moved, and begin a run.
+constexpr uint64_t kRunJumpAhead = 1 << 20;
+constexpr unsigned kFarConfirm = 16;
 
 uint64_t now_ns()
 {
@@ -89,7 +96,10 @@ void SampleRing::claim(uint64_t index)
     std::atomic_thread_fence(std::memory_order_release);
 }
 
-void SampleRing::put(uint64_t run, uint64_t index, const uint32_t *words)
+// The words of a slice as they came are bytes: a record that follows one of a length that is not
+// a multiple of four (an event's) does not start on a word, so they are never read as uint32_t
+// in place.
+void SampleRing::put(uint64_t run, uint64_t index, const uint8_t *words)
 {
     claim(index);
     std::memcpy(&words_[(index & (slices_ - 1)) * kSliceSamples], words, kSliceSamples * 4);
@@ -98,12 +108,13 @@ void SampleRing::put(uint64_t run, uint64_t index, const uint32_t *words)
 
 // Packed slices back to raw words: of each 8 samples, the 8th's 28 bits sit in the spare bits
 // [31:30] and [15:14] of the other 7 (o_k = w_k | ((w7 << (14 - 2k)) & 0xc000c000)).
-void SampleRing::put_packed(uint64_t run, uint64_t index, const uint32_t *packed)
+void SampleRing::put_packed(uint64_t run, uint64_t index, const uint8_t *bytes)
 {
     claim(index);
     uint32_t *out = &words_[(index & (slices_ - 1)) * kSliceSamples];
-    for (unsigned g = 0; g < kSliceSamples / 8; ++g, packed += 7, out += 8) {
-        uint32_t tail = 0;
+    for (unsigned g = 0; g < kSliceSamples / 8; ++g, bytes += 7 * 4, out += 8) {
+        uint32_t packed[7], tail = 0;
+        std::memcpy(packed, bytes, sizeof(packed));
         for (unsigned k = 0; k < 7; ++k) {
             out[k] = packed[k] & ~0xc000c000u;
             tail |= (packed[k] & 0xc000c000u) >> (14 - 2 * k);
@@ -167,16 +178,23 @@ struct Ingest::Worker {
     };
     std::vector<Partial> partials = std::vector<Partial>(kPartials);
     uint64_t partial_clock = 0, given_up = ~uint64_t(0);  // the last slice counted in `pieces`
+    uint64_t far_seq = 0;                        // the last slice far ahead of its stream (kRunJumpAhead),
+    unsigned far_count = 0;                      // and how many such in a row agreed with each other
     // Written by this worker only, read by stats().
     std::atomic<uint64_t> datagrams{0}, bytes{0}, slices{0}, packed{0}, events{0}, pieces{0}, bad{0}, late{0},
         duplicates{0}, drops{0}, before{0}, spare{0}, stale{0}, stale_lines{0}, reduced{0}, suspect{0};
 };
 
-Ingest::Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads)
+Ingest::Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads, const std::string &unit_ip)
     : ring_(ring), bind_ip_(bind_ip), port_(port), threads_(threads)
 {
     in_addr check;
     if (inet_pton(AF_INET, bind_ip.c_str(), &check) != 1) throw std::runtime_error("not an IPv4 address: " + bind_ip);
+    if (!unit_ip.empty()) {
+        if (inet_pton(AF_INET, unit_ip.c_str(), &check) != 1 || !check.s_addr)
+            throw std::runtime_error("not an IPv4 address: " + unit_ip);
+        unit_ = check.s_addr;
+    }
 }
 
 // Binds the sockets and starts receiving: not before, or the kernel would queue (and then
@@ -220,11 +238,14 @@ void Ingest::work(Worker &w)
 {
     mmsghdr msgs[kBatch];
     iovec iov[kBatch];
+    sockaddr_in from[kBatch];
     char control[kBatch][CMSG_SPACE(sizeof(uint32_t))];
     while (!stopping_.load(std::memory_order_relaxed)) {
         for (unsigned k = 0; k < kBatch; ++k) {
             iov[k] = {&w.buffers[k * kDatagram], kDatagram};
             msgs[k].msg_hdr = msghdr{};
+            msgs[k].msg_hdr.msg_name = &from[k];
+            msgs[k].msg_hdr.msg_namelen = sizeof(from[k]);
             msgs[k].msg_hdr.msg_iov = &iov[k];
             msgs[k].msg_hdr.msg_iovlen = 1;
             msgs[k].msg_hdr.msg_control = control[k];
@@ -237,7 +258,13 @@ void Ingest::work(Worker &w)
         uint64_t t = now_ns(), previous = last_ns_.exchange(t, std::memory_order_acq_rel);
         bool fresh = previous && int64_t(t - previous) > int64_t(kRunGapNs);
         for (int k = 0; k < n; ++k) {
-            take(w, &w.buffers[k * kDatagram], msgs[k].msg_len, fresh && k == 0, t);
+            // Told which unit it serves (--unit), it takes no other sender's word for anything:
+            // not a slice, and not that the stream is alive. The socket's losses are still read.
+            if (unit_ && (msgs[k].msg_hdr.msg_namelen < sizeof(sockaddr_in) || from[k].sin_family != AF_INET ||
+                          from[k].sin_addr.s_addr != unit_))
+                w.bad.fetch_add(1, std::memory_order_relaxed);
+            else
+                take(w, &w.buffers[k * kDatagram], msgs[k].msg_len, fresh && k == 0, t);
             for (cmsghdr *c = CMSG_FIRSTHDR(&msgs[k].msg_hdr); c; c = CMSG_NXTHDR(&msgs[k].msg_hdr, c))
                 if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL) {
                     uint32_t drops;
@@ -340,6 +367,27 @@ size_t Ingest::record(Worker &w, const uint8_t *data, size_t n, uint64_t t)
         run = run_.load(std::memory_order_acquire);
         base = base_.load(std::memory_order_acquire);
     }
+    // Far ahead of the newest slice filed (kRunJumpAhead): not filed, and counted as bad, until
+    // enough of them say the same. Then the stream is there now, and a run begins at it.
+    if (seq >= base && seq - base > newest_of(newest_.load(std::memory_order_relaxed), run) + kRunJumpAhead) {
+        const uint64_t apart = seq > w.far_seq ? seq - w.far_seq : w.far_seq - seq;
+        w.far_count = w.far_count && apart <= kRunJumpAhead ? w.far_count + 1 : 1;
+        w.far_seq = seq;
+        if (w.far_count < kFarConfirm) {
+            w.bad.fetch_add(1, std::memory_order_relaxed);
+            return taken;
+        }
+        std::lock_guard<std::mutex> lock(run_mutex);
+        if (run_.load() == run) {
+            base_.store(seq);
+            newest_.store(placed(run + 1, 0));
+            started_ns_.store(t);
+            run_.store(run + 1, std::memory_order_release);
+        }
+        run = run_.load(std::memory_order_acquire);
+        base = base_.load(std::memory_order_acquire);
+    }
+    w.far_count = 0;
     // A completion a little before the run's first was overtaken on the way: late (or, in the
     // run's first second, from before this server joined the stream).
     if (seq < base) {
@@ -370,15 +418,18 @@ size_t Ingest::record(Worker &w, const uint8_t *data, size_t n, uint64_t t)
         w.reduced.fetch_add(1, std::memory_order_relaxed);
         if (ring_.suspect(run, index)) w.suspect.fetch_add(1, std::memory_order_relaxed);
     } else if (slice_bytes == kRawBytes) {
-        const uint32_t *words = reinterpret_cast<const uint32_t *>(payload);  // 4-aligned in both buffers
         uint64_t spare = 0;
-        for (unsigned k = 0; k < kSliceSamples; ++k) spare += (words[k] & 0xc000c000u) != 0;
+        for (unsigned k = 0; k < kSliceSamples; ++k) {
+            uint32_t word;                       // not read in place: see SampleRing::put
+            std::memcpy(&word, payload + 4 * k, 4);
+            spare += (word & 0xc000c000u) != 0;
+        }
         if (spare) w.spare.fetch_add(spare, std::memory_order_relaxed);
-        ring_.put(run, index, words);
+        ring_.put(run, index, payload);
         w.slices.fetch_add(1, std::memory_order_relaxed);
         check(w, run, index);
     } else {
-        ring_.put_packed(run, index, reinterpret_cast<const uint32_t *>(payload));
+        ring_.put_packed(run, index, payload);
         w.slices.fetch_add(1, std::memory_order_relaxed);
         w.packed.fetch_add(1, std::memory_order_relaxed);
         check(w, run, index);

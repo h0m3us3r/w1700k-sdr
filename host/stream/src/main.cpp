@@ -31,6 +31,8 @@ void usage()
                  "usage: w1700k-stream [options]\n"
                  "  --bind IP         the stream's destination address on this host (default 10.77.0.10)\n"
                  "  --port N          its UDP port (default 7700)\n"
+                 "  --unit IP         take the stream from this sender alone (default: from any; the stream's\n"
+                 "                    link is meant to hold the unit and this host and nothing else)\n"
                  "  --rx-threads N    UDP sockets and receive threads (default 8)\n"
                  "  --workers N       unpacking and correction threads (default 6)\n"
                  "  --ring-mib N      the shared sample ring, a power of two (default 512: 0.42 s at 320 Msps)\n"
@@ -60,7 +62,7 @@ unsigned positive(const std::string &option, const std::string &text, unsigned l
 
 int main(int argc, char **argv)
 {
-    std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME;
+    std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME, unit;
     unsigned port = 7700, rx_threads = 8, workers = 6, ring_mib = 512, receive_mib = kReceiveMib, report = 0;
     bool share_irq_cpu = false;
     try {
@@ -72,6 +74,7 @@ int main(int argc, char **argv)
             };
             if (arg == "--bind") bind = value();
             else if (arg == "--port") port = positive(arg, value(), 65535);
+            else if (arg == "--unit") unit = value();
             else if (arg == "--rx-threads") rx_threads = positive(arg, value(), 64);
             else if (arg == "--workers") workers = positive(arg, value(), 64);
             else if (arg == "--ring-mib") ring_mib = positive(arg, value(), 1u << 16);
@@ -100,7 +103,7 @@ int main(int argc, char **argv)
     try {
         SharedRing shared(name, ring_mib * 128);
         SampleRing received(receive_mib * 128);
-        Ingest ingest(received, bind, port, rx_threads);
+        Ingest ingest(received, bind, port, rx_threads, unit);
         Publisher publisher(received, ingest, shared.header(), workers);
         publisher.start();
         ingest.start();
