@@ -59,6 +59,7 @@ driver, the bare-metal RISC-V firmware and host tools can all include them.
 | [`an7581/npu.h`](an7581/npu.h) | NPU cores, on-chip RAMs, boot and mailbox, bridge, the SM4 coprocessor |
 | [`an7581/snfi.h`](an7581/snfi.h) | SPI-NAND controller, opcodes, vendor BBT/BMT format |
 | [`an7581/w1700k_board.h`](an7581/w1700k_board.h) | W1700K board: parts, console, PCIe links, Ethernet ports and PHYs, GPIOs, flash geometry and partition maps |
+| [`an7581/xr1710g_board.h`](an7581/xr1710g_board.h) | XR1710G board: what was read on a unit, and the little in which it differs from the W1700K |
 
 ## Conventions
 
