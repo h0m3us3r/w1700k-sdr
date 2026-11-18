@@ -53,9 +53,9 @@
  * 28 bits per sample pair (lossless, 8 KiB -> 7 KiB), or with SPLIT reduced to 14 bits per
  * sample pair (iq_format.h, radio-reduced chunk), the others raw for the SoC to reduce. */
 #define RADIO_PACKING_RAW	0u	/* none: up to 160 Msps on one 10 GbE link */
-#define RADIO_PACKING_HALF	1u	/* every other chunk (WM 4 + WA 4 of 16): 320 Msps on 10 GbE */
-#define RADIO_PACKING_FULL	2u	/* every chunk (WM 8 + WA 8 of 16): up to 160 Msps, 7/8 of the bytes */
-#define RADIO_PACKING_SPLIT	3u	/* 10 of 16 chunks reduced to 14 bits (WM 5 + WA 5), 6 raw for the SoC to reduce: 320 Msps on 5 Gbit/s */
+#define RADIO_PACKING_HALF	1u	/* every other chunk (WM 8 + WA 8 of 32): 320 Msps on 10 GbE */
+#define RADIO_PACKING_FULL	2u	/* every chunk (WM 16 + WA 16 of 32): up to 160 Msps, 7/8 of the bytes */
+#define RADIO_PACKING_SPLIT	3u	/* 10 of 16 chunks reduced to 14 bits (of 32: WM 9 + WA 11), 6 of 16 raw for the SoC to reduce: 320 Msps on 5 Gbit/s */
 #define RADIO_PACKINGS		4u
 /* STREAM's results beside a producer's status (stream.h: those are below 0x100) */
 #define RADIO_STREAM_NO_WA	0x100u		/* the WA did not start */

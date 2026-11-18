@@ -252,6 +252,8 @@ __attribute__((used)) void producer(uint32_t packing)
 		}
 	}
 
+	ctl_settle(&ctl);	/* a transaction of a program that is not going to be resumed */
+
 	/* 3., 4. */
 	r->cycles = rdcycle64() - start;
 	r->chunks = chunks;
