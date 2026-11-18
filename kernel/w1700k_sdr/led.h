@@ -4,12 +4,12 @@
  */
 #ifndef W1700K_SDR_LED_H
 #define W1700K_SDR_LED_H
-#include <linux/io.h>
 #include <linux/mutex.h>
+#include <linux/regmap.h>
 #include "w1700k_sdr.h"
 
 struct sdr_led {
-	void __iomem *regs;	/* the AN7581 GPIO block; NULL: no LED */
+	struct regmap *map;	/* the AN7581 GPIO block, as the pin controller has it; NULL: no LED */
 	struct mutex lock;
 	bool taken;		/* the pins are under their generators */
 };

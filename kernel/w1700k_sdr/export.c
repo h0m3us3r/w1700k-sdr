@@ -21,6 +21,7 @@
 #include <linux/mm.h>
 #include <linux/netdevice.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/skbuff.h>
 #include <linux/timekeeping.h>
 #include <linux/udp.h>
@@ -300,9 +301,16 @@ static int sdr_export_thread(void *arg)
 	return 0;
 }
 
-void sdr_export_finish(struct sdr_export *x, u64 end, struct w1700k_sdr_stream_rx *out)
+/*
+ * `leaving`: the device is being removed. The wait for the rest to be sent is made by the
+ * stream's caller with the device held: a caller that is being killed, or a device that is
+ * going, does not sit it out. The thread is told its time is up and has the second it always
+ * had to say that it is done (with the link down it sends nothing however long it is given).
+ */
+void sdr_export_finish(struct sdr_export *x, u64 end, struct w1700k_sdr_stream_rx *out, const bool *leaving)
 {
 	unsigned int waited;
+	bool cut = false;
 	int result;
 
 	if (!x->dev)
@@ -312,6 +320,11 @@ void sdr_export_finish(struct sdr_export *x, u64 end, struct w1700k_sdr_stream_r
 	for (waited = 0; waited < x->cfg.drain_ms + 1000; waited++) {
 		if (smp_load_acquire(&x->done))	/* the thread's counters are final */
 			break;
+		if (!cut && (fatal_signal_pending(current) || READ_ONCE(*leaving))) {
+			WRITE_ONCE(x->drain_until, ktime_get_ns());
+			waited = x->cfg.drain_ms;
+			cut = true;
+		}
 		usleep_range(1000, 2000);
 	}
 	kthread_stop_put(x->task);

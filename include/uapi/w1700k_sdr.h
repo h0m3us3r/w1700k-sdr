@@ -173,8 +173,13 @@ struct w1700k_sdr_stream_export {
 	__u8 dst_mac[6];
 	__u16 cpu;		/* export thread CPU + 1; 0 = any */
 	__u16 flags;		/* W1700K_SDR_EXPORT_* */
-	__u32 drain_ms;		/* after pumping, time allowed to send the rest */
+	__u32 drain_ms;		/* after pumping, time allowed to send the rest: 0..W1700K_SDR_EXPORT_DRAIN_MAX */
 };
+
+/* The rest is what the export had not yet sent when the stream ended: a ring's worth at most,
+ * which a link that carries the stream takes in well under a second. The wait for it is made
+ * with the device held, so it is not one a caller may make as long as it likes. */
+#define W1700K_SDR_EXPORT_DRAIN_MAX 60000U	/* a minute */
 
 #define W1700K_SDR_EXPORT_MAGIC 0x31524453U	/* "SDR1" */
 struct w1700k_sdr_export_header {

@@ -50,7 +50,7 @@ int sdr_export_open(struct sdr_export *x, const struct w1700k_sdr_stream_export 
  * cfg.drain_ms, stop it, wait (at most 2 s) until the device has released
  * every datagram, drop the device and report the export_* fields.
  */
-void sdr_export_finish(struct sdr_export *x, u64 end, struct w1700k_sdr_stream_rx *out);
+void sdr_export_finish(struct sdr_export *x, u64 end, struct w1700k_sdr_stream_rx *out, const bool *leaving);
 
 /* Datagrams still held by a network device; their destructor is in this
  * module and their pages belong to the ring.
