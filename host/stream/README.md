@@ -22,6 +22,7 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 |---|---|---|
 | `--bind IP` | `10.77.0.10` | the stream's destination address on this host (the 10G link) |
 | `--port N` | `7700` | its UDP port |
+| `--unit IP` | any sender | take the stream from this sender alone, the unit's address on the link (`10.77.0.1`) |
 | `--rx-threads N` | 8 | UDP sockets and receive threads (`SO_REUSEPORT`; the unit spreads its source ports) |
 | `--workers N` | 6 | threads that unpack and correct |
 | `--ring-mib N` | 512 | the shared ring, a power of two (512 MiB holds 0.42 s at 320 Msps) |

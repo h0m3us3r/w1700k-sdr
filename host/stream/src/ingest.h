@@ -26,8 +26,8 @@ public:
     unsigned capacity_slices() const { return slices_; }
 
     // Writer: slice `index` of run `run`. Any thread.
-    void put(uint64_t run, uint64_t index, const uint32_t *words);
-    void put_packed(uint64_t run, uint64_t index, const uint32_t *packed);
+    void put(uint64_t run, uint64_t index, const uint8_t *words);
+    void put_packed(uint64_t run, uint64_t index, const uint8_t *packed);
     void put_reduced(uint64_t run, uint64_t index, unsigned format, unsigned scale, const uint8_t *reduced);
     bool put_radio14(uint64_t run, uint64_t index, const uint8_t *chunk);
     // After slot `index` was filed reduced: whether a radio chunk here or beside it was cut under
@@ -68,7 +68,8 @@ public:
         uint64_t suspect = 0;            // radio chunks beside a slice louder than their shift holds
         uint64_t events = 0;             // completions that are not samples (firmware events)
         uint64_t pieces = 0;             // slices sent in pieces that did not all arrive, in order
-        uint64_t bad = 0;                // wrong magic or length
+        uint64_t bad = 0;                // wrong magic or length, an index far ahead of its stream, or
+                                         // (with a unit named) another sender
         uint64_t late = 0;               // older than the run's start or than the ring holds
         uint64_t before_start = 0;       // in a run's first second, from before it (joined late)
         uint64_t duplicates = 0;
@@ -84,7 +85,9 @@ public:
         uint64_t run = 0, newest = 0;
     };
 
-    Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads);
+    // `unit_ip`: the only sender heard, when not empty.
+    Ingest(SampleRing &ring, const std::string &bind_ip, unsigned port, unsigned threads,
+           const std::string &unit_ip = std::string());
     ~Ingest();
     Ingest(const Ingest &) = delete;
     Ingest &operator=(const Ingest &) = delete;
@@ -105,6 +108,7 @@ private:
 
     SampleRing &ring_;
     const std::string bind_ip_;
+    uint32_t unit_ = 0;                  // the unit's address in network order; 0: any sender
     const unsigned port_, threads_;
     std::atomic<bool> stopping_{false};
     std::vector<std::unique_ptr<Worker>> workers_;

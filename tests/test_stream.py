@@ -101,6 +101,7 @@ class Service(unittest.TestCase):
             raise AssertionError("build failed:\n" + result.stdout + result.stderr)
 
     RECEIVE_MIB, RX_THREADS = 64, 2
+    OPTIONS = []
 
     def setUp(self):
         Service.counter += 1
@@ -108,7 +109,7 @@ class Service(unittest.TestCase):
         self.port = free_udp_port()
         self.proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(self.port), "--name", self.name,
                                       "--ring-mib", "16", "--receive-mib", str(self.RECEIVE_MIB), "--workers", "2",
-                                      "--rx-threads", str(self.RX_THREADS)],
+                                      "--rx-threads", str(self.RX_THREADS), *self.OPTIONS],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         deadline = time.monotonic() + 10
         while True:
@@ -375,6 +376,105 @@ class StreamServiceTest(Service):
         run2 = self.wait_newest(40)
         self.assertEqual(run2, run + 1)
         self.assertEqual(self.shm.samples(0), unpacked(noise_words(300)), "the new run counts from its first slice")
+
+
+@unittest.skipIf(build_problem(), build_problem())
+class IndexesNotBelieved(Service):
+    """A slice's index is the sender's word. One that puts the stream somewhere it cannot be is not
+    taken at it; the service goes on publishing either way, and stops when asked (tearDown)."""
+    FAR = 1 << 20           # ingest.cpp's kRunJumpAhead
+
+    def test_one_slice_far_ahead_of_its_stream_moves_nothing(self):
+        for s in range(200):
+            self.send_words(1000 + s, noise_words(s))
+        run = self.wait_newest(200)
+        # just under 2^39 past the run's first, which was once filed as the stream's newest slice:
+        # every real slice after it was then "late", and the publisher set out to walk there
+        for forged in (1000 + (1 << 39) - 1, 1000 + (1 << 30), 1000 + 200 + self.FAR + 1):
+            self.send_words(forged, noise_words(7))
+            time.sleep(0.05)
+        for s in range(200, 400):
+            self.send_words(1000 + s, noise_words(s))
+        self.assertEqual(self.wait_newest(400), run, "the same run, and it went on being published")
+        self.assertEqual(self.shm.samples(399), unpacked(noise_words(399)))
+        self.assertEqual((self.shm.get("bad"), self.shm.get("lost"), self.shm.get("late")), (3, 0, 0))
+
+    def test_a_stream_that_really_is_far_ahead_begins_a_run_once_enough_slices_say_so(self):
+        for s in range(100):
+            self.send_words(1000 + s, noise_words(s))
+        run = self.wait_newest(100)
+        there = 1000 + 5 * self.FAR
+        for s in range(60):
+            self.send_words(there + s, noise_words(500 + s))
+        deadline = time.monotonic() + 10
+        while self.shm.position()[0] == run:
+            self.assertLess(time.monotonic(), deadline, "no new run")
+            time.sleep(0.02)
+        self.assertEqual(self.wait_newest(45), run + 1)
+        self.assertEqual(self.shm.get("bad"), 15, "the slices it took to be believed")
+        self.assertEqual(self.shm.samples(0), unpacked(noise_words(515)), "the run begins at the sixteenth")
+
+    def test_a_stream_further_ahead_than_the_rings_hold_is_published_from_there_at_once(self):
+        # within a run, and ahead by less than is refused: what lies between is lost in one step
+        # (the publisher used to step to it a slot at a time)
+        for s in range(100):
+            self.send_words(s, noise_words(s))
+        self.wait_newest(100)
+        ahead, more = 500000, 1200  # more than the publisher's horizon: the gap's end is then given up too
+        for s in range(more):
+            self.send_words(ahead + s, noise_words(1000 + s % 100))
+        run = self.wait_newest(ahead + more)
+        self.assertEqual(self.shm.get("lost"), ahead - 100, "all of the gap, and none of what came")
+        self.assertEqual(self.shm.samples(ahead + more - 1), unpacked(noise_words(1000 + (more - 1) % 100)))
+        self.assertEqual(tag(run, ahead + more - 1), self.shm.tag(ahead + more - 1))
+
+    def test_a_slice_after_a_record_of_odd_length_is_filed_as_it_came(self):
+        # an event of 13 bytes and then a slice, raw in one datagram and packed in the next: neither
+        # slice begins on a word boundary
+        def record(seq, payload):
+            return struct.pack("<IHHQ", MAGIC, 0, len(payload), seq) + payload
+        raw, packed = noise_words(1), noise_words(2)
+        squeezed = pack(packed)
+        self.send_words(0, noise_words(0))
+        self.sock.sendto(record(1, b"e" * 13) + record(2, struct.pack("<%dI" % len(raw), *raw)), ("127.0.0.1", self.port))
+        self.sock.sendto(record(3, b"e" * 13) + record(4, struct.pack("<%dI" % len(squeezed), *squeezed)),
+                         ("127.0.0.1", self.port))
+        self.send_words(5, noise_words(5))
+        run = self.wait_newest(6)
+        self.assertEqual([self.shm.tag(n) for n in (1, 3)], [tag(run, 1) | TAG_EVENT, tag(run, 3) | TAG_EVENT])
+        self.assertEqual(self.shm.samples(2), unpacked(raw))
+        self.assertEqual(self.shm.samples(4), unpacked(packed))
+        self.assertEqual(self.shm.get("bad"), 0)
+
+
+@unittest.skipIf(build_problem(), build_problem())
+class OnlyTheUnit(Service):
+    """--unit: slices from the address named, and nobody else's word for anything."""
+    OPTIONS = ["--unit", "127.0.0.2"]
+
+    def test_a_named_unit_is_the_only_sender_heard(self):
+        for s in range(40):
+            self.send_words(s, noise_words(100 + s))       # from 127.0.0.1: somebody else
+        time.sleep(0.5)
+        self.assertEqual(self.shm.position(), (0, 0), "no run begun on a stranger's word")
+        self.assertEqual(self.shm.get("bad"), 40)
+        self.sock.close()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.2", 0))
+        for s in range(40):
+            self.send_words(s, noise_words(s))
+        self.wait_newest(40)
+        self.assertEqual(self.shm.samples(39), unpacked(noise_words(39)))
+        self.assertEqual((self.shm.get("bad"), self.shm.get("slices")), (40, 40))
+
+
+class Options(unittest.TestCase):
+    def test_a_unit_that_is_not_an_address_is_refused(self):
+        result = subprocess.run([BINARY, "--unit", "the-unit", "--name", "/w1700k-test-%d-unit" % os.getpid(),
+                                 "--bind", "127.0.0.1", "--port", str(free_udp_port()), "--ring-mib", "16",
+                                 "--receive-mib", "64"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not an IPv4 address: the-unit", result.stderr)
 
 
 @unittest.skipIf(build_problem() or not shutil.which("cc"), build_problem() or "no C compiler")

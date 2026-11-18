@@ -232,6 +232,33 @@ void Publisher::schedule()
         }
         const bool idle = t - seen_at > kIdleNs;
 
+        // The newest completion is further ahead than either ring holds: nothing between here and
+        // there can still be published, and whoever reads the shared ring has been lapped. They
+        // are lost in one step. The loop below would get there a slot at a time, which for an
+        // index that is wrong by 2^39 is days of one CPU, deaf to a request to stop (the receiver
+        // no longer files such an index, ingest.cpp; this does not rely on it).
+        const uint64_t reach = std::max<uint64_t>(raw_.capacity_slices(), load(&out_->ring_slices));
+        if (p.newest > resolved + 2 * reach) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (resolved > dispatched) {  // what is in and settled goes out first
+                jobs_.push_back(Job{sequence++, run, dispatched, resolved, active, true});
+                dispatched = resolved;
+                work_ready_.notify_one();
+            }
+            job_done_.wait(lock, [&] { return stopping_ || (jobs_.empty() && !busy_); });
+            if (stopping_) return;
+            for (auto it = done_.find(next_publish); it != done_.end(); it = done_.find(next_publish)) {
+                done_.erase(it);
+                ++next_publish;
+            }
+            lock.unlock();
+            const uint64_t to = p.newest - raw_.capacity_slices() / 2;
+            lost_ += to - dispatched;
+            resolved = dispatched = published = to;
+            late_since = 0;
+            publish_position(run, published);
+        }
+
         bool overdue = false;
         while (resolved < p.newest) {
             const uint64_t tag = raw_.tag(resolved);
