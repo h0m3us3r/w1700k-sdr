@@ -586,5 +586,237 @@ class SpectrumServerTest(unittest.TestCase):
         ws.wait(lambda: sum("--no-controller" in n["text"] for n in ws.notices) == 2, what="two refusals")
 
 
+@unittest.skipIf(build_problem(), build_problem())
+class WhoIsAnswered(unittest.TestCase):
+    """The page drives a receiver: a request is answered when it was meant for this server (its
+    Host is a name the server knows itself by), a socket when its page is this server's, and
+    beyond this machine both only with the server's token. And a reader that does not read gets
+    no more than a little held for it."""
+    TOKEN = "a-token-of-the-tests-own"
+
+    @classmethod
+    def setUpClass(cls):
+        result = subprocess.run(["make", "-C", SPECTRUM], capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError("build failed:\n" + result.stdout + result.stderr)
+
+    def serve(self, *options, listen="127.0.0.1:0", token=None):
+        """A passive server (no stream, no controller); its port, and what it said as it started."""
+        env = dict(os.environ)
+        env.pop("W1700K_SPECTRUM_TOKEN", None)
+        if token:
+            env["W1700K_SPECTRUM_TOKEN"] = token
+        self.process = subprocess.Popen([BINARY, "--listen", listen, "--stream", "/w1700k-sptest-none-%d" % os.getpid(),
+                                         "--no-controller", *options], stderr=subprocess.PIPE, text=True, env=env)
+        self.addCleanup(self.process.stderr.close)
+        self.addCleanup(self.process.wait, 10)
+        self.addCleanup(self.process.terminate)
+        # what it says as it starts: where it serves, the names it answers to, and beyond this
+        # machine (or with a token of the user's) the link to open, with a line on the token
+        beyond = listen != "127.0.0.1:0"
+        said = []
+        for _ in range(2 + (1 if token or beyond else 0) + (1 if beyond and "--no-token" in options else 0)):
+            line = self.process.stderr.readline()
+            if not line:
+                raise AssertionError("the server did not start: %s" % said)
+            said.append(line.rstrip())
+        self.port = int(said[0].split("http://", 1)[1].split("/", 1)[0].rsplit(":", 1)[1])
+        return said
+
+    def ask(self, target="/", host=None, headers=(), method="GET", upgrade=False):
+        """One request on a connection of its own: (status code, {header: value}, body)."""
+        lines = ["%s %s HTTP/1.1" % (method, target), "Host: %s" % (host or "127.0.0.1:%d" % self.port), *headers]
+        if upgrade:
+            lines += ["Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Version: 13",
+                      "Sec-WebSocket-Key: " + base64.b64encode(os.urandom(16)).decode()]
+        else:
+            lines += ["Connection: close"]
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as link:
+            link.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+            data = b""
+            while b"\r\n\r\n" not in data:
+                piece = link.recv(65536)
+                if not piece:
+                    break
+                data += piece
+            head, _, body = data.partition(b"\r\n\r\n")
+            fields = dict(line.split(": ", 1) for line in head.decode().split("\r\n")[1:] if ": " in line)
+            want = int(fields.get("Content-Length", 0)) if not upgrade else 0
+            while len(body) < want:
+                piece = link.recv(65536)
+                if not piece:
+                    break
+                body += piece
+        return int(head.split()[1]), fields, body
+
+    def test_a_request_is_answered_under_the_servers_own_names_and_no_other(self):
+        said = self.serve()
+        here = "127.0.0.1:%d" % self.port
+        self.assertIn("127.0.0.1", said[1])
+        self.assertIn("localhost", said[1], "it says which names it answers to")
+        for host in (here, "localhost:%d" % self.port, "LOCALHOST:%d" % self.port, "[::1]:%d" % self.port,
+                     "%s:%d" % (socket.gethostname(), self.port)):
+            with self.subTest(host):
+                self.assertEqual(self.ask(host=host)[0], 200)
+                self.assertEqual(self.ask("/ws", host=host, headers=["Origin: http://" + host], upgrade=True)[0], 101)
+        # a page on another site, whose name was made to resolve here: its Host and Origin agree
+        for host in ("attacker.example:%d" % self.port, "attacker.example", "127.0.0.1:%d" % (self.port + 1), "127.0.0.1",
+                     "", "127.0.0.1:%d@attacker.example" % self.port):
+            with self.subTest(host):
+                status, _, body = self.ask(host=host or " ")
+                self.assertEqual(status, 421)
+                self.assertIn(b"--host NAME", body)
+                self.assertNotIn(socket.gethostname().encode(), body, "which names it has is not told to whoever asks")
+                self.assertEqual(self.ask("/ws", host=host or " ", headers=["Origin: http://" + host], upgrade=True)[0], 421)
+
+    def test_a_socket_is_opened_for_the_servers_own_page_and_for_no_other_sites(self):
+        self.serve()
+        here = "127.0.0.1:%d" % self.port
+        for origin, status in (("http://" + here, 101), ("http://localhost:%d" % self.port, 101), (None, 101),
+                               ("http://attacker.example:%d" % self.port, 403), ("https://" + here + ".attacker.example", 403),
+                               ("http://127.0.0.1", 403), ("null", 403)):
+            with self.subTest(origin):
+                headers = ["Origin: " + origin] if origin else []
+                self.assertEqual(self.ask("/ws", headers=headers, upgrade=True)[0], status)
+        # what a proxy says it was asked for is not taken on its word, unless one is there
+        self.assertEqual(self.ask("/ws", headers=["Origin: http://front.example", "X-Forwarded-Host: front.example"],
+                                  upgrade=True)[0], 403)
+
+    def test_names_and_origins_it_is_told_of(self):
+        self.serve("--host", "Viewer.Example", "--allow-origin", "https://front.example/")
+        self.assertEqual(self.ask(host="viewer.example:%d" % self.port)[0], 200)
+        self.assertEqual(self.ask(host="other.example:%d" % self.port)[0], 421)
+        self.assertEqual(self.ask("/ws", headers=["Origin: https://front.example"], upgrade=True)[0], 101)
+        self.assertEqual(self.ask("/ws", headers=["Origin: https://front.example:8443"], upgrade=True)[0], 403)
+
+    def test_behind_a_proxy_the_name_is_the_one_the_proxy_was_asked_for(self):
+        self.serve("--behind-proxy", "--host", "sdr.example")
+        forwarded = ["X-Forwarded-Host: sdr.example"]
+        self.assertEqual(self.ask(host="127.0.0.1:%d" % self.port, headers=forwarded)[0], 200)
+        self.assertEqual(self.ask("/ws", headers=forwarded + ["Origin: https://sdr.example"], upgrade=True)[0], 101)
+        self.assertEqual(self.ask(headers=["X-Forwarded-Host: attacker.example"])[0], 421)
+        self.assertEqual(self.ask("/ws", headers=forwarded + ["Origin: https://attacker.example"], upgrade=True)[0], 403)
+
+    def test_with_a_token_nothing_is_answered_without_it(self):
+        said = self.serve(token=self.TOKEN)
+        self.assertEqual(said[-1].split()[:2], ["open", "http://127.0.0.1:%d/?token=%s" % (self.port, self.TOKEN)])
+        cookie = "Cookie: other=1; w1700k-%d=%s" % (self.port, self.TOKEN)
+        for target in ("/", "/app.js", "/ws"):
+            with self.subTest(target):
+                status, _, body = self.ask(target, upgrade=target == "/ws")
+                self.assertEqual(status, 401)
+                self.assertIn(b"?token=", body)
+                self.assertNotIn(self.TOKEN.encode(), body)
+                self.assertEqual(self.ask(target, headers=["Cookie: w1700k-%d=%s" % (self.port, "x" * len(self.TOKEN))],
+                                          upgrade=target == "/ws")[0], 401)
+                self.assertEqual(self.ask(target + "?token=" + self.TOKEN[:-1], upgrade=target == "/ws")[0], 401)
+                self.assertEqual(self.ask(target, headers=[cookie], upgrade=target == "/ws")[0], 101 if target == "/ws" else 200)
+        # the link: the token leaves the address for a cookie that only this server's pages send
+        status, fields, _ = self.ask("/?token=" + self.TOKEN)
+        self.assertEqual((status, fields["Location"]), (303, "/"))
+        self.assertEqual(fields["Set-Cookie"], "w1700k-%d=%s; Path=/; HttpOnly; SameSite=Strict" % (self.port, self.TOKEN))
+        self.assertEqual(self.ask("//attacker.example/?token=" + self.TOKEN)[1]["Location"], "/", "and leads nowhere else")
+        # a client that is not a browser
+        self.assertEqual(self.ask("/ws?token=" + self.TOKEN, upgrade=True)[0], 101)
+        self.assertEqual(self.ask("/app.js", headers=["Authorization: Bearer " + self.TOKEN])[0], 200)
+        self.assertEqual(self.ask("/app.js", host="attacker.example:%d" % self.port, headers=[cookie])[0], 421,
+                         "the token does not make up for the name")
+
+    def test_on_this_machine_alone_no_token_is_wanted_and_beyond_it_one_is_made(self):
+        said = self.serve()
+        self.assertFalse(any(line.startswith("open ") for line in said))
+        self.assertEqual(self.ask()[0], 200)
+        self.process.terminate()
+        self.process.wait(10)
+        said = self.serve(listen="0.0.0.0:0")
+        link = said[-1].split()[1]
+        token = link.split("?token=")[1]
+        self.assertRegex(token, "^[0-9a-f]{32}$")
+        self.assertNotIn("127.0.0.1", link.split("?")[0], "a link that can be opened from another machine")
+        self.assertEqual(self.ask()[0], 401)
+        self.assertEqual(self.ask("/app.js?token=" + token)[0], 303)
+        self.assertEqual(self.ask("/app.js", headers=["Cookie: w1700k-%d=%s" % (self.port, token)])[0], 200)
+        self.process.terminate()
+        self.process.wait(10)
+        said = self.serve("--no-token", listen="0.0.0.0:0")
+        self.assertIn("NO TOKEN IS WANTED", said[-1])
+        self.assertEqual(self.ask()[0], 200)
+
+    def test_a_token_that_is_too_little_is_refused(self):
+        for token in ("short", "sixteen or more, with spaces"):
+            result = subprocess.run([BINARY, "--no-controller"], env=dict(os.environ, W1700K_SPECTRUM_TOKEN=token),
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("W1700K_SPECTRUM_TOKEN has to be 16 or more", result.stderr)
+
+    def rss_mib(self):
+        with open("/proc/%d/status" % self.process.pid) as status:
+            return next(int(line.split()[1]) for line in status if line.startswith("VmRSS:")) / 1024
+
+    def test_a_reader_that_does_not_read_is_not_answered_without_end(self):
+        self.serve()
+        before = self.rss_mib()
+        request = ("GET /app.js HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % self.port).encode()
+        link = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        self.addCleanup(link.close)
+        link.settimeout(2)
+        try:
+            for _ in range(80):                      # some 4 MB of requests: 65 KiB asked for by each
+                link.sendall(request * 1000)
+        except OSError:
+            pass                                     # the server stopped listening to it: as it should
+        time.sleep(0.5)
+        self.assertLess(self.rss_mib() - before, 64, "what is held for it is bounded (this was a gigabyte)")
+        self.assertEqual(self.ask()[0], 200, "and everybody else is served")
+        deadline = time.monotonic() + 15
+        link.settimeout(1)
+        while time.monotonic() < deadline:           # and it is let go of, read or not
+            try:
+                if not link.recv(1 << 20):
+                    break
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+        else:
+            self.fail("the connection was kept")
+
+    def test_more_connections_than_a_few_pages_make_are_not_kept(self):
+        self.serve()
+        held = []
+        self.addCleanup(lambda: [link.close() for link in held])
+        for _ in range(90):
+            held.append(socket.create_connection(("127.0.0.1", self.port), timeout=5))
+        time.sleep(0.5)
+        dropped = 0
+        for link in held:
+            link.setblocking(False)
+            try:
+                dropped += link.recv(1) == b""
+            except BlockingIOError:
+                pass
+            except OSError:
+                dropped += 1
+        self.assertGreaterEqual(dropped, 90 - 64)
+        self.assertLess(dropped, 90 - 32, "those within the number are kept")
+        for link in held:
+            link.close()
+        held.clear()
+        time.sleep(0.3)
+        self.assertEqual(self.ask()[0], 200)
+
+    def test_files_served_from_a_directory_are_that_directorys(self):
+        base = tempfile.mkdtemp(prefix="spectrum-web-")
+        self.addCleanup(shutil.rmtree, base, True)
+        os.mkdir(os.path.join(base, "web"))
+        with open(os.path.join(base, "web", "index.html"), "w") as page:
+            page.write("the page\n")
+        with open(os.path.join(base, "web-notes.txt"), "w") as beside:
+            beside.write("beside the directory, its name beginning with the directory's\n")
+        self.serve("--web", os.path.join(base, "web"))
+        self.assertEqual(self.ask("/index.html")[2], b"the page\n")
+        self.assertEqual(self.ask("-notes.txt")[0], 404, "a target with no leading slash named the file beside it")
+
+
 if __name__ == "__main__":
     unittest.main()

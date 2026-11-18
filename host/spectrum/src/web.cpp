@@ -12,11 +12,13 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -28,6 +30,13 @@ namespace {
 
 constexpr size_t kMaxRequestHeader = 16384;
 constexpr size_t kMaxMessage = 65536;           // client messages are small
+// A reader that asks for more while this much of what it asked for is still unsent is not
+// reading: it gets what is queued and the connection is closed. (Each answer was appended, and a
+// megabyte of requests for the page's script was a gigabyte of answers held here.)
+constexpr size_t kHttpBacklog = 1 << 20;
+constexpr size_t kMaxConnections = 64;
+constexpr auto kCloseWithin = 10s;              // what a closing connection has to take its last bytes
+constexpr auto kAcceptPause = 250ms;            // no descriptor for a new connection: look again then
 constexpr size_t kMinCompressed = 64;           // shorter messages go uncompressed
 constexpr auto kPingInterval = 10s;
 constexpr auto kIdleTimeout = 40s;              // nothing received: the peer is gone
@@ -151,6 +160,55 @@ std::string etag(const std::string &data)
 
 void set_nonblocking(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
 
+// Equal, in a time that does not say where they differ.
+bool same_secret(const std::string &a, const std::string &b)
+{
+    unsigned char differ = a.size() != b.size();
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) differ |= static_cast<unsigned char>(a[i] ^ b[i]);
+    return !differ;
+}
+
+std::string random_token()
+{
+    unsigned char bytes[16];
+    if (getrandom(bytes, sizeof(bytes), 0) != ssize_t(sizeof(bytes))) throw std::runtime_error("no random bytes for the access token");
+    static const char digits[] = "0123456789abcdef";
+    std::string text;
+    for (unsigned char b : bytes) {
+        text += digits[b >> 4];
+        text += digits[b & 15];
+    }
+    return text;
+}
+
+// "name=value" among `fields`, which `separator` divides: a query's or a Cookie header's.
+std::string field(const std::string &fields, char separator, const std::string &name)
+{
+    for (const auto &part : split(fields, separator)) {
+        const std::string one = trim(part);
+        if (one.compare(0, name.size() + 1, name + "=") == 0) return one.substr(name.size() + 1);
+    }
+    return {};
+}
+
+// "NAME" or "NAME:PORT" or "[v6]:PORT", in lower case: the name (a v6 address in its brackets)
+// and the port. False for what is neither.
+bool split_host(const std::string &host, std::string &name, std::string &port)
+{
+    port.clear();
+    name = lower(trim(host));
+    if (!name.empty() && name[0] == '[') {
+        const size_t end = name.find(']');
+        if (end == std::string::npos || (end + 1 < name.size() && name[end + 1] != ':')) return false;
+        if (end + 1 < name.size()) port = name.substr(end + 2);
+        name.resize(end + 1);
+    } else if (const size_t colon = name.rfind(':'); colon != std::string::npos) {
+        port = name.substr(colon + 1);
+        name.resize(colon);
+    }
+    return !name.empty() && name.find_first_of("/\\@ \t") == std::string::npos;
+}
+
 }  // namespace
 
 struct WebServer::Asset {
@@ -167,6 +225,7 @@ struct WebServer::Connection {
     bool closing = false;          // close once the output is written
     bool draining = false;         // output done and our side shut: reading until the peer closes
     Clock::time_point drain_until;
+    Clock::time_point close_by{};  // closing: when its last bytes have to be gone
     bool dead = false;             // to be removed by reap()
     bool writable_wait = false;    // registered for EPOLLOUT
     uint64_t sent = 0;
@@ -189,8 +248,8 @@ struct WebServer::Connection {
     size_t pending() const { return output.size() - output_at; }
 };
 
-WebServer::WebServer(const std::string &listen, const std::string &web_dir, Handler handler)
-    : handler_(std::move(handler)), web_dir_(web_dir)
+WebServer::WebServer(const std::string &listen, const std::string &web_dir, Handler handler, Access access)
+    : handler_(std::move(handler)), web_dir_(web_dir), access_(std::move(access))
 {
     for (size_t i = 0; i < kWebFileCount; ++i) {
         auto asset = std::make_unique<Asset>();
@@ -228,6 +287,9 @@ WebServer::WebServer(const std::string &listen, const std::string &web_dir, Hand
             getnameinfo(reinterpret_cast<sockaddr *>(&bound), length, name, sizeof(name), service, sizeof(service),
                         NI_NUMERICHOST | NI_NUMERICSERV);
             address_ = (a->ai_family == AF_INET6 ? "[" + std::string(name) + "]" : std::string(name)) + ":" + service;
+            port_ = service;
+            const std::string literal = a->ai_family == AF_INET6 ? "[" + std::string(name) + "]" : std::string(name);
+            bound_ = literal == "0.0.0.0" || literal == "[::]" ? std::string() : literal;
         } else {
             ::close(fd);
         }
@@ -235,6 +297,12 @@ WebServer::WebServer(const std::string &listen, const std::string &web_dir, Hand
     freeaddrinfo(found);
     if (listener_ < 0) throw std::runtime_error("cannot listen on " + listen + ": " + std::strerror(errno));
     set_nonblocking(listener_);
+    learn_names();
+    const bool loopback = bound_ == "[::1]" || bound_.compare(0, 4, "127.") == 0;
+    // A token given is wanted wherever the server listens; without one, a token is made once
+    // the server can be reached from beyond this machine.
+    if (access_.token && !access_.token_value.empty()) token_ = access_.token_value;
+    else if (access_.token && !loopback) token_ = random_token();
 
     epoll_ = epoll_create1(EPOLL_CLOEXEC);
     event_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -244,6 +312,112 @@ WebServer::WebServer(const std::string &listen, const std::string &web_dir, Hand
     epoll_ctl(epoll_, EPOLL_CTL_ADD, listener_, &ev);
     ev.data.u64 = ~0ull;
     epoll_ctl(epoll_, EPOLL_CTL_ADD, event_, &ev);
+}
+
+// The names this server is asked for by: the address it listens on, or with all of them every
+// address this machine has now; the machine's name, as it is and as mDNS gives it; localhost;
+// and the names it was told. Looked up again when a name is not among them (an interface may
+// have come since), at most once a second.
+void WebServer::learn_names()
+{
+    names_.clear();
+    names_at_ = Clock::now();
+    for (const char *local : {"localhost", "127.0.0.1", "[::1]"}) names_.insert(local);
+    for (const auto &given : access_.hosts) {
+        std::string name, port;
+        if (split_host(given, name, port)) names_.insert(name);
+    }
+    char machine[256] = "";
+    if (gethostname(machine, sizeof(machine) - 1) == 0 && machine[0]) {
+        const std::string name = lower(machine), bare = name.substr(0, name.find('.'));
+        names_.insert(name);
+        names_.insert(bare);
+        names_.insert(bare + ".local");
+    }
+    if (!bound_.empty()) {
+        names_.insert(bound_);
+        return;
+    }
+    ifaddrs *all = nullptr;
+    if (getifaddrs(&all)) return;
+    for (ifaddrs *one = all; one; one = one->ifa_next) {
+        if (!one->ifa_addr) continue;
+        const int family = one->ifa_addr->sa_family;
+        if (family != AF_INET && family != AF_INET6) continue;
+        char text[NI_MAXHOST];
+        if (getnameinfo(one->ifa_addr, family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6), text, sizeof(text),
+                        nullptr, 0, NI_NUMERICHOST))
+            continue;
+        std::string address = lower(text);
+        address.resize(address.find('%') == std::string::npos ? address.size() : address.find('%'));  // a link's scope
+        names_.insert(family == AF_INET6 ? "[" + address + "]" : address);
+    }
+    freeifaddrs(all);
+}
+
+bool WebServer::answers_to(const std::string &host)
+{
+    std::string name, port;
+    if (!split_host(host, name, port)) return false;
+    if (!access_.behind_proxy && port != port_ && !(port.empty() && port_ == "80")) return false;
+    if (names_.count(name)) return true;
+    if (Clock::now() - names_at_ < 1s) return false;
+    learn_names();
+    return names_.count(name) != 0;
+}
+
+// A browser's Origin, "scheme://host[:port]": this server under one of its names, or an origin
+// it was told of.
+bool WebServer::origin_allowed(std::string origin)
+{
+    origin = lower(trim(origin));
+    while (!origin.empty() && origin.back() == '/') origin.pop_back();
+    for (const auto &given : access_.origins) {
+        std::string known = lower(trim(given));
+        while (!known.empty() && known.back() == '/') known.pop_back();
+        if (origin == known) return true;
+    }
+    const size_t scheme = origin.find("://");
+    if (scheme == std::string::npos) return false;
+    std::string host = origin.substr(scheme + 3), name, port;
+    if (!split_host(host, name, port)) return false;
+    if (port.empty()) host += origin.compare(0, scheme, "https") == 0 ? ":443" : ":80";
+    return answers_to(host);
+}
+
+bool WebServer::authorized(const std::map<std::string, std::string> &headers, const std::string &query) const
+{
+    if (token_.empty()) return true;
+    auto header = [&](const char *name) {
+        auto it = headers.find(name);
+        return it == headers.end() ? std::string() : it->second;
+    };
+    return same_secret(field(query, '&', "token"), token_) ||
+           same_secret(field(header("cookie"), ';', "w1700k-" + port_), token_) ||
+           same_secret(header("authorization"), "Bearer " + token_);
+}
+
+std::vector<std::string> WebServer::names()
+{
+    learn_names();
+    return {names_.begin(), names_.end()};
+}
+
+// An address to open: the one listened on, or with all of them one of this machine's that is
+// not loopback (a v4 one before a v6 one), with the token when one is wanted.
+std::string WebServer::link()
+{
+    std::string host = bound_;
+    if (host.empty()) {
+        learn_names();
+        for (const auto &name : names_) {
+            const bool address = name.find_first_not_of("0123456789.") == std::string::npos || name[0] == '[';
+            const bool local = name == "[::1]" || name.compare(0, 4, "127.") == 0 || name.compare(0, 5, "[fe80") == 0;
+            if (address && !local && (host.empty() || (host[0] == '[' && name[0] != '['))) host = name;
+        }
+        if (host.empty()) host = "127.0.0.1";
+    }
+    return "http://" + host + ":" + port_ + "/" + (token_.empty() ? "" : "?token=" + token_);
 }
 
 WebServer::~WebServer()
@@ -292,7 +466,9 @@ void WebServer::run(const std::atomic<bool> &stop)
             for (auto &entry : connections_) {
                 Connection &c = *entry.second;
                 if (c.dead) continue;
-                if (c.draining ? now > c.drain_until : now - c.last_input > (c.websocket ? kIdleTimeout : 15s)) {
+                if (c.closing && !c.draining && c.close_by == Clock::time_point{}) c.close_by = now + kCloseWithin;
+                if (c.draining ? now > c.drain_until
+                               : (c.closing && now > c.close_by) || now - c.last_input > (c.websocket ? kIdleTimeout : 15s)) {
                     c.dead = true;
                 } else if (c.websocket && !c.closing && now - c.last_ping > kPingInterval) {
                     c.last_ping = now;
@@ -300,6 +476,13 @@ void WebServer::run(const std::atomic<bool> &stop)
                 }
             }
             reap();
+            if (accept_paused_ && now >= accept_again_) {
+                accept_paused_ = false;
+                epoll_event ev{};
+                ev.events = EPOLLIN;
+                ev.data.u64 = 0;
+                epoll_ctl(epoll_, EPOLL_CTL_ADD, listener_, &ev);
+            }
         }
     }
 }
@@ -316,7 +499,21 @@ void WebServer::accept_clients()
         sockaddr_storage address{};
         socklen_t length = sizeof(address);
         int fd = accept4(listener_, reinterpret_cast<sockaddr *>(&address), &length, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (fd < 0) return;
+        if (fd < 0) {
+            // No descriptor or no memory for it: the connection stays in the queue and the
+            // listener stays readable, so it is left out of the wait for a moment rather than
+            // asked again at once, forever.
+            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM) {
+                epoll_ctl(epoll_, EPOLL_CTL_DEL, listener_, nullptr);
+                accept_paused_ = true;
+                accept_again_ = Clock::now() + kAcceptPause;
+            }
+            return;
+        }
+        if (connections_.size() >= kMaxConnections) {  // a page holds two or three
+            ::close(fd);
+            continue;
+        }
         int yes = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
         // A small send buffer keeps frames queued here, where they can still
@@ -345,7 +542,7 @@ void WebServer::receive(Connection &c)
     for (;;) {
         ssize_t n = read(c.fd, buffer, sizeof(buffer));
         if (n > 0) {
-            if (!c.draining) c.input.append(buffer, size_t(n));
+            if (!c.draining && !c.closing) c.input.append(buffer, size_t(n));  // a closing one is heard no more
             c.last_input = Clock::now();
             if (c.input.size() > kMaxMessage + kMaxRequestHeader + 16) break;
             continue;
@@ -430,9 +627,22 @@ void WebServer::close(unsigned client, uint16_t code, const std::string &reason)
 
 // ---- HTTP -------------------------------------------------------------------------------------
 
+void WebServer::refuse(Connection &c, const char *status, const std::string &why)
+{
+    c.output += std::string("HTTP/1.1 ") + status + "\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                "Cache-Control: no-store\r\nContent-Length: " + std::to_string(why.size()) + "\r\nConnection: close\r\n\r\n" + why;
+    c.closing = true;
+}
+
 void WebServer::handle_http(Connection &c)
 {
     while (!c.websocket && !c.closing && !c.dead) {
+        if (c.pending() > kHttpBacklog) {  // asking faster than taking: no more is answered
+            c.closing = true;
+            c.input.clear();
+            flush(c);
+            return;
+        }
         size_t end = c.input.find("\r\n\r\n");
         if (end == std::string::npos) {
             if (c.input.size() > kMaxRequestHeader) {
@@ -462,9 +672,32 @@ void WebServer::handle_http(Connection &c)
                                                 : has_token(headers["connection"], "keep-alive");
         if (headers.count("content-length") && headers["content-length"] != "0") keep_alive = false;
 
-        if (path == "/ws") {
+        const std::string query = target.find('?') == std::string::npos ? std::string() : target.substr(target.find('?') + 1);
+        const std::string asked = access_.behind_proxy && headers.count("x-forwarded-host") ? headers["x-forwarded-host"]
+                                                                                             : headers["host"];
+        if (!answers_to(asked)) {
+            // Not said: which names it does answer to. A page that got here under a name of its
+            // own could read that.
+            refuse(c, "421 Misdirected Request",
+                   "This spectrum server is not known by the name it was asked for.\n"
+                   "It answers to its own addresses, this machine's name and localhost; start it with\n"
+                   "--host NAME to add a name (it lists the names it answers to when it starts).\n");
+        } else if (!authorized(headers, query)) {
+            refuse(c, "401 Unauthorized",
+                   "This spectrum server wants its access token.\n"
+                   "Open the link it printed when it started: the one that ends in ?token=...\n");
+        } else if (path == "/ws") {
             if (upgrade(c, headers)) return;
             c.closing = true;
+        } else if (!token_.empty() && !field(query, '&', "token").empty()) {
+            // The link that was printed: the token leaves the address for a cookie, so that it is
+            // not kept in the history or shown on a shared screen, and the page's own requests
+            // and its socket carry it.
+            const bool local = path.size() >= 1 && path[0] == '/' && path.compare(0, 2, "//") != 0;
+            c.output += "HTTP/1.1 303 See Other\r\nLocation: " + (local ? path : std::string("/")) + "\r\nSet-Cookie: w1700k-" +
+                        port_ + "=" + token_ + "; Path=/; HttpOnly; SameSite=Strict\r\nCache-Control: no-store\r\n"
+                        "Content-Length: 0\r\n\r\n";
+            if (!keep_alive) c.closing = true;
         } else {
             respond(c, method, path, headers);
             if (!keep_alive) c.closing = true;
@@ -490,7 +723,7 @@ void WebServer::respond(Connection &c, const std::string &method, const std::str
     const Asset *asset = nullptr;
     if (!web_dir_.empty()) {
         // Development: read the file on every request.
-        if (name.find("..") == std::string::npos && name.find('/', 1) == std::string::npos) {
+        if (!name.empty() && name[0] == '/' && name.find("..") == std::string::npos && name.find('/', 1) == std::string::npos) {
             std::ifstream file(web_dir_ + name, std::ios::binary);
             if (file) {
                 loaded.path = name;
@@ -512,7 +745,7 @@ void WebServer::respond(Connection &c, const std::string &method, const std::str
     }
 
     std::string common = "Content-Type: " + asset->type + "\r\nCache-Control: no-cache\r\nETag: " + asset->tag +
-                         "\r\nVary: Accept-Encoding\r\nX-Content-Type-Options: nosniff\r\n"
+                         "\r\nVary: Accept-Encoding\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
                          "Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; "
                          "img-src 'self' data:; frame-ancestors 'none'\r\n";
     if (header("if-none-match") == asset->tag) {
@@ -538,15 +771,12 @@ bool WebServer::upgrade(Connection &c, const std::map<std::string, std::string> 
         c.output += "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         return false;
     }
-    // A page from another site must not drive the receiver from the
-    // viewer's browser: a browser's Origin must name this server.
-    if (std::string origin = header("origin"); !origin.empty()) {
-        size_t scheme = origin.find("://");
-        std::string origin_host = lower(scheme == std::string::npos ? origin : origin.substr(scheme + 3));
-        if (origin_host != lower(header("host")) && origin_host != lower(header("x-forwarded-host"))) {
-            c.output += "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            return false;
-        }
+    // A page from another site must not drive the receiver from the viewer's browser: a
+    // browser's Origin has to be this server under one of its names (not merely equal to the
+    // Host it sent, which a page reached by a name of its own also is), or an origin named.
+    if (std::string origin = header("origin"); !origin.empty() && !origin_allowed(origin)) {
+        c.output += "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        return false;
     }
 
     std::string extension;

@@ -15,6 +15,14 @@ void usage()
     std::fprintf(stderr,
                  "usage: w1700k-spectrum [options]\n"
                  "  --listen ADDR:PORT  the web page (default 127.0.0.1:8073)\n"
+                 "  --host NAME         a name the server answers to, beside its own addresses, this machine's\n"
+                 "                      name and localhost (a DNS name, a proxy's); may be given more than once\n"
+                 "  --allow-origin URL  another origin whose pages may open the socket (a front end served\n"
+                 "                      from elsewhere), as scheme://host[:port]; may be given more than once\n"
+                 "  --behind-proxy      a reverse proxy passes requests on: the name is its X-Forwarded-Host\n"
+                 "  --no-token          listening beyond this machine, want no access token (default: the\n"
+                 "                      server makes one and prints the link that carries it; a token of\n"
+                 "                      your own, 16 or more of A-Z a-z 0-9 _ -, in W1700K_SPECTRUM_TOKEN)\n"
                  "  --web DIR           serve the page from DIR instead of the built-in copy\n"
                  "  --stream NAME       w1700k-stream's shared memory (default /w1700k-stream)\n"
                  "  --fft-threads N     FFT workers (default 4)\n"
@@ -68,6 +76,10 @@ int main(int argc, char **argv)
             };
             if (arg == "--listen") o.listen = value();
             else if (arg == "--web") o.web_dir = value();
+            else if (arg == "--host") o.hosts.push_back(value());
+            else if (arg == "--allow-origin") o.origins.push_back(value());
+            else if (arg == "--behind-proxy") o.behind_proxy = true;
+            else if (arg == "--no-token") o.token = false;
             else if (arg == "--stream") o.stream = value();
             else if (arg == "--fft-threads") o.fft_threads = positive(arg, value());
             else if (arg == "--controller") o.controller = value();
@@ -84,6 +96,15 @@ int main(int argc, char **argv)
             }
         }
         if (o.controller.find_first_not_of(" \t") == std::string::npos) o.controller.clear();
+        if (const char *token = std::getenv("W1700K_SPECTRUM_TOKEN"); token && *token) {
+            o.token_value = token;
+            if (o.token_value.size() < 16 ||
+                o.token_value.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != std::string::npos)
+                throw std::runtime_error("W1700K_SPECTRUM_TOKEN has to be 16 or more of A-Z a-z 0-9 _ -");
+        }
+        for (const auto &origin : o.origins)
+            if (origin.find("://") == std::string::npos)
+                throw std::runtime_error("--allow-origin needs scheme://host[:port], not \"" + origin + "\"");
     } catch (const std::exception &e) {
         std::fprintf(stderr, "w1700k-spectrum: %s\n", e.what());
         usage();

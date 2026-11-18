@@ -178,8 +178,11 @@ host/stream/build/w1700k-stream &                      # the stream, for every c
 host/spectrum/build/w1700k-spectrum --controller "host/bin/w1700k serve" --listen 0.0.0.0:8073
 ```
 
-Then open `http://HOST:8073/` and press ▶. The first start loads the radio
-firmware and brings the radio up (about 2 s). Without the browser, the same
+Then open the link it prints and press ▶. Listening beyond its own machine,
+as here, the server wants an access token with every request, and the link
+carries it: whoever has the link has the receiver, and nobody else on the
+network does ([host/spectrum/README.md](host/spectrum/README.md#who-is-answered)).
+The first start loads the radio firmware and brings the radio up (about 2 s). Without the browser, the same
 operations are `host/bin/w1700k load|start|band|tune|gain|filter|stop|status`.
 
 ## Updating from an older version
