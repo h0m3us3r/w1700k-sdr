@@ -72,6 +72,12 @@ def git_checkout(dest, url, commit, paths=(), tag=None):
     if dest.is_dir():
         head = output(['git', '-C', dest, 'rev-parse', 'HEAD']).strip()
         if head == commit:
+            # At the pinned commit, and as that commit has it: a file changed in the checkout is
+            # built from as readily as the pinned one, and its commit would not show it.
+            changed = output(['git', '-C', dest, 'status', '--porcelain', '--untracked-files=no']).splitlines()
+            require(not changed, f'{dest} is at the pinned commit but {len(changed)} of its files differ from it '
+                    f'({", ".join(line[3:] for line in changed[:3])}{", ..." if len(changed) > 3 else ""}): '
+                    'remove the directory and it is fetched again')
             return dest
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
