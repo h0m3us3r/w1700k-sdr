@@ -26,6 +26,15 @@
 # interrupt moved alone, 1 with both. An interface with several queues is left as
 # it is. `down` puts both back.
 #
+# The kernel thread that takes over that CPU's packet work when there is much of
+# it (ksoftirqd/N) is raised to nice -10 with the interrupt, and `keep` lets the
+# user who ran sudo raise w1700k-stream as far (/etc/security/limits.d/
+# 60-w1700k-stream.conf, which holds from the next login; delete it to undo). On
+# a host with every CPU busy both otherwise share their CPUs evenly with whatever
+# else runs: a 320 Msps stream lost 2.1 % of its slices in a minute like that,
+# 0.008 to 0.08 % with the service raised, and between none and 0.04 % in six
+# such minutes with both (host/stream/README.md has the runs).
+#
 # Given an MTU, the user who ran sudo is also given /dev/cpu_dma_latency, the file
 # through which the kernel is asked to keep the CPUs out of their deep idle states,
 # and w1700k-stream asks while datagrams arrive (host/stream/src/awake.h). A
@@ -94,10 +103,20 @@ spread() {
 		esac
 		dev=$(dirname "$dev")
 	done
+	# The CPU the interrupt is on now (where it was sent, or where it stayed) and that CPU's
+	# kernel thread for packet work.
+	softirqd() {
+		[ -n "$irq" ] && [ -z "${W1700K_LINK_SYSROOT:-}" ] || return 0	# a real thread: not in the tests
+		cpu=$(sed 's/[-,].*//' "/proc/irq/$irq/effective_affinity_list" 2>/dev/null) || return 0
+		pid=$(pgrep -x "ksoftirqd/$cpu" 2>/dev/null | head -1) || return 0
+		[ -z "$pid" ] || renice -n "$1" -p "$pid" >/dev/null 2>&1 || true
+	}
 	if [ "$2" = on ]; then
 		[ -z "$irq" ] || echo "$last" > "${W1700K_LINK_SYSROOT:-}/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
 		printf '%x\n' $(( ((1 << cpus) - 1) & ~(1 << last) )) > "$net/queues/rx-0/rps_cpus"
+		softirqd -10
 	else
+		softirqd 0
 		[ -z "$irq" ] || echo "0-$last" > "${W1700K_LINK_SYSROOT:-}/proc/irq/$irq/smp_affinity_list" 2>/dev/null || true
 		echo 0 > "$net/queues/rx-0/rps_cpus"
 	fi
@@ -218,6 +237,14 @@ keep()	# NetworkManager keeps $cidr, $mtu and the largest receive ring on $iface
 		echo "KERNEL==\"cpu_dma_latency\", OWNER=\"$SUDO_UID\""
 	} > "$rule"
 	echo "$0: and /dev/cpu_dma_latency is user $SUDO_UID's, in $rule"
+	limit=$sysroot/etc/security/limits.d/60-w1700k-stream.conf
+	[ -n "${SUDO_USER:-}" ] && [ -d "$(dirname "$limit")" ] || return 0
+	{
+		echo "# Written by init/host/link keep $iface: w1700k-stream, run by this user, may raise"
+		echo '# itself to nice -10, so that a busy host does not starve it. Delete this file to undo.'
+		echo "$SUDO_USER - nice -10"
+	} > "$limit"
+	echo "$0: and $SUDO_USER may run at nice -10 from the next login, in $limit"
 }
 
 # `up` beside a NetworkManager that is asking $iface for an address by DHCP and has none yet: when

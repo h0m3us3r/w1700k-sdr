@@ -3,13 +3,17 @@
 // through shared memory (include/w1700k_stream.h): in order, unpacked to complex int16, and on
 // request corrected for the radio's decimation roll-off (flatten.h).
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cinttypes>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <thread>
+
+#include <sys/resource.h>
 
 #include "ingest.h"
 #include "awake.h"
@@ -22,6 +26,7 @@ namespace {
 // slice (publish.cpp), and never while more than half the ring is newer; at 320 Msps a quarter of
 // a second is 39,000 slices, more than the 256 MiB this ring used to be could hold in wait.
 constexpr unsigned kReceiveMib = 1024;
+constexpr int kNice = -10;
 
 std::atomic<bool> stop_requested{false};
 void on_signal(int) { stop_requested = true; }
@@ -44,7 +49,9 @@ void usage()
                  "  --share-irq-cpu   run also on the CPU that takes the interface's packets (default: where\n"
                  "                    one CPU takes them all, as with a USB adapter, stay off it)\n"
                  "  --deep-idle       let the host idle as deeply as it likes while a stream arrives (default:\n"
-                 "                    ask the kernel to keep the CPUs out of deep idle for as long as one does)\n");
+                 "                    ask the kernel to keep the CPUs out of deep idle for as long as one does)\n"
+                 "  --own-priority    run at the priority it was started with (default: nice -10, where the\n"
+                 "                    user may, so that a busy host does not starve the receive threads)\n");
 }
 
 unsigned positive(const std::string &option, const std::string &text, unsigned long max)
@@ -67,7 +74,7 @@ int main(int argc, char **argv)
 {
     std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME, unit;
     unsigned port = 7700, rx_threads = 8, workers = 6, ring_mib = 512, receive_mib = kReceiveMib, report = 0;
-    bool share_irq_cpu = false, deep_idle = false;
+    bool share_irq_cpu = false, deep_idle = false, own_priority = false;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -86,6 +93,7 @@ int main(int argc, char **argv)
             else if (arg == "--report") report = positive(arg, value(), 3600);
             else if (arg == "--share-irq-cpu") share_irq_cpu = true;
             else if (arg == "--deep-idle") deep_idle = true;
+            else if (arg == "--own-priority") own_priority = true;
             else if (arg == "-h" || arg == "--help") {
                 usage();
                 return 0;
@@ -104,6 +112,15 @@ int main(int argc, char **argv)
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+    // Before any thread is started: each inherits it. On a host with every CPU busy the receive
+    // threads at the ordinary priority were starved (2.1 % of a 320 Msps stream lost, 61,000
+    // datagrams dropped at the sockets in a minute); at -10, 0.008 to 0.08 % (README.md).
+    // Lowering nice is root's unless the user's limit allows it, which `init/host/link keep` sets.
+    if (!own_priority && getpriority(PRIO_PROCESS, 0) > kNice && setpriority(PRIO_PROCESS, 0, kNice))
+        std::fprintf(stderr,
+                     "w1700k-stream: running at the ordinary priority (nice %d: %s); a busy host may starve it "
+                     "(sudo init/host/link keep ..., then log in again)\n",
+                     kNice, std::strerror(errno));
     try {
         SharedRing shared(name, ring_mib * 128);
         SampleRing received(receive_mib * 128);

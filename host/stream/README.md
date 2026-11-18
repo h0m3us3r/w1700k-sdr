@@ -30,6 +30,7 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 | `--report S` | 0 | a JSON status line on stdout every S seconds |
 | `--share-irq-cpu` | | run also on the CPU that takes the interface's packets (see below) |
 | `--deep-idle` | | let the host idle as deeply as it likes while a stream arrives (see below) |
+| `--own-priority` | | run at the priority it was started with (see below) |
 
 The object is the user's who runs the service, and its consumers run as that user: it is made
 readable and writable by its owner alone, and a consumer opens only an object that is its own
@@ -53,6 +54,16 @@ of stream: 0.3 to 0.9 % of the 16-bit format's slices at 40 Msps on one such hos
 with the request ([the measurements](../../tools/r8152-rtl8159/README.md)). That file is root's
 until `init/host/link` gives it to the user; where the service may not open it, it says so once
 and carries on. Between streams the host idles as it likes.
+
+The service raises itself to nice -10 at the start, where the user's limit allows it
+(`init/host/link keep` sets that limit; it holds from the next login). With every CPU of a host
+busy, the receive threads at the ordinary priority were starved: 2.1 % of a 320 Msps stream
+lost in a minute, 61,000 datagrams of it dropped at the sockets. At -10, 0.008 and 0.08 % in two
+such minutes, and with the kernel's own packet thread raised too (`link` does that), between
+none and 0.04 % in six (2, 0, 314, 180, 3931 and 2 slices of 9.4 million), what was lost going
+in one or two stalls of a fraction of a second. It is not immunity: a seventh run, two minutes
+long, lost 0.3 % in one stall of a second and a half, whose cause was not found. Where the
+service may not raise itself, it says so once and runs as it was started.
 
 The host needs the destination address on the 10G link, an MTU of at least 8236
 (`sudo init/host/link keep IFACE 10.77.0.10/24 9216` gives the interface both and keeps them
