@@ -6,9 +6,12 @@ ssh makes an inherited stdin non-blocking; in `w1700k serve` that stdin is the r
 and the next empty read then ends the session as if the web server had closed it.
 """
 import io
+import os
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -16,6 +19,51 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'host'))
 from w1700k import config, unit  # noqa: E402
 from w1700k.unit import Step, StepResult  # noqa: E402
+
+
+class ControlDirectory(unittest.TestCase):
+    """Whoever can put a socket where ssh looks for its control master is whom ssh talks to in the
+    unit's place: the directory is this user's alone, or it is not used."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        patches = [mock.patch.object(unit.tempfile, 'tempdir', str(self.tmp)),
+                   mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(unit.atexit, 'register')]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        os.environ.pop('XDG_RUNTIME_DIR', None)
+        self.named = self.tmp / f'w1700k-{os.getuid()}'
+
+    def test_the_sessions_runtime_directory_when_it_is_private(self):
+        runtime = self.tmp / 'run'
+        runtime.mkdir(mode=0o700)
+        os.environ['XDG_RUNTIME_DIR'] = str(runtime)
+        self.assertEqual(unit._control_dir(), runtime)
+        runtime.chmod(0o755)
+        self.assertEqual(unit._control_dir(), self.named, 'one others can look into is not taken on its word')
+
+    def test_without_one_a_directory_of_our_own_is_made_closed(self):
+        self.assertEqual(unit._control_dir(), self.named)
+        self.assertEqual(self.named.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(unit._control_dir(), self.named, 'and used again')
+
+    def test_a_directory_somebody_made_first_under_that_name_is_not_used(self):
+        for what, make in {'open to others': lambda: self.named.mkdir(mode=0o777) or self.named.chmod(0o777),
+                           'a link to elsewhere': lambda: self.named.symlink_to(self.tmp),
+                           'a file': lambda: self.named.write_text('')}.items():
+            with self.subTest(what):
+                make()
+                chosen = unit._control_dir()
+                self.assertNotEqual(chosen, self.named)
+                self.assertTrue(chosen.name.startswith('w1700k-ssh-'), chosen)
+                self.assertEqual(chosen.stat().st_mode & 0o777, 0o700, 'a fresh one, ours alone')
+                unit.atexit.register.assert_called_with(shutil.rmtree, chosen, ignore_errors=True)
+                if self.named.is_symlink() or self.named.is_file():
+                    self.named.unlink()
+                else:
+                    self.named.rmdir()
 
 
 class StdinTest(unittest.TestCase):

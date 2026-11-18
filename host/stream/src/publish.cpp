@@ -54,6 +54,17 @@ SharedRing::SharedRing(const std::string &name, unsigned slices) : name_(name)
     const uint64_t samples = tags + ((uint64_t(slices) * 8 + 4095) & ~uint64_t(4095));
     bytes_ = size_t(samples + uint64_t(slices) * W1700K_STREAM_SLICE * 4);
     const int fd = shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        // Still there after the unlink above: not ours to remove. In /dev/shm, which is sticky,
+        // that is an object another user made under the name. Its consumers would refuse it
+        // (w1700k_stream_open); the service says why it cannot start instead.
+        struct stat st;
+        const bool known = stat(("/dev/shm" + name).c_str(), &st) == 0;
+        throw std::runtime_error(name + " exists and is not this user's to replace" +
+                                 (known && st.st_uid != geteuid() ? " (it belongs to user " + std::to_string(st.st_uid) + ")" : "") +
+                                 ": have it removed (/dev/shm" + name + "), or give the service and its consumers "
+                                 "another name (--name)");
+    }
     if (fd < 0) throw std::runtime_error("shm_open " + name + ": " + std::strerror(errno));
     if (ftruncate(fd, off_t(bytes_))) {
         const std::string why = std::strerror(errno);

@@ -101,5 +101,80 @@ class SdrRecvTest(unittest.TestCase):
         self.assertEqual((report["slices"], report["lost"], report["overruns"], report["out"]), (200, 0, 0, ""))
 
 
+
+@unittest.skipIf(build_problem(), build_problem())
+class NotTheServicesRing(unittest.TestCase):
+    """The ring's name is one any user of the host can make an object under. A consumer takes its
+    layout and its samples on trust, so it opens only an object that is this user's, that nobody
+    else may write, and whose layout lies inside it; the service says when the name is held."""
+
+    @classmethod
+    def setUpClass(cls):
+        for directory in (STREAM, RECV):
+            result = subprocess.run(["make", "-C", directory], capture_output=True, text=True)
+            if result.returncode:
+                raise AssertionError("build failed:\n" + result.stdout + result.stderr)
+
+    def setUp(self):
+        self.name = "/w1700k-ftest-%d-%s" % (os.getpid(), self._testMethodName[-12:])
+        self.path = "/dev/shm" + self.name
+
+    def forged(self, slices, tags, samples, size=1 << 20, mode=0o600):
+        """An object that says it is the ring (magic, version, slice size, its own size) and is
+        served: a heartbeat now, and a run with slices published."""
+        fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        self.addCleanup(os.unlink, self.path)
+        try:
+            os.ftruncate(fd, size)
+            head = struct.pack("<IIIIQQQQQ", 0x4D525453, 1, 4096, 2048, slices, tags, samples, size, os.getpid())
+            os.pwrite(fd, head, 0)
+            os.pwrite(fd, struct.pack("<Q", time.clock_gettime_ns(time.CLOCK_MONOTONIC)), 56)
+            os.pwrite(fd, struct.pack("<QQQ", 0, 1, 64), 128)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+
+    def read(self):
+        return subprocess.run([BINARY, "--stream", self.name, "--seconds", "1", "--wait", "1"], capture_output=True,
+                              text=True, timeout=30)
+
+    def test_a_layout_that_lies_outside_the_object_is_not_read(self):
+        size = 1 << 20
+        for what, (slices, tags, samples) in {
+                "offsets far outside (this killed the reader)": (1 << 20, 1 << 40, 1 << 41),
+                "more slices than the object holds": (1 << 10, 4096, 16384),
+                "not a power of two": (96, 4096, 8192),
+                "no slices": (0, 4096, 8192),
+                "tags inside the header": (64, 512, 8192),
+                "tags over the samples": (64, 4096, 4096 + 256),
+                "samples past the end": (64, 4096, size - 4096)}.items():
+            with self.subTest(what):
+                self.forged(slices, tags, samples, size)
+                result = self.read()
+                self.doCleanups()
+                self.assertEqual(result.returncode, 1, "refused, not killed: %s" % result.stderr)
+                self.assertIn("its layout is not the ring's", result.stderr)
+
+    def test_a_layout_that_fits_is_read(self):
+        self.forged(64, 4096, 8192)          # 64 slices of 8192 bytes after 8 KiB: within 1 MiB
+        result = self.read()
+        self.assertIn("sdr-recv: reading " + self.name, result.stderr)
+
+    def test_an_object_others_may_write_is_not_read(self):
+        self.forged(64, 4096, 8192, mode=0o666)
+        result = self.read()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("it belongs to someone else, or others may write it", result.stderr)
+
+    def test_the_service_says_when_the_name_is_not_its_to_take(self):
+        os.mkdir(self.path)                  # stands in for another user's object: it cannot be unlinked either
+        self.addCleanup(os.rmdir, self.path)
+        result = subprocess.run([STREAM_BINARY, "--bind", "127.0.0.1", "--port", str(free_udp_port()), "--name", self.name,
+                                 "--ring-mib", "16"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(self.name + " exists and is not this user's to replace", result.stderr)
+        self.assertIn("--name", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

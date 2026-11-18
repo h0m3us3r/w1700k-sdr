@@ -146,11 +146,27 @@ static inline int w1700k_stream_alive(const struct w1700k_stream_header *h)
 	return w1700k_stream_now_ns() - w1700k_stream_load(&h->heartbeat_ns) < 1000000000ull;
 }
 
+/* The ring a header describes lies inside an object of `size` bytes: a power of two slices, the
+ * tags after the header and before the samples, the samples to the end at most. */
+static inline int w1700k_stream_layout_ok(uint64_t slices, uint64_t tags, uint64_t samples, uint64_t size)
+{
+	return slices && !(slices & (slices - 1)) && slices <= size / (W1700K_STREAM_SLICE * 4) &&
+	       !(tags & 7) && !(samples & 1) && tags >= W1700K_STREAM_HEADER_BYTES && tags <= samples &&
+	       slices * 8 <= samples - tags && samples <= size &&
+	       slices * (W1700K_STREAM_SLICE * 4) <= size - samples;
+}
+
 /*
  * Maps the service's shared memory (name NULL: W1700K_STREAM_NAME); `writable` for a consumer that
  * writes the control words. Returns NULL with errno set: ENOENT while no service has created it,
- * EPROTO for another layout. *bytes receives the mapping's length (for munmap), *inode the
- * object's inode (a restarted service creates a new one).
+ * EPROTO for another layout, EACCES for an object that is not the caller's own. *bytes receives the
+ * mapping's length (for munmap), *inode the object's inode (a restarted service creates a new one).
+ *
+ * The name is one any user of the host can create an object under. What is read from the object
+ * is trusted (the samples are taken for the radio's, the offsets are used to index it), so it has
+ * to be this user's and writable by nobody else, as the service creates it (0600): then nothing
+ * but this user's own programs wrote the layout that the accessors above read. The layout is
+ * checked against the object's size all the same, once, here.
  */
 static inline struct w1700k_stream_header *w1700k_stream_open(const char *name, int writable, size_t *bytes,
 							      uint64_t *inode)
@@ -161,7 +177,16 @@ static inline struct w1700k_stream_header *w1700k_stream_open(const char *name, 
 
 	if (fd < 0)
 		return NULL;
-	if (fstat(fd, &st) || (size_t)st.st_size < W1700K_STREAM_HEADER_BYTES) {
+	if (fstat(fd, &st)) {
+		close(fd);
+		return NULL;
+	}
+	if (st.st_uid != geteuid() || (st.st_mode & 022)) {
+		close(fd);
+		errno = EACCES;
+		return NULL;
+	}
+	if ((size_t)st.st_size < W1700K_STREAM_HEADER_BYTES) {
 		close(fd);
 		errno = EPROTO;
 		return NULL;
@@ -172,7 +197,8 @@ static inline struct w1700k_stream_header *w1700k_stream_open(const char *name, 
 	if (h == MAP_FAILED)
 		return NULL;
 	if (h->magic != W1700K_STREAM_MAGIC || h->version != W1700K_STREAM_VERSION ||
-	    h->slice_samples != W1700K_STREAM_SLICE || h->total_bytes != (uint64_t)st.st_size) {
+	    h->slice_samples != W1700K_STREAM_SLICE || h->total_bytes != (uint64_t)st.st_size ||
+	    !w1700k_stream_layout_ok(h->ring_slices, h->tags_offset, h->samples_offset, (uint64_t)st.st_size)) {
 		munmap(h, (size_t)st.st_size);
 		errno = EPROTO;
 		return NULL;

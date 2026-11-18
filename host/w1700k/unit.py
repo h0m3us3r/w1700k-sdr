@@ -5,9 +5,12 @@ All ssh invocations share one ControlMaster connection (socket under $XDG_RUNTIM
 command costs a round trip, not a handshake. The unit side is busybox sh plus the w1700k
 clients in `bin_dir`.
 """
+import atexit
 import io
 import os
 import shlex
+import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -36,13 +39,34 @@ class StepResult:
     data: bytes                   # the output file (empty if the step wrote none)
 
 
+def _private(path):
+    """`path` is a directory of this user's that nobody else can write or look into."""
+    try:
+        found = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(found.st_mode) and found.st_uid == os.getuid() and not found.st_mode & 0o077
+
+
 def _control_dir():
+    """Where the ssh connection's control socket lives. Whoever can put a socket at that path is
+    whom ssh then talks to in the unit's place, so the directory has to be ours alone: the
+    session's runtime directory, else one under the temporary directory. That one has a name
+    anybody could have made first, so it is used only if it is ours and closed to others; when it
+    is not, a fresh directory is made for this process and removed with it."""
     base = os.environ.get('XDG_RUNTIME_DIR')
-    if base and Path(base).is_dir():
+    if base and _private(base):
         return Path(base)
     path = Path(tempfile.gettempdir()) / f'w1700k-{os.getuid()}'
-    path.mkdir(mode=0o700, exist_ok=True)
-    return path
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if _private(path):
+        return path
+    fresh = Path(tempfile.mkdtemp(prefix='w1700k-ssh-'))
+    atexit.register(shutil.rmtree, fresh, ignore_errors=True)
+    return fresh
 
 
 def batch_script(steps, workdir):

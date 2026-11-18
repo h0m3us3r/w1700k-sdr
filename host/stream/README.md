@@ -30,6 +30,13 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 | `--report S` | 0 | a JSON status line on stdout every S seconds |
 | `--share-irq-cpu` | | run also on the CPU that takes the interface's packets (see below) |
 
+The object is the user's who runs the service, and its consumers run as that user: it is made
+readable and writable by its owner alone, and a consumer opens only an object that is its own
+user's, that nobody else may write, and whose layout lies inside it. On a host with other users
+that keeps one of them from making an object under the name first and being read as the radio.
+The service says so when the name is held by somebody else; `--name` gives it and its consumers
+another.
+
 Where one CPU takes every packet of the interface that holds the bind address (an interface
 with a single receive queue, such as a USB adapter: the CPU its interrupt is delivered to), the
 service keeps its threads off that CPU, looks again every two seconds, and names the CPU in the
