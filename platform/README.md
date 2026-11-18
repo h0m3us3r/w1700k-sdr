@@ -197,8 +197,19 @@ The loader's boot command begins with `run update_apply`
   and saves `update_failed` instead, after which that image is left alone;
 - puts `rootfs.old` back at once if the write of the new root does not read
   back;
-- once the request is gone (`system-update confirm` or `cancel` removes the
-  files), erases its saved environment again.
+- once the request is gone (`system-update confirm` or `cancel` removes it),
+  erases its saved environment again.
+
+The request is the one thing the loader acts on, so `system-update` removes it
+first and has it written out before it removes the images: a power cut while a
+confirmation is being forgotten leaves no request, whatever else it leaves,
+and the confirmed root stays. For the same reason `cancel` does not forget a
+root or loader that the loader has already written and nobody confirmed, and
+`stage` does not stage another over it: with its request gone it would count as
+settled, and with another staged over it, as the one to go back to. A restart
+undoes it, as above, or `confirm` keeps it. And nothing is decided on a request
+that could not be read: `durable` is opened for the read, waited for when
+another program has it open, and a read that still fails ends the command.
 
 An interrupted write is repeated by the next boot, since the note is saved only
 after the read-back. The loader's environment is otherwise never saved, and

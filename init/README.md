@@ -248,7 +248,10 @@ never confirmed; a run that was interrupted before confirming is finished by
 running the same command again. `ssh root@UNIT system-update status` shows what
 runs, what is staged and what the loader made of it, and `system-update cancel`
 there forgets a staged root: before the reboot nothing is written at all, and
-after a new root was put back it clears the note of that. The whole run takes
+after a new root was put back it clears the note of that. A new root that is
+written and runs unconfirmed is not cancelled (that would keep it): restart the
+unit to have the previous one put back, or confirm it. The tools say so when an
+earlier run left the unit that way. The whole run takes
 about a minute. (`verify-storage` on the
 unit holds that nothing has written flash since the boot: the tool runs it
 before confirming, and confirming, which removes the staged files, is itself
