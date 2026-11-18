@@ -310,8 +310,8 @@ the most CPU, in `tests/build/host-bench.txt` and `.json`. With
 
 ## Community
 
-Questions, captures and development talk are on
-[Discord](https://discord.com/invite/vvPuqquE8v).
+Questions, captures and development talk are on the
+[SDR Labs Discord](https://discord.com/invite/AGDYSdUPsz).
 
 ## Licence
 
