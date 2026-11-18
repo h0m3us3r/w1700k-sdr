@@ -4,15 +4,19 @@ configurations and the calibration EEPROM image.
 
 A load (controller.py) replaces the driver (RESET_MT quiesces DMA first), takes host ownership,
 resets the WF subsystem, takes ownership again and downloads our firmware set (patch, WM, WA);
-our WM then brings the radio up from cold on command (wm.py). Nothing transmits.
+our WM then brings the radio up from cold on command (wm.py). Nothing transmits. Before the
+download the radio's ROM is read and held to the one the set is written for.
 """
+import hashlib
 import json
 import struct
+import sys
 from dataclasses import dataclass, replace
 
-from .unit import DEVICE, Step, UnitError
+from .unit import DEVICE, OUT, Step, UnitError
 
 FW_DIR = '/tmp/w1700k-fw'         # unit-side copies of the firmware set
+ROM_READ = 4096                   # bytes of the ROM to one mt7996-probe (the most it reads at once)
 
 RF_BAND = {0: '2g', 1: '5g', 2: '6g'}
 RF_BAND_CODE = {'2g': 0, '5g': 1, '6g': 2}
@@ -169,8 +173,9 @@ def _failure(result, what):
 
 
 class Radio:
-    def __init__(self, unit):
+    def __init__(self, unit, warn=None):
         self.unit = unit
+        self.warn = warn or (lambda text: print(f'w1700k: {text}', file=sys.stderr))
 
     def stage(self, containers):
         """Copy firmware containers to the unit, skipping files that are already there."""
@@ -210,15 +215,44 @@ class Radio:
         except UnitError as exc:
             raise RadioError(f'driver reload failed: {exc}')
 
-    def download(self, containers):
-        """Host ownership, RESET_MT, ownership again (the reset revokes it), then each container."""
+    def download(self, containers, rom=None, unknown_rom=False):
+        """Host ownership, RESET_MT, ownership again (the reset revokes it); the ROM read and held
+        to `rom` (firmware.Rom); then each container.
+
+        The set is written for one ROM: its patch redirects ROM instructions by address and both
+        it and the WM call into the ROM by address. On another ROM that is a jump into whatever
+        is there. So nothing is downloaded onto a ROM the set does not name, unless
+        `unknown_rom` says to go on all the same."""
         probe, download = self.unit.tool('mt7996-probe'), self.unit.tool('mt7996-download')
         acquire = Step((probe, DEVICE, '0x00901000', '4', '--acquire'))
         steps = [acquire, Step((download, DEVICE, '--reset')), acquire]
-        steps += [Step((download, DEVICE, f'{FW_DIR}/{c.path.name}', '--i-understand', *c.flags))
-                  for c in containers]
-        names = ['host ownership', 'RESET_MT', 'host ownership'] + [f'{c.role} download' for c in containers]
+        names = ['host ownership', 'RESET_MT', 'host ownership']
+        if rom is not None:
+            for at in range(rom.base, rom.base + rom.size, ROM_READ):
+                steps.append(Step((probe, DEVICE, f'{at:#010x}', str(ROM_READ), '--raw', OUT)))
+                names.append(f'ROM read at {at:#010x}')
+        results = self._steps(steps, names)
+        if rom is not None:
+            read = b''.join(result.data for result in results[3:])
+            found = hashlib.sha256(read).hexdigest()
+            if len(read) != rom.size:
+                raise RadioError(f'the radio\'s ROM was not read whole ({len(read)} of {rom.size} bytes); nothing was downloaded')
+            if found not in rom.sha256:
+                if not unknown_rom:
+                    raise RadioError(
+                        f'this radio\'s ROM is not the one our firmware is written for (its first {rom.size // 1024} KiB '
+                        f'hash to {found}, not {" or ".join(rom.sha256)}). The patch redirects ROM instructions and '
+                        'calls ROM routines by address; on another ROM those addresses hold something else. Nothing '
+                        'was downloaded. To load all the same, for studying a new revision and at the radio\'s risk, '
+                        'set "unknown_rom": true in the configuration')
+                self.warn(f'the radio\'s ROM is not one our firmware is written for ({found}); loading all the same, as '
+                          'the configuration says (unknown_rom)')
+        steps = [Step((download, DEVICE, f'{FW_DIR}/{c.path.name}', '--i-understand', *c.flags)) for c in containers]
+        self._steps(steps, [f'{c.role} download' for c in containers])
+
+    def _steps(self, steps, names):
         results = self.unit.batch(steps, timeout=240)
         for name, result in zip(names, results):
             if result is None or result.exit:
                 raise _failure(result, name)
+        return results

@@ -33,7 +33,7 @@ class Mirrors(unittest.TestCase):
         names = ('END', 'W32', 'RMW32', 'R32', 'DELAY', 'POLL', 'AW', 'AR', 'ARMW', 'APOLL', 'SAR', 'RF')
         self.assertEqual([getattr(rf, n) for n in names], [h[f'MT7996_PROBE_CTL_OP_{n}'] for n in names])
         self.assertEqual(rf.SOFT, h['MT7996_PROBE_CTL_OP_SOFT'])
-        codes = ('BAD_OP', 'TIMEOUT', 'TOO_MANY', 'SEMA', 'BUSY', 'SPI', 'BAD_ARG')
+        codes = ('BAD_OP', 'TIMEOUT', 'TOO_MANY', 'SEMA', 'BUSY', 'SPI', 'BAD_ARG', 'DENIED', 'NOT_RUN')
         self.assertEqual(sorted(rf.STATUS), [h[f'MT7996_PROBE_CTL_{c}'] for c in codes])
         commands = ('TUNE', 'GAIN', 'FILTER', 'TRIM', 'STATUS', 'LOCKS', 'BAND')
         self.assertEqual([getattr(rf, f'RF_{c}') for c in commands], [h[f'MT7996_PROBE_CTL_RF_{c}'] for c in commands])
@@ -197,6 +197,7 @@ class Commands(unittest.TestCase):
         self.assertEqual([rf._describe_gain(w) for w in (0, 0x3101, 0x8)], ['agc', 'lna 1 lpf 3', '0x00000008'])
 
     def test_band_switch(self):
+        self.dev.ready()
         wm.Wm(self.unit, session=self.session).radio_post('stream', wm.RADIO_PACKING['raw'])
         self.dev.pump_start(['mt7996-stream'])
         self.assertTrue(self.session.streaming())

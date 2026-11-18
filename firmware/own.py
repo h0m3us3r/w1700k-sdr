@@ -21,7 +21,9 @@ WM_CRAM, WM_CRAM_LIMIT = 0xe0040000, 0xe027c000    # CRAM, as wm/wm.h
 # The stream producer in ULM1 above our WM's code (one image, every packing schedule); the WA packer
 # at the address the producer raises the WA into (stream/layout.h WA_CODE). Loaded with the firmware.
 PRODUCER_BASE = 0x00930000
-PRODUCER_SIZE = 0x2000
+# Of the 0x8000 from there to WM_LIMIT. It was 0x2000, which the producer nearly fills (8056 bytes
+# from clang 21, and how many depends on the compiler); an image of 8228 bytes has run on a unit.
+PRODUCER_SIZE = 0x3000
 WA_ENTRY, WA_LIMIT = 0x10000000, 0x1001c000       # WA ILM
 VERSION = 'w1700k-own'
 BUILD_DATE = '20260101000000'

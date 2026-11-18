@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: MIT
 """Our firmware set built by `make -C firmware`, described by its firmware.json: the ROM patch, the
-WM and the WA, in download order."""
+WM and the WA, in download order, and the ROM they are written for."""
 import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA = 2
+SCHEMA = 3
 ROLES = ('patch', 'wm', 'wa')
 
 
@@ -30,8 +30,17 @@ class Image:
 
 
 @dataclass(frozen=True)
+class Rom:
+    """The radio's boot ROM as the set knows it: where to read it, and what it then hashes to."""
+    base: int
+    size: int
+    sha256: tuple                 # of the `size` bytes at `base`, for each ROM the set is written for
+
+
+@dataclass(frozen=True)
 class Firmware:
     containers: tuple             # Images in download order
+    rom: Rom
 
 
 def _image(entry, directory):
@@ -56,7 +65,18 @@ def parse(manifest, directory):
         raise FirmwareError(f'firmware.json: {exc}')
     if tuple(c.role for c in containers) != ROLES:
         raise FirmwareError(f'firmware.json: containers must be {", ".join(ROLES)} in that order')
-    return Firmware(containers)
+    return Firmware(containers, _rom(manifest.get('rom')))
+
+
+def _rom(entry):
+    try:
+        base, size, digests = entry['base'], entry['size'], tuple(entry['sha256'])
+    except (KeyError, TypeError) as exc:
+        raise FirmwareError(f'firmware.json: malformed rom ({exc})')
+    if not (isinstance(base, int) and isinstance(size, int) and size > 0 and base % 4 == 0 and size % 4096 == 0 and digests
+            and all(isinstance(d, str) and len(d) == 64 for d in digests)):
+        raise FirmwareError('firmware.json: malformed rom')
+    return Rom(base, size, digests)
 
 
 def load(directory):

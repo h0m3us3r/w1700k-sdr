@@ -2,7 +2,8 @@
 /* Radio commands to our WM (the WM_RADIO_* block of wm/wm.h; host/w1700k/wm.py mirrors them).
  *
  *   SELFTEST                       -> RADIO_SELFTEST_MAGIC: the radio code runs (from CRAM)
- *   IDENTIFY                       -> the A-die chip IDs read (ARG words get them: see radio.c)
+ *   IDENTIFY                       the A-die chip IDs read and kept for the commands that follow
+ *                                  (nothing comes back but the result and the state bit)
  *   BRINGUP                        the cold bring-up: the ROM patch's radio init, the common and
  *                                  per-band PHY init, every die's RF init and calibrations;
  *                                  the EEPROM must be in WM_RADIO_EE first
@@ -25,7 +26,11 @@
  *                                  started if it packs, the route and ICAP0 armed, then the
  *                                  producer until the host's stop word; ACK when it has ended
  *                                  (RES = the producer's status, the result page as before), the
- *                                  route released
+ *                                  route released. Refused at once (RADIO_STREAM_*, which are
+ *                                  no producer status) unless the radio is up and the band
+ *                                  ICAP listens to has its capture path set up: a stream of
+ *                                  nothing never ends by itself, and a WA started before the
+ *                                  radio is configured leaves it deaf for good
  *   STEP step arg                  one bring-up step alone, for development (RADIO_STEP_*)
  */
 #ifndef RADIO_RADIO_CMD_H
@@ -52,7 +57,11 @@
 #define RADIO_PACKING_FULL	2u	/* every chunk (WM 8 + WA 8 of 16): up to 160 Msps, 7/8 of the bytes */
 #define RADIO_PACKING_SPLIT	3u	/* 10 of 16 chunks reduced to 14 bits (WM 5 + WA 5), 6 raw for the SoC to reduce: 320 Msps on 5 Gbit/s */
 #define RADIO_PACKINGS		4u
-#define RADIO_STREAM_NO_WA	0x100u		/* STREAM result bit: the WA did not start */
+/* STREAM's results beside a producer's status (stream.h: those are below 0x100) */
+#define RADIO_STREAM_NO_WA	0x100u		/* the WA did not start */
+#define RADIO_STREAM_BAD_PACKING 0x200u		/* refused: not a packing schedule */
+#define RADIO_STREAM_NOT_READY	0x300u		/* refused: the radio is not up, or no band is selected
+						 * whose capture path is set up */
 
 #define RADIO_CHAN_BW		0x000000ffu	/* SETUP arg 3 fields */
 #define RADIO_CHAN_FLAGS	0x0000ff00u
@@ -86,5 +95,7 @@
 #define RADIO_STATE_UP		(1u << 16)	/* the whole bring-up */
 #define RADIO_STATE_CHAN(b)	(1u << (20 + (b)))	/* band b is set up (SETUP) */
 #define RADIO_STATE_CAPTURE(b)	(1u << (24 + (b)))	/* band b's capture path is set up */
+#define RADIO_STATE_SELECTED(b)	(1u << (28 + (b)))	/* ICAP listens to band b (the last SELECT) */
+#define RADIO_STATE_SELECTED_ANY	(7u << 28)
 
 #endif

@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE))
 import own                                     # noqa: E402
 from rom_patch import patch                    # noqa: E402
 
-SCHEMA = 2
+SCHEMA = 3
 
 
 def _entry(role, name, data, flags=()):
@@ -28,7 +28,9 @@ def _entry(role, name, data, flags=()):
 
 
 def build(out):
-    manifest = {'schema': SCHEMA, 'containers': []}
+    # The ROM the set is for: the host loads it onto no other (rom_patch/patch.py).
+    manifest = {'schema': SCHEMA, 'rom': {'base': patch.ROM_BASE, 'size': patch.ROM_BYTES, 'sha256': list(patch.ROM_SHA256)},
+                'containers': []}
     for role, name, data, flags in [('patch', 'w1700k_rom_patch.bin', patch.build_own(), ())] + own.build():
         (out / name).write_bytes(data)
         manifest['containers'].append(_entry(role, name, data, flags))

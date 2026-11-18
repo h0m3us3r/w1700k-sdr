@@ -5,6 +5,8 @@
               "bin_dir": "/usr/sbin", "module": "/lib/modules/w1700k_sdr.ko"},
      "eeprom": "~/.config/w1700k/eeprom.bin",
      "firmware_dir": "<repo>/firmware/build",
+     "unknown_rom": false,
+     "raw_access": false,
      "export": {"interface": "eth1", "src_ip": "10.77.0.1", "dst_ip": "10.77.0.10",
                 "dst_mac": null, "port": 7700, "ports": 8, "link_mbps": null, "packing": null,
                 "piece": null}}
@@ -17,7 +19,11 @@ than its Ethernet side links at); null: the negotiated speed. export.packing ("r
 "full", "split", or "16", "14", "8", "7" bits per I/Q pair) sets every stream's packing by hand; null:
 chosen from the sample rate and the link. export.piece sends each slice as datagrams of at most
 that many of its bytes (1456 fits a 1500-byte MTU) for a path without jumbo frames; null: one
-datagram per slice.
+datagram per slice. unknown_rom true loads our firmware onto a radio whose boot ROM is not the one
+it is written for (radio.py: a load reads the ROM first and refuses any other): for studying a new
+hardware revision, and at that radio's risk. raw_access true unlocks our WM after every load
+(wm.py): its guard then no longer keeps raw programs and calls from the registers that could make
+the radio transmit, program an eFuse or wedge a die. For development.
 """
 import ipaddress
 import json
@@ -70,6 +76,8 @@ class Config:
     unit: UnitConfig = field(default_factory=UnitConfig)
     eeprom: Path | None = None        # None: see eeprom_path()
     firmware_dir: Path = REPO / 'firmware' / 'build'
+    unknown_rom: bool = False         # load onto a radio whose ROM the firmware is not written for
+    raw_access: bool = False          # unlock our WM after a load: raw programs and calls reach anything
     export: ExportConfig = field(default_factory=ExportConfig)
 
 
@@ -93,7 +101,7 @@ def parse(data):
     """A Config from the decoded JSON object, validated."""
     if not isinstance(data, dict):
         raise ConfigError('the configuration must be a JSON object')
-    unknown = sorted(set(data) - {'unit', 'eeprom', 'firmware_dir', 'export'})
+    unknown = sorted(set(data) - {'unit', 'eeprom', 'firmware_dir', 'unknown_rom', 'raw_access', 'export'})
     if unknown:
         raise ConfigError(f'unknown keys {unknown}')
     config = Config()
@@ -101,6 +109,11 @@ def parse(data):
         config = replace(config, unit=_section(UnitConfig, data['unit'], 'unit'))
     if 'export' in data:
         config = replace(config, export=_section(ExportConfig, data['export'], 'export'))
+    for key in ('unknown_rom', 'raw_access'):
+        if key in data:
+            if not isinstance(data[key], bool):
+                raise ConfigError(f'{key}: expected true or false')
+            config = replace(config, **{key: data[key]})
     for key in ('eeprom', 'firmware_dir'):
         if key in data:
             if not isinstance(data[key], str):

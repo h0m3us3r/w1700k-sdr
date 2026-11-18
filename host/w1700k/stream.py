@@ -60,6 +60,7 @@ REDUCED_CHUNK = {'16': 4096, '14': 3584, '8': 2048, '7': 1792}
 PIECE_RANGE = (256, 8192)         # mt7996-stream --piece
 EXPORT_CPU, PUMP_CPU = 2, 3       # the export worker and the pump each busy-poll one CPU
 
+REFUSAL_SECONDS = 0.05            # by when our WM has acknowledged a STREAM it refuses
 OUT_FILE = '/tmp/w1700k-stream.json'
 DONE_FILE = '/tmp/w1700k-stream.done'
 
@@ -68,7 +69,7 @@ STATUS = {-1: 'no result page', 0: 'not reached', 2: 'go word never came', 3: 'o
           8: 'WA did not start', 9: 'WA did not exit', 10: 'WA dispatch not at rest'}
 RES32 = ('status', 'cpu_end', 'tx_dma_end', 'cr9_end', 'cr0_end', 'sent_after', 'done_after', 'err_status',
          'go_wait_cycles', 'first_cr9', 'wa_status', 'pack_max_cycles', 'max_lag', 'wa_pack_max', 'wa_sp', 'wa_ra',
-         'wa_exit_cycles', 'ctl_served')
+         'wa_exit_cycles', 'ctl_served', 'ctl_slice_max', 'ctl_slice_limit')
 RES64 = ('chunks', 'cycles', 'written', 'credit_waits', 'wa_waits', 'wm_waits', 'wm_packs', 'wm_pack_cycles',
          'wa_packs', 'wa_pack_cycles', 'wa_idle')
 RESULT_WORDS = 4 + len(RES32) + 2 * len(RES64)   # the result page from DONE_AT
@@ -213,7 +214,15 @@ class Stream:
         """Our own firmware: one STREAM command; our WM arms the route and ICAP0, starts the WA for
         packing, and runs the producer it carries, which waits for the pump's go word. The command
         is acknowledged when the stream has ended (collect_own)."""
-        w.radio_post('stream', wm_mod.RADIO_PACKING[firmware_packing(packing)])
+        req = w.radio_post('stream', wm_mod.RADIO_PACKING[firmware_packing(packing)])
+        # A stream is acknowledged when it has ended, seconds from now at the least. One
+        # acknowledged at once was refused, and the pump is not started on it: it would wait for
+        # a producer that is not there.
+        w.sleep(REFUSAL_SECONDS)
+        status = w.status()
+        if status['radio_ack'] == req:
+            res = status['radio_res']
+            raise StreamError('our WM refused the stream: ' + wm_mod.STREAM_REFUSALS.get(res, f'result {res:#x}'))
 
     def collect_own(self, w, packing):
         """After the pump ended on our own WM: its STREAM command acknowledged (after the producer's

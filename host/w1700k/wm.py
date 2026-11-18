@@ -22,7 +22,7 @@ STATUS_WORDS = ('magic', 'version', 'beats', 'state', 'entry_sp', 'entry_ra', 'e
                 'call', 'calls', 'arg0', 'arg1', 'arg2', 'arg3', 'ret', 'wa_start',
                 'radio_ee', 'radio_req', 'radio_ack', 'radio_op', 'radio_arg0', 'radio_arg1', 'radio_arg2',
                 'radio_arg3', 'radio_res', 'radio_fail_code', 'radio_fail_arg', 'radio_fails', 'radio_us',
-                'radio_state', 'rf_build')
+                'radio_state', 'rf_build', 'unlock', 'denied')
 MAGIC = 0x4D57574F                # 'OWWM'
 STATE_RUNNING, STATE_TRAPPED = 1, 2
 TRAPS = STATUS + 4 * STATUS_WORDS.index('traps')
@@ -35,6 +35,11 @@ CALL = STATUS + 4 * STATUS_WORDS.index('call')
 ARGS = STATUS + 4 * STATUS_WORDS.index('arg0')
 WA_START = STATUS + 4 * STATUS_WORDS.index('wa_start')
 WA_START_REQ, WA_STARTED = 1, 2
+# The guard (firmware/stream/guard.h): our WM starts locked and then keeps a host's raw programs
+# from what could transmit, from the eFuse and from accesses that wedge a die, and calls to its own
+# image. UNLOCK_MAGIC in the unlock word lifts that until the next load.
+UNLOCK = STATUS + 4 * STATUS_WORDS.index('unlock')
+UNLOCK_MAGIC = 0x4B4C4E55         # 'UNLK'
 START_TIMEOUT = 5.0
 # Radio commands (firmware/radio/radio_cmd.h).
 RADIO_REQ = STATUS + 4 * STATUS_WORDS.index('radio_req')
@@ -47,7 +52,12 @@ RADIO_RESULTS = {0: 'ok', 1: 'unknown op', 2: 'bad argument', 3: 'a prerequisite
                  4: 'hardware access failed'}
 RADIO_SELFTEST_MAGIC = 0x52414449
 RADIO_FAILS = {1: 'poll timed out at', 2: 'A-die poll timed out at', 3: 'A-die transaction failed at',
-               4: 'bad argument', 5: 'unexpected hardware state', 6: 'eFuse read failed at'}
+               4: 'bad argument', 5: 'unexpected hardware state', 6: 'eFuse read failed at',
+               7: 'a register access faulted at'}
+# STREAM's results that are no producer status (radio_cmd.h RADIO_STREAM_*): refusals, at once.
+STREAM_REFUSALS = {0x200: 'not a packing schedule',
+                   0x300: 'the radio is not up, or no band is selected whose capture path is set up'}
+STATE_SELECTED = {band: 1 << (28 + band) for band in range(3)}
 EEPROM_BYTES = 7680
 
 
@@ -55,11 +65,11 @@ class WmError(RuntimeError):
     pass
 
 
-def load(radio, firmware, module):
-    """A fresh driver, then our set: patch, WM, WA."""
+def load(radio, firmware, module, unknown_rom=False):
+    """A fresh driver, then our set, onto the ROM it is written for: patch, WM, WA."""
     radio.stage(firmware.containers)
     radio.replace_module(module)
-    radio.download(firmware.containers)
+    radio.download(firmware.containers, firmware.rom, unknown_rom)
 
 
 class Wm:
@@ -99,6 +109,13 @@ class Wm:
             if self.clock() > deadline:
                 raise WmError('our WM did not start' if st['magic'] != MAGIC else 'our WM does not run its loop')
             self.sleep(0.05)
+
+    def unlock(self):
+        """Lift the guard on raw programs and calls, until the next load. For development."""
+        self.session.ctl([(UNLOCK, UNLOCK_MAGIC)])
+
+    def locked(self):
+        return self.status()['unlock'] != UNLOCK_MAGIC
 
     def start_wa(self, timeout=START_TIMEOUT):
         """Have our WM start the WA (firmware/wm/wm.h WM_WA_START) and wait for our WA's main loop.
@@ -178,11 +195,15 @@ class Wm:
     def call(self, fn, *args, timeout=5.0):
         """Call fn(args...) on our WM (ROM routines included: it runs with the ROM's gp, interrupts
         off); its return value. Up to four word arguments."""
+        denied = self.status()['denied']
         before = self.start(fn, *args)
         deadline = self.clock() + timeout
         while True:
             st = self.status()
             if st['calls'] != before:
+                if st['denied'] != denied:
+                    raise WmError(f'the call to {fn:#010x} was refused: our WM is locked, and calls only into its own '
+                                  'image. For development, unlock it: "raw_access": true in the configuration')
                 return st['ret']
             if st['state'] != STATE_RUNNING or self.clock() > deadline:
                 raise WmError(f'call to {fn:#010x} did not return (state {st["state"]})')

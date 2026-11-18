@@ -36,6 +36,16 @@ into ROM after it; the build refuses an object with relocations and re-decodes i
 None of MediaTek's 26 ROM redirects is in it, and none of the eFuse "recovery" their 2025 and
 later patches run. It loads on parts with unprovisioned security fuses.
 
+The set is written for one ROM. A hook is a ROM instruction's address and the bytes found
+there, the hooks call ROM functions by address, and so does the WM. In another revision of the
+ROM those addresses are the middle of something else, and the ROM holds a routine that
+programs eFuses. So `rom_patch/patch.py` names the ROM by the SHA-256 of its first 64 KiB (the
+part the driver lets a host read), `firmware.json` carries that, and the host reads the ROM
+after the reset and downloads nothing onto any other (`host/w1700k/radio.py`). The hash is
+that of one hardware 2.1 unit. A radio that hashes otherwise is refused with the hash it has,
+to report; `"unknown_rom": true` in the host's configuration loads all the same, for studying
+such a revision and at that radio's risk.
+
 ## The WM (`wm/`, `radio/`)
 
 - `wm/start.S`: entry from FW_START at `0x00916400`; records the core as the ROM handed it
@@ -125,8 +135,8 @@ status block is at `0x0090f3e0`.
 ## Containers (`own.py`, `container.py`, `aes.py`)
 
 `container.py` seals code into the RAM container format (one AES-128-CBC region per memory, an
-empty release envelope, the outer CRC32). The WM container holds four regions (ULM1 entry, the
-two producers, CRAM), the WA container two (entry, packer).
+empty release envelope, the outer CRC32). The WM container holds three regions (ULM1 entry, the
+producer, CRAM), the WA container two (entry, packer).
 
 ## Hazards
 
@@ -135,3 +145,26 @@ two producers, CRAM), the WA container two (entry, packer).
 - A read of an address that does not answer faults our WM's load; the trap handler skips it,
   and such a read returns nothing usable.
 - Register hazards are marked `HAZARD:` in `include/hw/`.
+
+### The guard
+
+Our WM runs raw programs for a host: any MCU address, any A-die register, and a call to any
+address. A few of those are not a host's to reach by mistake, so our WM starts **locked** at
+every load, and locked it does not run a raw op of a host's program that reaches
+(`stream/guard.h`, the list as it is):
+
+- the MAC's transmit and receive disables (written by the radio code alone), a chain's
+  transmit blocks or transmit detectors, and the external front end's pins;
+- the eFuse controller, read or written;
+- the CONN semaphores, read or written (a read takes one), a capture route grant, a raw
+  chip-select, and the A-die reads and writes that the headers mark as wedging a die.
+
+Such an op ends its program with status 9, "denied". A call (`WM_CALL`) goes into our own
+image and nowhere else; a refused one is counted in the status block. The firmware's own
+programs, which an RF command is made of, are not judged.
+
+`"raw_access": true` in the host's configuration writes the unlock word after every load, and
+the guard is lifted until the next one: for development, such as code of your own loaded and
+called on the WM. The guard keeps a mistake out. It is no protection against the host, which
+loads the firmware and can unlock it, and it lists what is known to be dangerous, not
+everything that might be.

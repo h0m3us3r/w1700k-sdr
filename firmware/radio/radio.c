@@ -132,11 +132,13 @@ static uint32_t setup(const uint32_t *arg, uint32_t *state)
 
 /* The band's MAC receive path on: ARB_SCR RX_DIS cleared. Without it the capture gets no samples
  * at all. MediaTek's per-band TX / RX state machine (V:e01245ec) clears TX_DIS and RX_DIS once the
- * host has started the band (its radio-enable commands); we clear only RX_DIS, so the MAC never
- * transmits. */
+ * host has started the band (its radio-enable commands); we clear RX_DIS and set TX_DIS, so the
+ * MAC never transmits. TX_DIS is set at reset and nothing of ours clears it, but that the MAC
+ * does not transmit is not left to what the word held before: it is written here, every time. */
 static void mac_rx_enable(uint32_t band)
 {
-	hal_clr(MT7996_LMAC_ARB_SCR(band), MT7996_LMAC_ARB_SCR_RX_DIS);
+	hal_rmw(MT7996_LMAC_ARB_SCR(band), MT7996_LMAC_ARB_SCR_TX_DIS | MT7996_LMAC_ARB_SCR_RX_DIS,
+		MT7996_LMAC_ARB_SCR_TX_DIS);
 }
 
 /* RATE band bw: the sample rate alone; the band's capture path must be set up again. */
@@ -200,7 +202,10 @@ uint32_t radio_command(uint32_t op, const uint32_t *arg, uint32_t *state)
 		if (arg[0] >= RADIO_BANDS)
 			return RADIO_ERR_ARG;
 		capture_select(arg[0]);
-		return done(state, 0);
+		if (radio_failed())
+			return RADIO_ERR_HW;
+		*state = (*state & ~RADIO_STATE_SELECTED_ANY) | RADIO_STATE_SELECTED(arg[0]);
+		return RADIO_OK;
 	}
 	return RADIO_ERR_OP;
 }

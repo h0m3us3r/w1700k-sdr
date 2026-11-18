@@ -69,6 +69,14 @@ static void presets(void)
 	mock_preset(MT7996_CBTOP_HW_REV, CBTOP_HW_REV_E2);
 	mock_preset(MT7996_CBTOP_PAD_GPIO, HW_PREP(CBTOP_PAD_GPIO_ADIE_COMB, CBTOP_PAD_GPIO_ADIE_COMB_677));
 	mock_preset(MT7996_CBTOP_XO_STA, HW_PREP(CBTOP_XO_STA_READY, CBTOP_XO_STA_READY_VAL));
+	/* As reset leaves it: transmit and receive both disabled. A mock that starts the word at 0
+	 * shows a read-modify-write that keeps "transmit enabled" as readily as one that keeps it
+	 * disabled. RADIO_SMOKE_ARB_SCR gives the word another start, for the test that something
+	 * else had enabled transmit. */
+	const char *start = getenv("RADIO_SMOKE_ARB_SCR");
+
+	for (uint32_t band = 0; band < RADIO_BANDS; band++)
+		mock_preset(MT7996_LMAC_ARB_SCR(band), start ? (uint32_t)strtoul(start, NULL, 0) : MT7996_LMAC_ARB_SCR_CAL);
 }
 
 static void command(const char *name, uint32_t op, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3)

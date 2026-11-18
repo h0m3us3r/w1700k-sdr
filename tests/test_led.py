@@ -145,7 +145,9 @@ class Led(unittest.TestCase):
         unit = host_fake.FakeUnit()
         unit.calibration = b'\x90\x79' + bytes(7678) + b'\xff' * (16384 - 7680)
         # The export's MAC is given, so no interface of the machine the test runs on is looked for.
-        ctl = Controller(config.parse({'export': {'dst_mac': '02:00:00:00:00:01'}}), unit=unit)
+        # The firmware is the built one and the unit a stand-in, whose ROM is not the one that
+        # firmware is written for: the load is told to go on all the same.
+        ctl = Controller(config.parse({'export': {'dst_mac': '02:00:00:00:00:01'}, 'unknown_rom': True}), unit=unit)
         try:
             ctl.load(1)
             state = unit.files['/tmp/w1700k-state.json'].decode()

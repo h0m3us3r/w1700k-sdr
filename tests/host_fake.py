@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / 'host'))
 
 from w1700k import radio, rf, stream, wm  # noqa: E402
 from w1700k.config import Config, ExportConfig, UnitConfig  # noqa: E402
-from w1700k.unit import StepResult, UnitError  # noqa: E402
+from w1700k.unit import OUT, StepResult, UnitError  # noqa: E402
 
 BOOT_ID = '01234567-89ab-cdef-0123-456789abcdef'
 
@@ -55,7 +55,12 @@ ARITY = {'selftest': 0, 'identify': 0, 'bringup': 0, 'setup': 4, 'step': 2, 'cap
 EE_BUFFER = 0xE0100000            # where our WM's radio_ee lands in CRAM (any address will do)
 RF_BUILD = 0xE0050000             # its RF command builder
 # probe_page.h CTL status codes
-CTL_OK, CTL_BAD_OP, CTL_TIMEOUT, CTL_TOO_MANY, CTL_BAD_ARG = 0, 1, 2, 3, 7
+CTL_OK, CTL_BAD_OP, CTL_TIMEOUT, CTL_TOO_MANY, CTL_BAD_ARG, CTL_DENIED = 0, 1, 2, 3, 7, 9
+STREAM_BAD_PACKING, STREAM_NOT_READY = 0x200, 0x300       # radio_cmd.h RADIO_STREAM_*: STREAM refused
+OWN_IMAGE = (0x00916400, 0x00938000)                      # our WM in ULM1 (firmware/wm/wm.h)
+GUARDED_MMIO = {0x70021008, 0x7C070030}                   # read or written: the eFuse control word, semaphore 12
+GUARDED_MMIO_WRITES = {0x820F3000}                        # written: band 1's ARB_SCR
+GUARDED_ADIE_READS = {1 << 16 | 15 << 12 | 0x222}         # die 1's TOP 0x222
 CTL_ACK, CTL_STATUS, CTL_SOFT, CTL_SERVED = rf.CTL_BASE + 4, rf.CTL_BASE + 8, rf.CTL_BASE + 0x24, rf.CTL_BASE + 0x14
 ICAP0_CR9 = 0x800230B4            # ICAP0's write pointer (hw/mt7996/icap.h)
 RING = 0x100000
@@ -69,8 +74,11 @@ class FakeDevice:
         self.adie = {}                    # A-die registers by die << 16 | k << 12 | index
         self.wm_up = False                # our WM runs its main loop
         self.wa_up = False
-        self.downloads = []               # per download step: ('acquire',), ('--reset',) or (file, *flags)
+        self.downloads = []               # per download step: ('acquire',), ('--reset',), ('rom',) for the
+                                          # ROM's read, or (file, *flags)
         self.download_failure = None      # a container file name whose download fails
+        self.rom = ROM                    # the boot ROM, as a host reads it
+        self.rom_read_failure = None      # an address at which its read fails
         self.radio_commands = []          # (name, args) per radio command our WM took
         self.radio_failures = {}          # name -> (res, fail code, fail arg): its next command fails so
         self.channels = {}                # band -> (LO Hz, bw class) of its SETUP, the class after a RATE
@@ -119,11 +127,17 @@ class FakeDevice:
         self.mem, self.wm_up, self.wa_up = {}, False, False
         self.stream_packing, self.route_armed, self.icap_band = None, False, None
 
+    def ready(self, band=1):
+        """The radio as a load leaves it: up, every band set up with its capture path, ICAP
+        listening to `band`. What a STREAM wants to find."""
+        self.set_st('radio_state', BROUGHT_UP | sum(CHAN(b) | CAPTURE(b) for b in range(3)) | wm.STATE_SELECTED[band])
+        self.icap_band = band
+
     def boot_wm(self):
         """Our WM after the set's download (wm_main): status block, mailbox served."""
         for name in wm.STATUS_WORDS:
             self.set_st(name, 0)
-        self.set_st('version', 6)
+        self.set_st('version', 7)
         self.set_st('radio_ee', EE_BUFFER)
         self.set_st('rf_build', RF_BUILD)
         self.set_st('state', wm.STATE_RUNNING)
@@ -142,9 +156,13 @@ class FakeDevice:
             self._run_program()
         elif addr == wm.CALL and value:
             args = [self.mem.get(wm.ARGS + 4 * i, 0) for i in range(4)]
-            self.calls.append((value, args))
             self.mem[wm.CALL] = 0
-            self.set_st('ret', sum(args))
+            if self.unlocked() or OWN_IMAGE[0] <= value < OWN_IMAGE[1]:
+                self.calls.append((value, args))
+                self.set_st('ret', sum(args))
+            else:                                         # locked: a call goes into our own image alone
+                self.set_st('ret', 0)
+                self.set_st('denied', self.st('denied') + 1)
             self.set_st('calls', self.st('calls') + 1)
         elif addr == wm.WA_START and value == wm.WA_START_REQ:
             self._start_wa()
@@ -243,6 +261,7 @@ class FakeDevice:
             if a[0] > 2:
                 return RADIO_ERR_ARG
             self.icap_band = a[0]
+            state = state & ~sum(wm.STATE_SELECTED.values()) | wm.STATE_SELECTED[a[0]]
         else:
             return RADIO_ERR_OP
         self.set_st('radio_state', state)
@@ -255,7 +274,11 @@ class FakeDevice:
         producer waiting for the go word; None while it runs."""
         names = {code: name for name, code in wm.RADIO_PACKING.items()}
         if packing not in names:
-            return RADIO_ERR_ARG
+            return STREAM_BAD_PACKING
+        state = self.st('radio_state')
+        band = next((b for b in range(3) if state & wm.STATE_SELECTED[b]), None)
+        if not state & UP or band is None or not state & CAPTURE(band):
+            return STREAM_NOT_READY
         self.stream_packing = names[packing]
         if self.stream_packing != 'raw':
             self._start_wa()
@@ -328,9 +351,18 @@ class FakeDevice:
         self.mem[CTL_SERVED] = self.mem.get(CTL_SERVED, 0) + 1
         self.mem[CTL_ACK] = self.mem[rf.CTL_REQ]
 
+    def unlocked(self):
+        return self.st('unlock') == wm.UNLOCK_MAGIC
+
     def _op(self, op, a, b, c):
         """One op: (status, result)."""
         code, mem, adie = op & 0xFF, self.mem, self.adie
+        # The guard, as far as these tests go to it: the firmware's own list is tested as it is
+        # (tests/test_firmware_guard.py).
+        if not self.unlocked() and ((code in (rf.W32, rf.RMW32, rf.R32, rf.POLL) and a in GUARDED_MMIO) or
+                                    (code in (rf.W32, rf.RMW32) and a in GUARDED_MMIO_WRITES) or
+                                    (code == rf.AR and a in GUARDED_ADIE_READS)):
+            return CTL_DENIED, 0
         if code in (rf.W32, rf.RMW32):
             value = b if code == rf.W32 else (mem.get(a, 0) & ~b) | c
             mask = rf.ROUTE_GRANTS.get(a & ~3, 0)
@@ -600,6 +632,15 @@ class FakeUnit:
         if name == 'mt7996-probe' and argv[1:] == ['/dev/w1700k-sdr', '0x00901000', '4', '--acquire']:
             d.downloads.append(('acquire',))
             return StepResult(0, b'{"at":"read","pass":1,"ok":true,"word0":"0x00000000"}\n', b'', b'')
+        if name == 'mt7996-probe' and argv[1] == '/dev/w1700k-sdr' and argv[4:] == ['--raw', OUT]:
+            at, n = int(argv[2], 16), int(argv[3])
+            if d.downloads[-1:] != [('acquire',)] and d.downloads[-1:] != [('rom',)]:
+                raise AssertionError('the ROM is read with host ownership, before anything is downloaded')
+            if d.downloads[-1] != ('rom',):
+                d.downloads.append(('rom',))
+            if at == d.rom_read_failure:
+                return StepResult(1, b'{"at":"read","pass":1,"ok":false,"errno":"Input/output error"}\n', b'', b'')
+            return StepResult(0, b'{"at":"read","pass":1,"ok":true}\n', b'', d.rom[at - ROM_BASE:at - ROM_BASE + n])
         if name == 'mt7996-download' and argv[1:] == ['/dev/w1700k-sdr', '--reset']:
             d.downloads.append(('--reset',))
             d.reset()
@@ -619,8 +660,12 @@ class FakeUnit:
 FILES = {'patch': 'w1700k_rom_patch.bin', 'wm': 'w1700k_wm.bin', 'wa': 'w1700k_wa.bin'}
 
 
+ROM_BASE, ROM = 0x00800000, bytes(range(256)) * 256           # the fake radio's boot ROM: 64 KiB
+
+
 def make_firmware(directory):
-    """A schema 2 firmware.json set (firmware/build.py) with small stand-in images."""
+    """A schema 3 firmware.json set (firmware/build.py) with small stand-in images, written for the
+    fake radio's ROM."""
     directory = Path(directory)
     containers = []
     for role, name in FILES.items():
@@ -628,7 +673,8 @@ def make_firmware(directory):
         (directory / name).write_bytes(data)
         containers.append({'role': role, 'file': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
                            'flags': ['--wa'] if role == 'wa' else []})
-    manifest = {'schema': 2, 'containers': containers}
+    manifest = {'schema': 3, 'rom': {'base': ROM_BASE, 'size': len(ROM), 'sha256': [hashlib.sha256(ROM).hexdigest()]},
+                'containers': containers}
     (directory / 'firmware.json').write_text(json.dumps(manifest))
     return manifest
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Controller state transitions on a simulated unit running our firmware, and the `serve`
 protocol."""
+import hashlib
 import io
 import json
 import threading
@@ -64,7 +65,7 @@ class Load(ControllerTest):
         every band's lock read."""
         self.ctl.load(1)
         self.assertEqual(self.unit.module_replacements, 1)
-        self.assertEqual(self.dev.downloads, [('acquire',), ('--reset',), ('acquire',), ('w1700k_rom_patch.bin',),
+        self.assertEqual(self.dev.downloads, [('acquire',), ('--reset',), ('acquire',), ('rom',), ('w1700k_rom_patch.bin',),
                                               ('w1700k_wm.bin',), ('w1700k_wa.bin', '--wa')])
         self.assertEqual(self.dev.eeprom(), self.config.eeprom.read_bytes()[:7680])
         self.assertEqual(self.dev.radio_commands, STOCK_LOAD)
@@ -116,6 +117,45 @@ class Load(ControllerTest):
         self.dev.radio_failures['bringup'] = (RADIO_ERR_ORDER, 0, 0)
         with self.assertRaisesRegex(ControlError, '^bringup: a prerequisite has not run$'):
             self.ctl.load()
+
+    def test_nothing_is_downloaded_onto_a_rom_the_firmware_is_not_written_for(self):
+        """The patch redirects ROM instructions and calls ROM routines by address: on another ROM
+        those addresses hold something else, an eFuse writer among it."""
+        self.dev.rom = self.dev.rom[:0x1234] + b'\xff' + self.dev.rom[0x1235:]     # one byte of 64 KiB
+        with self.assertRaises(RuntimeError) as caught:
+            self.ctl.load()
+        text = str(caught.exception)
+        self.assertIn("this radio's ROM is not the one our firmware is written for", text)
+        self.assertIn(hashlib.sha256(self.dev.rom).hexdigest(), text, 'what it found, to report')
+        self.assertIn('Nothing was downloaded', text)
+        self.assertIn('"unknown_rom": true', text)
+        self.assertEqual(self.dev.downloads, [('acquire',), ('--reset',), ('acquire',), ('rom',)])
+        self.assertEqual(self.dev.radio_commands, [])
+        self.assertFalse(self.ctl.state()['radio']['loaded'])
+
+    def test_told_to_it_loads_onto_an_unknown_rom_and_says_so(self):
+        self.dev.rom = bytes(len(self.dev.rom))
+        ctl = Controller(replace(self.config, unknown_rom=True), emit=self.events.append, unit=self.unit)
+        ctl.load()
+        self.assertEqual(self.dev.downloads[3:], [('rom',), ('w1700k_rom_patch.bin',), ('w1700k_wm.bin',),
+                                                  ('w1700k_wa.bin', '--wa')])
+        self.assertTrue(any('ROM is not one our firmware is written for' in line and 'unknown_rom' in line
+                            for line in self.logs()), self.logs())
+
+    def test_a_rom_that_cannot_be_read_is_not_taken_for_the_right_one(self):
+        self.dev.rom_read_failure = 0x00803000
+        with self.assertRaisesRegex(RuntimeError, 'ROM read at 0x00803000 failed'):
+            self.ctl.load()
+        self.assertEqual(self.dev.downloads, [('acquire',), ('--reset',), ('acquire',), ('rom',)])
+
+    def test_our_wm_is_unlocked_after_a_load_only_when_the_configuration_says_so(self):
+        self.ctl.load()
+        self.assertEqual(self.dev.st('unlock'), 0, 'locked: the guard on raw programs and calls is on')
+        self.assertFalse(any('unlocked' in line for line in self.logs()))
+        ctl = Controller(replace(self.config, raw_access=True), emit=self.events.append, unit=self.unit)
+        ctl.load()
+        self.assertEqual(self.dev.st('unlock'), 0x4B4C4E55)
+        self.assertTrue(any('our WM is unlocked' in line and 'raw_access' in line for line in self.logs()), self.logs())
 
     def test_download_failure(self):
         self.dev.download_failure = 'w1700k_wm.bin'
@@ -213,6 +253,17 @@ class Streaming(ControllerTest):
         self.assertFalse(self.dev.streaming or self.dev.route_armed)
         self.assertIsNone(self.ctl.state()['stream']['packing'])
         self.assertIn('stream stopped: 1000 chunks in 1.0 s', self.logs())
+
+    def test_a_stream_our_wm_refuses_is_reported_and_no_pump_is_started_on_it(self):
+        self.loaded(1)
+        self.dev.set_st('radio_state', self.dev.st('radio_state') & ~host_fake.CAPTURE(1))    # as after a RATE
+        with self.assertRaisesRegex(StreamError, 'our WM refused the stream: the radio is not up, or no band is '
+                                                 'selected whose capture path is set up'):
+            self.ctl.start()
+        self.assertEqual([name for name, _ in self.dev.radio_commands], ['stream'])
+        self.assertFalse(self.dev.streaming or self.dev.route_armed or self.dev.wa_up)
+        self.assertIsNone(getattr(self.dev, 'pump_argv', None), 'the pump would wait for a producer that is not there')
+        self.assertFalse(self.ctl.state()['stream']['running'])
 
     def test_a_stream_this_host_would_drop_is_not_started(self):
         """With no destination MAC configured the stream comes to this host, whose interface must

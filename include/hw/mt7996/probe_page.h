@@ -140,18 +140,23 @@
 #define MT7996_PROBE_RES_WA_RA            0x3cu
 #define MT7996_PROBE_RES_WA_EXIT_CYCLES   0x40u
 #define MT7996_PROBE_RES_CTL_SERVED       0x44u
-#define MT7996_PROBE_RES_CHUNKS           0x48u	/* u64 from here on */
-#define MT7996_PROBE_RES_CYCLES           0x50u
-#define MT7996_PROBE_RES_WRITTEN          0x58u
-#define MT7996_PROBE_RES_CREDIT_WAITS     0x60u
-#define MT7996_PROBE_RES_WA_WAITS         0x68u
-#define MT7996_PROBE_RES_WM_WAITS         0x70u
-#define MT7996_PROBE_RES_WM_PACKS         0x78u
-#define MT7996_PROBE_RES_WM_PACK_CYCLES   0x80u
-#define MT7996_PROBE_RES_WA_PACKS         0x88u
-#define MT7996_PROBE_RES_WA_PACK_CYCLES   0x90u
-#define MT7996_PROBE_RES_WA_IDLE          0x98u
-#define MT7996_PROBE_RES_SIZE             0xa0u
+/* The longest slice of control work (cycles), and the longest one may be while this stream
+ * runs: three quarters of a lap of the capture ring, measured from the stream (0: never
+ * measured). A longer slice ends the stream with ST_OVERRUN (firmware/stream/ctl.h). */
+#define MT7996_PROBE_RES_CTL_SLICE_MAX    0x48u
+#define MT7996_PROBE_RES_CTL_SLICE_LIMIT  0x4cu
+#define MT7996_PROBE_RES_CHUNKS           0x50u	/* u64 from here on */
+#define MT7996_PROBE_RES_CYCLES           0x58u
+#define MT7996_PROBE_RES_WRITTEN          0x60u
+#define MT7996_PROBE_RES_CREDIT_WAITS     0x68u
+#define MT7996_PROBE_RES_WA_WAITS         0x70u
+#define MT7996_PROBE_RES_WM_WAITS         0x78u
+#define MT7996_PROBE_RES_WM_PACKS         0x80u
+#define MT7996_PROBE_RES_WM_PACK_CYCLES   0x88u
+#define MT7996_PROBE_RES_WA_PACKS         0x90u
+#define MT7996_PROBE_RES_WA_PACK_CYCLES   0x98u
+#define MT7996_PROBE_RES_WA_IDLE          0xa0u
+#define MT7996_PROBE_RES_SIZE             0xa8u
 
 /*
  * WM packed-chunk buffers (stream, 7168 bytes each = one 8 KiB chunk packed
@@ -199,6 +204,13 @@
  * control interpreter calls for MT7996_PROBE_CTL_OP_RF: our WM's main loop and the stream
  * producer, which is linked separately, reach it through this word. Written at start. */
 #define MT7996_PROBE_OWN_WM_RF_BUILD      (MT7996_PROBE_OWN_WM_STATUS + 0x98u)
+/* The guard on what a host's raw programs and calls may reach (firmware/stream/ctl.h "The
+ * guard"). Our WM clears UNLOCK at every start: it runs locked. The host writes the magic
+ * to lift the guard until the next load, for development. DENIED counts the calls the WM
+ * refused; a refused op is its program's status (MT7996_PROBE_CTL_DENIED). */
+#define MT7996_PROBE_OWN_WM_UNLOCK        (MT7996_PROBE_OWN_WM_STATUS + 0x9cu)
+#define   MT7996_PROBE_OWN_WM_UNLOCK_MAGIC 0x4b4c4e55u	/* 'UNLK' */
+#define MT7996_PROBE_OWN_WM_DENIED        (MT7996_PROBE_OWN_WM_STATUS + 0xa0u)
 /* Our WA's status block (firmware/wa/wa.h), after the WM's and up to the CTL mailbox: 8 words.
  * (It was at +0x80, on top of the WM's radio words.) */
 #define MT7996_PROBE_OWN_WA_STATUS        0x0090f3e0u
@@ -278,6 +290,12 @@
 /* An RF op's res only (the program goes on): a tune whose VCO reports no
  * lock afterwards (adie/sx.h ADIE_SX_STATUS_VCO != 0). */
 #define   MT7996_PROBE_CTL_RF_UNLOCKED    8u
+/* A raw op at a register the guard keeps from a host's programs, on a WM that is locked. */
+#define   MT7996_PROBE_CTL_DENIED         9u
+/* The program was acknowledged without being run, or without being run to its end: it was
+ * posted while the WM was at something else that serves the mailbox afresh afterwards (a radio
+ * command, a call, a stream's start or end). Its results are not this program's. Post it again. */
+#define   MT7996_PROBE_CTL_NOT_RUN        10u
 /* Measured cost: a full LO retune is about 1.5 ms of SPI; with packing the
  * WM has about 18% of its time to spare for control. [measured] */
 

@@ -62,6 +62,8 @@ uint32_t hal_now_us(void);
 #define HAL_FAIL_SPI		3u	/* A-die transaction failed; arg = HAL_AREG */
 #define HAL_FAIL_ARG		4u	/* a module refused its arguments; arg = module-defined */
 #define HAL_FAIL_STATE		5u	/* a module found the hardware in an unexpected state */
+#define HAL_FAIL_TRAP		7u	/* a load or store faulted during the command (the WM skips it and
+					 * goes on with whatever was in the register); arg = its address */
 #define HAL_AREG(die, k, idx)	((uint32_t)(die) << 16 | (uint32_t)(k) << 12 | (uint32_t)(idx))
 
 struct hal_fail {

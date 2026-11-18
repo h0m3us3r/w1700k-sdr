@@ -70,10 +70,16 @@
  * interpreter (stream/ctl.h) calls it for an RF op, in our main loop and in the separately linked
  * stream producer alike. */
 #define WM_RF_BUILD	0x98
-#define WM_STATUS_WORDS	39
+/* The guard (stream/ctl.h): WM_UNLOCK holds WM_UNLOCK_MAGIC while a host has lifted it, and is
+ * cleared at every start; WM_DENIED counts the calls refused (WM_CALL to an address that is not
+ * in our own image, on a locked WM). */
+#define WM_UNLOCK	0x9c
+#define WM_DENIED	0xa0
+#define WM_STATUS_WORDS	41
 
 #define WM_MAGIC	U32(0x4d57574f)		/* 'OWWM' */
-#define WM_VERSION	U32(6)
+#define WM_VERSION	U32(7)
+#define WM_UNLOCK_MAGIC	U32(0x4b4c4e55)		/* 'UNLK' */
 #define WM_WA_START_REQ	U32(1)
 #define WM_WA_STARTED	U32(2)
 #define WM_STATE_RUNNING	U32(1)
@@ -96,6 +102,9 @@ _Static_assert(WM_STATUS == MT7996_PROBE_OWN_WM_STATUS && WM_MAGIC == MT7996_PRO
 	       WM_STATUS + WM_RADIO_REQ == MT7996_PROBE_OWN_WM_RADIO_REQ &&
 	       WM_STATUS + WM_RADIO_STATE == MT7996_PROBE_OWN_WM_RADIO_STATE &&
 	       WM_STATUS + WM_RF_BUILD == MT7996_PROBE_OWN_WM_RF_BUILD &&
+	       WM_STATUS + WM_UNLOCK == MT7996_PROBE_OWN_WM_UNLOCK &&
+	       WM_UNLOCK_MAGIC == MT7996_PROBE_OWN_WM_UNLOCK_MAGIC &&
+	       WM_STATUS + WM_DENIED == MT7996_PROBE_OWN_WM_DENIED &&
 	       WM_STATUS + 4 * WM_STATUS_WORDS <= MT7996_PROBE_OWN_WA_STATUS, "wm.h and probe_page.h disagree");
 #endif
 

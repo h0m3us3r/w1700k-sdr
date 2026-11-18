@@ -48,8 +48,11 @@ class Mirrors(unittest.TestCase):
             else:
                 offset = h[f'WM_{name.upper()}']
             self.assertEqual(4 * i, offset, name)
-        for name in ('call', 'ret', 'wa_start', 'radio_ee', 'radio_req', 'radio_state', 'rf_build'):
+        for name in ('call', 'ret', 'wa_start', 'radio_ee', 'radio_req', 'radio_state', 'rf_build', 'unlock', 'denied'):
             self.assertEqual(wm.STATUS + 4 * wm.STATUS_WORDS.index(name), h[f'MT7996_PROBE_OWN_WM_{name.upper()}'])
+        self.assertEqual(wm.UNLOCK_MAGIC, h['WM_UNLOCK_MAGIC'])
+        self.assertEqual(wm.UNLOCK_MAGIC, h['MT7996_PROBE_OWN_WM_UNLOCK_MAGIC'])
+        self.assertEqual(host_fake.OWN_IMAGE, (h['WM_ENTRY'], h['WM_LIMIT']))
 
     def test_wa_status_block(self):
         h = self.h
@@ -137,10 +140,44 @@ class Own(unittest.TestCase):
 
     def test_call(self):
         w = self.running()
-        self.assertEqual(w.call(0x00822B92, 0x100, 0, 0x1C0, 1), 0x2C1)
-        self.assertEqual(self.dev.calls, [(0x00822B92, [0x100, 0, 0x1C0, 1])])
+        self.assertEqual(w.call(0x00930000, 0x100, 0, 0x1C0, 1), 0x2C1)
+        self.assertEqual(self.dev.calls, [(0x00930000, [0x100, 0, 0x1C0, 1])])
         with self.assertRaises(ValueError):
             w.call(0x1000, 1, 2, 3, 4, 5)
+
+    def test_locked_our_wm_calls_only_into_its_own_image(self):
+        """It starts locked. The ROM is callable code too, an eFuse writer among it."""
+        w = self.running()
+        self.assertTrue(w.locked())
+        with self.assertRaisesRegex(wm.WmError, 'call to 0x00822b92 was refused: our WM is locked.*"raw_access": true'):
+            w.call(0x00822B92, 0x100, 0, 0x1C0, 1)
+        self.assertEqual(self.dev.calls, [])
+        w.unlock()
+        self.assertFalse(w.locked())
+        self.assertEqual(w.call(0x00822B92, 0x100, 0, 0x1C0, 1), 0x2C1)
+        self.assertEqual(self.dev.calls, [(0x00822B92, [0x100, 0, 0x1C0, 1])])
+
+    def test_locked_a_raw_program_does_not_reach_what_the_guard_keeps(self):
+        w = self.running()
+        for what, ops in (('the eFuse control word', [rf.w32(0x70021008, 0x400000C0)]),
+                          ('semaphore 12, which a read takes', [rf.r32(0x7C070030)]),
+                          ("a band's transmit disable", [rf.r32(0x0090F300), rf.rmw32(0x820F3000, 0x100, 0)]),
+                          ('a read that wedges a die', [rf.ar(rf.reg(1, 15, 0x222))])):
+            with self.subTest(what):
+                with self.assertRaisesRegex(wm.WmError, r'op \d: refused by the guard.*"raw_access": true'):
+                    w.run(ops)
+        self.assertNotIn(0x70021008, self.dev.mem)
+        self.assertEqual(w.run([rf.r32(0x820F3000)]), [0], 'what is not guarded runs as before')
+        w.unlock()
+        w.run([rf.w32(0x70021008, 0), rf.r32(0x7C070030), rf.ar(rf.reg(1, 15, 0x222))])
+        self.assertEqual(self.dev.mem[0x70021008], 0)
+
+    def test_a_load_locks_it_again(self):
+        w = self.running()
+        w.unlock()
+        self.dev.reset()
+        self.dev.boot_wm()
+        self.assertTrue(wm.Wm(self.unit).locked())
 
     def test_start_wa(self):
         w = self.running()
@@ -189,6 +226,7 @@ class RadioCommands(unittest.TestCase):
 
     def test_one_at_a_time(self):
         """A STREAM is acknowledged when the stream ends; nothing else is posted meanwhile."""
+        self.dev.ready()
         req = self.w.radio_post('stream', wm.RADIO_PACKING['raw'])
         with self.assertRaisesRegex(wm.WmError, 'still running'):
             self.w.radio_post('select', 1)
@@ -198,7 +236,34 @@ class RadioCommands(unittest.TestCase):
         self.unit.end_stream(7)
         self.assertEqual(self.w.radio_wait(req, 'stream')['res'], 7)
 
+    def test_a_stream_is_refused_at_once_unless_the_radio_is_ready_for_one(self):
+        """Up, and the band ICAP listens to with its capture path: a stream of nothing has no end,
+        and a WA started on an unconfigured radio leaves it deaf. The refusals are no producer
+        status."""
+        h = host_fake.header_defines(*HEADERS)
+        self.assertEqual(wm.STREAM_REFUSALS.keys(), {h['RADIO_STREAM_BAD_PACKING'], h['RADIO_STREAM_NOT_READY']})
+        self.assertEqual(wm.STATE_SELECTED, {b: h['RADIO_STATE_SELECTED'](b) for b in range(3)})
+        self.assertTrue(all(code >= 0x100 for code in wm.STREAM_REFUSALS), 'above every producer status')
+        ready = self.dev.st('radio_state')
+        for what, state, packing, res in (
+                ('nothing brought up', 0, 'raw', h['RADIO_STREAM_NOT_READY']),
+                ('up, no band selected', host_fake.BROUGHT_UP | host_fake.CHAN(1) | host_fake.CAPTURE(1), 'half', h['RADIO_STREAM_NOT_READY']),
+                ('the selected band without its capture path (after a RATE)',
+                 host_fake.BROUGHT_UP | host_fake.CHAN(1) | host_fake.CAPTURE(0) | wm.STATE_SELECTED[1], 'raw',
+                 h['RADIO_STREAM_NOT_READY']),
+                ('not a packing', None, 9, h['RADIO_STREAM_BAD_PACKING'])):
+            with self.subTest(what):
+                if state is None:
+                    self.dev.ready()
+                else:
+                    self.dev.set_st('radio_state', state)
+                req = self.w.radio_post('stream', wm.RADIO_PACKING.get(packing, packing))
+                self.assertEqual(self.w.radio_wait(req, 'stream', timeout=1)['res'], res)
+                self.assertFalse(self.dev.wa_up, 'and the WA was not started for it')
+        self.dev.set_st('radio_state', ready)
+
     def test_trap_while_waiting(self):
+        self.dev.ready()
         req = self.w.radio_post('stream', wm.RADIO_PACKING['half'])
         self.dev.set_st('state', wm.STATE_TRAPPED)
         with self.assertRaisesRegex(wm.WmError, 'trapped during radio stream'):

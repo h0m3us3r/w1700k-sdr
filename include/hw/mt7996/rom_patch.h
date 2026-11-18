@@ -145,10 +145,15 @@
  * wait-idle, length and the CRC-valid-bit tests keep refusing a download
  * that did not land. With it, a modified WM boots to FW_STATE 7 while
  * PDA_CRC_VAL (0x54000814, host BAR 0x02814) still reads nonzero, which is
- * itself the proof the hook ran (no evidence block). Replacement at the end
- * of the patch body, 0x00908cc0.
+ * itself the proof the hook ran (no evidence block).
+ *
+ * Where our hooks sit in the table and in patch SRAM is the build's to say
+ * (firmware/rom_patch/patch.py): our patch is an empty table to which the
+ * PDA-CRC, SYSRAM-layout and start-mask hooks are added in that order, so they
+ * are entries 0, 1 and 2, each replacement appended after the one before. (An
+ * earlier scheme added two of them to MediaTek's patch as entries 26 and 27,
+ * at 0x00908cc0 and 0x00908cd0; nothing builds that any more.)
  */
-#define MT7996_ROMPATCH_HOOK_PDACRC_ENTRY 26u
 #define MT7996_ROMPATCH_HOOK_PDACRC_FROM  0x008264e4u
 #define MT7996_ROMPATCH_HOOK_PDACRC_RET   0x008264e8u
 /*
@@ -156,18 +161,15 @@
  * (entry 0x00822b92, ROM API index 746), at `shgp a0, 0x18c38` (the store of
  * the PLE bank count). Calls halUmacLibSetSysramLayout(PLE 1, PSE 2,
  * ICAP 0) (0x00822a2e, API 735; returns 1 and stores nothing if two
- * positions are equal) and halUmacLibSetWsIcapBankSysramNum(256)
- * (0x00822a50, API 736), rewrites the PLE/PSE bank arguments to 192/256,
- * then runs the copied shgp. Result: pool profile 5 (mcu_map.h), the only
- * partition where ICAP owns pool banks. Fires exactly once per
- * WM/DSP/WA download; writes the evidence block at 0x0090a000
- * (probe_page.h). Entry 26 alone, or 27 behind the PDA-CRC hook;
- * replacement at 0x00908cc0 / 0x00908cd0.
+ * positions are equal) and halUmacLibSetWsIcapBankSysramNum(ICAP banks)
+ * (0x00822a50, API 736), rewrites the PLE/PSE bank arguments so that the
+ * three total the 704-bank pool, then runs the copied shgp. The counts are
+ * the build's (patch.py): ICAP 512 (the 1 MiB capture ring), PLE 64, PSE
+ * 128. (Earlier builds used 256 / 192 / 256.) The only partition where ICAP
+ * owns pool banks. Writes the evidence block at 0x0090a000 (probe_page.h).
+ * Its place in the table: see the PDA-CRC hook above.
  */
-#define MT7996_ROMPATCH_HOOK_LAYOUT_ENTRY 27u
 #define MT7996_ROMPATCH_HOOK_LAYOUT_FROM  0x00822b94u
-#define MT7996_ROMPATCH_HOOK_LAYOUT_TO    0x00908cd0u
-#define MT7996_ROMPATCH_HOOK_PDACRC_TO    0x00908cc0u
 #define MT7996_ROM_UMAC_SET_LAYOUT        0x00822a2eu	/* API 735 */
 #define MT7996_ROM_UMAC_SET_ICAP_BANKS    0x00822a50u	/* API 736 */
 #define MT7996_ROM_UMAC_PLE_PSE_INIT      0x00822b92u	/* API 746 */
