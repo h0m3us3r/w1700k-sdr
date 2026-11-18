@@ -57,6 +57,42 @@ std::string env_or(const char *name, const std::string &fallback)
     return value && *value ? value : fallback;
 }
 
+// A device's arguments are text from whoever asked for the device, and that is not always the
+// user who runs the application: SoapyRemote's server makes a device from the arguments of any
+// client that connects. So no argument is a command, and none is put into one unchecked.
+//
+// The two commands this module runs (the controller, and a stream service to start) come from
+// the environment of the process that loaded it. As an argument only "none" is taken, which
+// runs nothing.
+std::string command_or_none(const SoapySDR::Kwargs &args, const char *key, const char *variable, const std::string &fallback)
+{
+    const std::string given = arg_or(args, key, "");
+    if (given == "none") return given;
+    if (!given.empty())
+        throw std::runtime_error(std::string("w1700k: ") + key + "= is not taken from a device's arguments (only " + key +
+                                 "=none is): a command is the environment's to give, " + variable + "=COMMAND");
+    return env_or(variable, fallback);
+}
+
+// The stream's name, as the service takes it: a slash and up to 64 of A-Z a-z 0-9 . _ -
+std::string stream_name(const SoapySDR::Kwargs &args)
+{
+    const std::string name = arg_or(args, "stream", W1700K_STREAM_NAME);
+    const bool good = name.size() >= 2 && name.size() <= 65 && name[0] == '/' &&
+                      name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-", 1) == std::string::npos;
+    if (!good) throw std::runtime_error("w1700k: stream= names the stream service's shared memory, like " W1700K_STREAM_NAME);
+    return name;
+}
+
+// A packing the controller knows (host/w1700k/config.py, PACKINGS), or none given.
+std::string packing_of(const SoapySDR::Kwargs &args)
+{
+    const std::string packing = arg_or(args, "packing", "");
+    static const char *const known[] = {"raw", "half", "full", "split", "16", "14", "8", "7"};
+    if (packing.empty() || std::find(std::begin(known), std::end(known), packing) != std::end(known)) return packing;
+    throw std::runtime_error("w1700k: packing= is one of raw, half, full, split, 16, 14, 8, 7");
+}
+
 bool on_path(const std::string &program)
 {
     const std::string path = env_or("PATH", "");
@@ -90,16 +126,19 @@ void log_from_controller(const std::string &level, const std::string &text)
 // The stream service, started here because none was running: it ends with the device.
 class Service {
 public:
-    explicit Service(const std::string &command)
+    // `program` and its arguments, as they are: found on PATH, with no shell between.
+    explicit Service(const std::vector<std::string> &program)
     {
-        const char *text = command.c_str();
+        std::vector<char *> argv;
+        for (const auto &word : program) argv.push_back(const_cast<char *>(word.c_str()));
+        argv.push_back(nullptr);
         pid_ = fork();
         if (pid_ == 0) {
             setpgid(0, 0);
             const int null = open("/dev/null", O_RDONLY);
             if (null >= 0) dup2(null, STDIN_FILENO);
             dup2(STDERR_FILENO, STDOUT_FILENO);  // the application's stdout is its own
-            execl("/bin/sh", "sh", "-c", text, static_cast<char *>(nullptr));
+            execvp(argv[0], argv.data());
             _exit(127);
         }
         if (pid_ < 0) throw std::runtime_error(std::string("fork: ") + std::strerror(errno));
@@ -295,21 +334,32 @@ private:
 };
 
 W1700K::W1700K(const SoapySDR::Kwargs &args)
-    : stream_name_(arg_or(args, "stream", W1700K_STREAM_NAME)), ring_(stream_name_)
+    : stream_name_(stream_name(args)), ring_(stream_name_)
 {
     for (int b = 0; b < kBands; b++) std::copy(kDefaultSpan[b], kDefaultSpan[b] + 2, span_[b]);
+    // Every argument is judged before anything is run for any of them.
+    const std::string packing = packing_of(args);
+    const std::string service_command = command_or_none(args, "service", "W1700K_STREAM_SERVICE", "");
+    controller_command_ = command_or_none(args, "controller", "W1700K_CONTROLLER", "w1700k serve");
 
     // The samples: the stream service, started here if none runs and one can be.
     if (!ring_.alive()) {
-        std::string service = arg_or(args, "service", env_or("W1700K_STREAM_SERVICE", ""));
-        if (service.empty() && on_path("w1700k-stream"))
-            service = "w1700k-stream" +
-                      (stream_name_ == W1700K_STREAM_NAME ? std::string() : " --name '" + stream_name_ + "'");
-        if (service.empty() || service == "none")
-            throw std::runtime_error("no stream service at " + stream_name_ +
-                                     ": start w1700k-stream (host/stream), or name it with service=COMMAND");
+        // The environment's command goes to a shell, as the user wrote it; our own is run as it
+        // is, the stream's name an argument of its own.
+        std::string service = service_command;
+        std::vector<std::string> program;
+        if (!service.empty() && service != "none") {
+            program = {"/bin/sh", "-c", "exec " + service};
+        } else if (service.empty() && on_path("w1700k-stream")) {
+            program = {"w1700k-stream"};
+            if (stream_name_ != W1700K_STREAM_NAME) program.insert(program.end(), {"--name", stream_name_});
+            service = "w1700k-stream";
+        }
+        if (program.empty())
+            throw std::runtime_error("no stream service at " + stream_name_ + ": start w1700k-stream (host/stream), or "
+                                     "name the command that starts it in the environment, W1700K_STREAM_SERVICE");
         SoapySDR::logf(SOAPY_SDR_INFO, "w1700k: starting the stream service: %s", service.c_str());
-        service_ = std::make_unique<Service>("exec " + service);
+        service_ = std::make_unique<Service>(program);
         for (int k = 0; k < 100 && !ring_.alive(); k++) {
             if (service_->exited()) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -321,7 +371,6 @@ W1700K::W1700K(const SoapySDR::Kwargs &args)
     }
 
     // The settings: the receiver's controller, unless this device only listens.
-    controller_command_ = arg_or(args, "controller", env_or("W1700K_CONTROLLER", "w1700k serve"));
     if (controller_command_ == "none") {
         controller_command_.clear();
         const auto view = ring_.view();
@@ -329,9 +378,11 @@ W1700K::W1700K(const SoapySDR::Kwargs &args)
         radio_.rate = rate_;
         return;
     }
-    const std::string packing = arg_or(args, "packing", "");
-    if (!packing.empty()) controller_command_ += " --packing '" + packing + "'";
-    control_ = std::make_unique<Control>(controller_command_, log_from_controller);
+    // The packing is a word of the controller's own, handed to it as an argument: never text
+    // of the command a shell reads.
+    std::vector<std::string> more;
+    if (!packing.empty()) more = {"--packing", packing};
+    control_ = std::make_unique<Control>(controller_command_, more, log_from_controller);
     std::lock_guard<std::mutex> lock(mutex_);
     sync();
 }
@@ -776,7 +827,13 @@ SoapySDR::KwargsList find_w1700k(const SoapySDR::Kwargs &args)
             }
         closedir(dir);
     }
-    Ring ring(arg_or(args, "stream", W1700K_STREAM_NAME));
+    std::string name;
+    try {
+        name = stream_name(args);
+    } catch (const std::exception &) {
+        return {};  // not a stream's name: no device of ours is meant
+    }
+    Ring ring(name);
     if (!args.count("driver") && !units && !ring.alive()) return {};
     if (units == 1 && !found.count("serial")) found["serial"] = serial;
     if (!found.count("label")) found["label"] = "W1700K SDR" + (units == 1 ? " " + serial : std::string());

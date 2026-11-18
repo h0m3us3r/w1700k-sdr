@@ -37,11 +37,11 @@ def packing_for(rate):
 
 
 class Controller:
-    def __init__(self, log_path, tuning_path, progress_delay, unloaded=False, running=False):
+    def __init__(self, log_path, tuning_path, progress_delay, unloaded=False, running=False, packing=None):
         self.log = open(log_path, "a", buffering=1)
         self.tuning_path = tuning_path
         self.delay = progress_delay
-        self.log.write(json.dumps({"pid": os.getpid()}) + "\n")
+        self.log.write(json.dumps({"pid": os.getpid(), **({"packing": packing} if packing is not None else {})}) + "\n")
         self.lo = dict(DEFAULT_LO)
         self.state = {
             "busy": None,
@@ -182,8 +182,9 @@ def main():
     parser.add_argument("--progress-delay", type=float, default=0.2, help="seconds between configure steps")
     parser.add_argument("--unloaded", action="store_true", help="the radio is not loaded until a load")
     parser.add_argument("--running", action="store_true", help="the stream is already running")
+    parser.add_argument("--packing", help="a packing set by hand, as `w1700k serve` takes it: noted in the log's first line")
     args = parser.parse_args()
-    controller = Controller(args.log, args.tuning_file, args.progress_delay, args.unloaded, args.running)
+    controller = Controller(args.log, args.tuning_file, args.progress_delay, args.unloaded, args.running, args.packing)
     controller.publish()
     controller.serve()
 

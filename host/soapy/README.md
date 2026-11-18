@@ -53,9 +53,23 @@ Device arguments, beside `driver=w1700k`:
 | argument | default | |
 | --- | --- | --- |
 | `stream` | `/w1700k-stream` | the stream service's shared memory |
-| `controller` | `$W1700K_CONTROLLER`, else `w1700k serve` | the controller's command, run with `sh -c`; `none` for a device that only listens: it reads the stream, and every setter is refused |
-| `packing` | | set every stream's packing by hand (`w1700k serve --packing`) |
-| `service` | `$W1700K_STREAM_SERVICE`, else `w1700k-stream` if on `PATH` | what to start when no stream service runs; `none`: nothing |
+| `controller` | | `none` for a device that only listens: it reads the stream, and every setter is refused. Nothing else is taken here |
+| `packing` | | set every stream's packing by hand: `raw`, `half`, `full`, `split`, `16`, `14`, `8` or `7` (`w1700k serve --packing`) |
+| `service` | | `none`: start no stream service when none runs. Nothing else is taken here |
+
+The two commands the module runs come from the environment of the application that loads it,
+never from a device's arguments:
+
+| variable | default | |
+| --- | --- | --- |
+| `W1700K_CONTROLLER` | `w1700k serve` | the controller's command, run with `sh -c` |
+| `W1700K_STREAM_SERVICE` | `w1700k-stream` if on `PATH` | what to start when no stream service runs, run with `sh -c` |
+
+A device's arguments are not always the user's own text: SoapyRemote's server makes a device
+from the arguments of whoever connects to it. A command given as an argument would run for
+them as the server's user, so `controller=COMMAND` and `service=COMMAND`, which earlier versions
+took, are refused with a message that names the variable. The other arguments are checked
+before anything runs, and reach the programs as words of their own, not as text a shell reads.
 
 ## How it behaves
 
