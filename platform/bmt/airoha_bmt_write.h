@@ -115,6 +115,10 @@ struct airoha_bmt_flash {
 	airoha_sha256_fn hash;
 };
 
+/* The tickets the record in this journal has used (0..AIROHA_RETIRE_ATTEMPTS), or an error. A
+ * used ticket means a retirement of the old table was at least begun. */
+int airoha_bmt_tickets_used(const struct airoha_bmt_flash *io, airoha_u32 journal_block);
+
 /* Publish/recover one already-durable intent. Checks the journal and image
  * again before any metadata I/O. Uses only initially-free blocks named by that
  * immutable journal. Metadata retry candidates are erased/verified/retired

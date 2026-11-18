@@ -69,6 +69,9 @@ static int driver_write(struct mtd_info *dev,loff_t to,struct mtd_oob_ops *ops)
 	assert(b>=T_FIRST && b!=65 && b!=T_SYSTEM); /* physical protected/factory storage */
 	assert(!((u64)to%PS) && ops->len<=PS && ops->ooboffs+ops->ooblen<=per);
 	ops->retlen=ops->oobretlen=0; mutations++;
+	/* the publication's last step fails: the old table takes no bad mark (a block that will
+	 * not erase no longer stops one: it is marked and passed over) */
+	if(fail_metadata && b==T_LAST && ops->mode==MTD_OPS_RAW && !ops->len) return -EIO;
 #ifndef TEST_LINUX
 	if(reenter && !reentered) {
 		struct mtd_oob_ops recursive={.mode=MTD_OPS_AUTO_OOB,.len=1,.datbuf=data};
@@ -110,7 +113,6 @@ static int driver_erase(struct mtd_info *dev,struct erase_info *e)
 	assert(e->addr%BS==0 && e->len==BS && b>=64 && b!=65 && b!=T_SYSTEM && b!=T_LAST);
 	mutations++;
 	if(fail_erase_original && b==original_physical) { fail_erase_original=0;return -EIO; }
-	if(fail_metadata && b==(T_LAST-1)) return -EIO;
 	struct block *s=storage(b);memset(s,255,sizeof *s);memset(s->programs,0,T_PAGES);s->last=-1;
 	return 0;
 }
@@ -313,10 +315,46 @@ static void refusals(void)
 	assert(!attach(&m));
 	puts("managed master protection, RAW/marker/parity refusal, ECC counts, markbad and ENOMEM: passed");
 }
+/* A writer that cannot start (here: the journal's block is marked bad) used to fail the attach,
+ * and then nothing read the flash at all. It attaches with translation alone: what was there
+ * reads as it did, through the same map, and nothing is written. */
+static void writer_that_cannot_start(void)
+{
+	struct mtd_oob_ops op={.mode=MTD_OPS_AUTO_OOB,.len=PS,.datbuf=data};
+	base(1);
+	unsigned journal=layer.writer->journal_block;
+	for(unsigned logical=64;logical<69;logical++) {	/* 67 is the one the BMT maps into the pool */
+		op.retlen=0;assert(!m._read_oob(&m,(loff_t)logical*BS,&op) && op.retlen==PS);
+		memcpy(expected_data+(logical-64)*PS,data,PS);
+	}
+	detach(&m);raw_mtd();
+	storage(journal)->spare[0][0]=0;
+	unsigned before=mutations;
+	assert(!attach(&m));
+	assert(layer.mtd==&m && layer.read_only && !layer.writer);
+	/* Not writeable, and still a device the MTD core registers: add_mtd_device refuses one
+	 * with no erase operation (drivers/mtd/mtdcore.c: "!mtd->erasesize || !master->_erase",
+	 * unless MTD_NO_ERASE). A first version cleared the operations, and the probe then
+	 * failed at registration: the very thing this attachment is for. They answer -EROFS. */
+	assert(!(m.flags&MTD_WRITEABLE) && m.erasesize && m._erase && m._write_oob && m._block_markbad);
+	struct erase_info refused={.addr=64ull*BS,.len=BS};
+	op.retlen=0;
+	assert(m._erase(&m,&refused)==-EROFS && m._write_oob(&m,64ull*BS,&op)==-EROFS && !op.retlen);
+	assert(m._block_markbad(&m,64ull*BS)==-EROFS);
+	for(unsigned logical=64;logical<69;logical++) {
+		memset(data,0,PS);op.retlen=0;
+		assert(!m._read_oob(&m,(loff_t)logical*BS,&op) && op.retlen==PS);
+		assert(!memcmp(data,expected_data+(logical-64)*PS,PS));
+	}
+	assert(mutations==before);
+	detach(&m);assert(m.flags&MTD_WRITEABLE);
+	puts("a writer that cannot start: attached read-only, the same translated reads, nothing written: passed");
+}
+
 static void recovery(void)
 {
 	/* The direct program tears its page; the transaction then stages the
-	 * intended block and remaps, and here its metadata write fails too. The
+	 * intended block and remaps, and here the old table's mark fails too. The
 	 * caller is told nothing was made durable; recovery publishes it. */
 	base(0);memset(data,0x57,sizeof data);fail_original=fail_metadata=1;
 	struct mtd_oob_ops op={.mode=MTD_OPS_AUTO_OOB,.len=PS,.datbuf=data};
@@ -382,7 +420,7 @@ static void concurrent(void)
 
 int main(void)
 {
-	read_matrix();writes();refusals();recovery();
+	read_matrix();writes();refusals();recovery();writer_that_cannot_start();
 #ifdef TEST_LINUX
 	concurrent();
 #endif
