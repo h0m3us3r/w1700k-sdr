@@ -311,6 +311,11 @@ the most CPU, in `tests/build/host-bench.txt` and `.json`. With
 - Accessing undocumented MT7996 or AN7581 addresses can hang the SoC or wedge
   the radio until a power cycle. `include/hw/` marks every known hazard.
 
+## Community
+
+Questions, captures and development talk are on the
+[SDR Labs Discord](https://discord.com/invite/AGDYSdUPsz).
+
 ## Licence
 
 MIT, except the Linux driver and kernel patches (GPL-2.0-only), U-Boot patches
