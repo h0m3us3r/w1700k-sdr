@@ -43,19 +43,26 @@ class Table(unittest.TestCase):
                 self.assertEqual([slots[i] for i in at], list(range(len(at))), packing.name)
                 if at:
                     gaps = {(b - a) % blob.PERIOD or blob.PERIOD for a, b in zip(at, at[1:] + at[:1])}
-                    self.assertLessEqual(max(gaps) - min(gaps), 1, f'{packing.name}: spread as evenly as it goes')
+                    # Shares that are not equal take their places among the same positions, so
+                    # a packer's steps differ by one more.
+                    self.assertLessEqual(max(gaps) - min(gaps), 1 if packing.wa == packing.wm else 2,
+                                         f'{packing.name}: spread as evenly as it goes')
         self.assertEqual(blob.schedule(blob.RAW)[:2], (0, 0))
-        self.assertEqual(blob.schedule(blob.HALF)[:2], (0x4444, 0x1111), 'half is what it always was')
+        self.assertEqual(blob.schedule(blob.HALF)[:2], (0x44444444, 0x11111111), 'half is what it always was')
         wa_mask, wm_mask, _ = blob.schedule(blob.FULL)
         self.assertEqual(wa_mask | wm_mask, (1 << blob.PERIOD) - 1, 'full packs every chunk')
-        self.assertEqual((wa_mask, wm_mask), (0xAAAA, 0x5555), 'the packers alternate')
+        self.assertEqual((wa_mask, wm_mask), (0xAAAAAAAA, 0x55555555), 'the packers alternate')
         wa_mask, wm_mask, _ = blob.schedule(blob.SPLIT)
-        self.assertEqual((wa_mask, wm_mask), (0x4912, 0x1249), 'split: 5 chunks of 16 each, 6 left raw for the SoC')
+        self.assertEqual((wa_mask, wm_mask), (0x52494912, 0x09121249), 'split: 11 chunks of 32 for the WA, 9 for the WM')
+        # Which chunks the radio reduces is what the SoC and the host go by, and it is what it was
+        # with 5 of 16 each: 10 of every 16, in the same places.
+        self.assertEqual(wa_mask | wm_mask, 0x5B5B5B5B, 'split: the same 10 of every 16, 6 left raw for the SoC')
+        self.assertEqual((blob.SPLIT.wa, blob.SPLIT.wm), (11, 9), 'the WM has the stream to publish and control to run besides')
         self.assertTrue(blob.SPLIT.reduce and not any(p.reduce for p in (blob.RAW, blob.HALF, blob.FULL)))
 
     def test_defines(self):
         defines = blob.schedule_defines()
-        self.assertEqual(defines['PERIOD'], '16u')
+        self.assertEqual(defines['PERIOD'], '32u')
         self.assertEqual(defines['SCHEDULES'].count('{'), 2 * len(blob.PACKINGS))
 
 

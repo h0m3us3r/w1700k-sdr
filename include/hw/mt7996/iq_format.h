@@ -151,7 +151,10 @@
  * event (shorter than 4096 too) together with the trailer.
  * A sample is read back as (q << s) + ((1 << s) >> 1), the middle of its step.
  * At 320 Msps, each packer on 5 of every 16 chunks, the kernel costs 11.5k
- * cycles a chunk on the WM (78 % busy) and 12.8k on the WA (87 %).  [measured] */
+ * cycles a chunk on the WM (78 % busy) and 12.8k on the WA (87 %); the WM,
+ * which has the stream's other work too, then has no time to spare. On 9 and
+ * 11 of every 32 (firmware/stream/blob.py) the WA is 97 % busy at 13.0k
+ * cycles a chunk.                                               [measured] */
 #define MT7996_IQ_CHUNK_RADIO14_BYTES	3588u
 #define MT7996_IQ_RADIO14_DATA_BYTES	3584u
 #define MT7996_IQ_RADIO14_TRAILER	0x52443100u	/* "RD1", then the shift in [2:0] */

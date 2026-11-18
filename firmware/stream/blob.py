@@ -11,12 +11,21 @@ One producer and one packer serve every packing schedule; a stream's STREAM comm
 one it runs (radio/radio_cmd.h RADIO_PACKING_*, in PACKINGS' order). Over each PERIOD chunks:
 - raw: no packing; every 8 KiB chunk is published as captured (up to 160 Msps of 14-bit IQ on
   one 10 GbE link).
-- half: the WM packs 4 chunks and the WA 4 of every 16 to 28 bits (7168 bytes): 50% packed,
+- half: the WM packs 8 chunks and the WA 8 of every 32 to 28 bits (7168 bytes): 50% packed,
   so 320 Msps fits one 10 GbE link.
-- full: the WM packs 8 and the WA 8 of every 16, every chunk: 7/8 of the bytes, lossless, for
+- full: the WM packs 16 and the WA 16 of every 32, every chunk: 7/8 of the bytes, lossless, for
   links slower than the samples (160 Msps in 4.5 Gbit/s). Each packer then packs as many chunks
   a second as in half at twice the sample rate, so it carries up to 160 Msps: there, with both
   reading the capture ring all the time, a chunk takes either 11.4k cycles and each is 62 % busy.
+- split: 20 of every 32 reduced to 14 bits (reduce14.S), 12 left raw for the SoC: 320 Msps on
+  5 Gbit/s. The WM takes 9 of the 20 and the WA 11, not 10 each. The WM also publishes every
+  chunk and runs the control programs, and at 10 each it had about 0.2 % of its time to spare
+  at 320 Msps: a retune took 0.3 to 3.9 s, and a few instructions more in its loop overran the
+  stream. At 9 and 11 a retune takes what it takes at 160 Msps (1.9 ms), the capture is at most
+  74K ahead where it was 78K to 142K, and the WA, which only packs, is 97 % busy. One chunk
+  more to the WA (6 and 4 of 16) is more than it can do. [measured]
+The positions of the chunks a packing leaves raw are the same as when the period was 16: what
+changed is which core packs which of the others, and that is the cores' own affair.
 Raising the WA (half, full) leaves the firmware command path dead until the next firmware load.
 """
 import shutil
@@ -46,11 +55,11 @@ class Packing:
     reduce: bool = False          # packed chunks are reduced to 14 bits (reduce14.S), not packed to 28
 
 
-PERIOD = 16
+PERIOD = 32
 RAW = Packing('raw', 0, 0)
-HALF = Packing('half', 4, 4)
-FULL = Packing('full', 8, 8)
-SPLIT = Packing('split', 5, 5, True)
+HALF = Packing('half', 8, 8)
+FULL = Packing('full', 16, 16)
+SPLIT = Packing('split', 11, 9, True)
 PACKINGS = (RAW, HALF, FULL, SPLIT)   # index = the RADIO_PACKING_* code
 
 

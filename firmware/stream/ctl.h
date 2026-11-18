@@ -59,7 +59,12 @@ struct ctl {
 	 * taken (ctl_rate). */
 	uint32_t slice_max, slice_limit, stalled, rate_chunk;
 	uint64_t rate_at;
+	/* An A-die transaction under way (ctl_adie): CTL_SPI_*, when that began, and the channel's
+	 * status word and busy bit. `word`: what an op of two transactions keeps between them. */
+	uint32_t spi, spi_from, spi_status, spi_busy, word;
 };
+#define CTL_SPI_SEMA	1u	/* waiting for the semaphore */
+#define CTL_SPI_BUSY	2u	/* started, the semaphore held */
 
 /* A stream's rate is taken over at least this many chunks. */
 #define CTL_RATE_CHUNKS	64u
@@ -80,10 +85,85 @@ static int ctl_waiting(struct ctl *c, uint32_t us)
 	return 0;
 }
 
+/* One A-die SPI transaction, not waited for: 0 done (a read's value in *val), CTL_YIELD while it
+ * is under way (call again with the same register), else a CTL code.
+ *
+ * A transaction is about 13 us of the SPI block's own time, and the interpreter used to spend
+ * them in a loop on the busy bit (adie_xfer). The producer that runs these slices is packing a
+ * 320 Msps stream with a few percent of its time to spare, and control work is let in only
+ * while the stream is less than MT7996_PROBE_CTL_LAG_CHUNKS behind: every transaction put it
+ * two chunks further behind and then waited for the packer to win them back. A retune, about
+ * 135 transactions and 1.8 ms at 160 Msps, took 0.3 to 3.9 s at 320 Msps, and the host gave up
+ * on it after 2 s. [measured] Started and left, a transaction costs the producer two register
+ * visits, and the block does its 13 us while chunks are packed.
+ *
+ * The semaphore is held from the start to the end of the transaction, across calls. Nothing
+ * else on this core asks for it meanwhile: radio commands and calls are served only while no
+ * program is under way (wm.c), and a producer that ends with one under way settles it
+ * (ctl_settle). */
+static uint32_t ctl_adie(struct ctl *c, uint32_t reg, int read, uint32_t *val)
+{
+	struct adie_route r;
+
+	if (adie_route(reg, &r))
+		return MT7996_PROBE_CTL_BAD_OP;
+	if (c->spi != CTL_SPI_BUSY) {
+		if (!c->spi) {
+			c->spi = CTL_SPI_SEMA;
+			c->spi_from = rdcycle();
+		}
+		if (!ADIE_SEMA_GRANTED(R32(ADIE_SEMA_ACQ_MCU))) {	/* a READ is the acquire */
+			if (rdcycle() - c->spi_from <= 1000u * MT7996_MCU_CYCLES_PER_US)
+				return CTL_YIELD;
+			c->spi = 0;
+			return MT7996_PROBE_CTL_SEMA;
+		}
+		if (R32(r.m + ADIE_SPI_STATUS) & r.busy) {
+			R32(ADIE_SEMA_REL_MCU) = ADIE_SEMA_REL_VAL;
+			c->spi = 0;
+			return MT7996_PROBE_CTL_BUSY;
+		}
+		adie_start(&r, reg, read, read ? 0 : *val);
+		c->spi = CTL_SPI_BUSY;
+		c->spi_from = rdcycle();
+		c->spi_status = r.m + ADIE_SPI_STATUS;
+		c->spi_busy = r.busy;
+	}
+	if (R32(c->spi_status) & c->spi_busy) {
+		if (rdcycle() - c->spi_from <= 1000u * MT7996_MCU_CYCLES_PER_US)
+			return CTL_YIELD;
+		R32(ADIE_SEMA_REL_MCU) = ADIE_SEMA_REL_VAL;
+		c->spi = 0;
+		return MT7996_PROBE_CTL_SPI;
+	}
+	if (read)
+		*val = R32(r.m + r.rd);
+	R32(ADIE_SEMA_REL_MCU) = ADIE_SEMA_REL_VAL;
+	c->spi = 0;
+	return MT7996_PROBE_CTL_OK;
+}
+
+/* A transaction left under way by a program that will not be resumed (the stream ended): waited
+ * for, and the semaphore given back, so that the next one finds the channel idle and the
+ * semaphore free. */
+static inline void ctl_settle(struct ctl *c)
+{
+	uint32_t t0 = rdcycle();
+
+	if (c->spi == CTL_SPI_BUSY) {
+		while (R32(c->spi_status) & c->spi_busy)
+			if (rdcycle() - t0 > 1000u * MT7996_MCU_CYCLES_PER_US)
+				break;
+		R32(ADIE_SEMA_REL_MCU) = ADIE_SEMA_REL_VAL;
+	}
+	c->spi = 0;
+}
+
 /* The VCO band search (as the WM firmware does it, mt7977.h): 10 steps, each a measurement
  * (SX_CMD = MEASURE, 10 us, SX_CMD = PREP), comparator SX_CMP.KEEP kept as the next code bit, and
  * the next trial code written to SX_BAND[31:20] (the preset bits kept) and SX_BAND2[31:20].
- * Returns 0 done, CTL_YIELD, else a CTL code. */
+ * Returns 0 done, CTL_YIELD, else a CTL code. One transaction to a state (c->sub): each may
+ * yield, and the op is called again from where it was. */
 static uint32_t sx_sar(struct ctl *c, uint32_t die, uint32_t *res)
 {
 	uint32_t sx = MT7996_PROBE_CTL_AREG(die, MT7977_K_SX, 0), v, e, code;
@@ -91,7 +171,7 @@ static uint32_t sx_sar(struct ctl *c, uint32_t die, uint32_t *res)
 	for (;;) {
 		switch (c->sub) {
 		case 0:
-			if ((e = adie_xfer(sx | ADIE_SX_BAND, 1, &v)))
+			if ((e = ctl_adie(c, sx | ADIE_SX_BAND, 1, &v)))
 				return e;
 			c->sar_low = v & ADIE_SX_BAND_PRESET;
 			c->sar_acc = 0;
@@ -99,20 +179,39 @@ static uint32_t sx_sar(struct ctl *c, uint32_t die, uint32_t *res)
 			c->sub = 1;
 			/* fall through */
 		case 1:
-			if ((e = adie_w(sx | ADIE_SX_CMD, ADIE_SX_CMD_MEASURE)))
+			v = ADIE_SX_CMD_MEASURE;
+			if ((e = ctl_adie(c, sx | ADIE_SX_CMD, 0, &v)))
 				return e;
 			c->sub = 2;
 			/* fall through */
-		default:
+		case 2:
 			if (ctl_waiting(c, ADIE_SX_SETTLE_US))
 				return CTL_YIELD;
-			if ((e = adie_w(sx | ADIE_SX_CMD, ADIE_SX_CMD_PREP)) || (e = adie_xfer(sx | ADIE_SX_CMP, 1, &v)))
+			c->sub = 3;
+			/* fall through */
+		case 3:
+			v = ADIE_SX_CMD_PREP;
+			if ((e = ctl_adie(c, sx | ADIE_SX_CMD, 0, &v)))
+				return e;
+			c->sub = 4;
+			/* fall through */
+		case 4:
+			if ((e = ctl_adie(c, sx | ADIE_SX_CMP, 1, &v)))
 				return e;
 			c->sar_acc = (c->sar_acc +
 				      (HW_GET(ADIE_SX_CMP_KEEP, v) << (MT7977_SAR_STEPS - 1 - c->sar_i))) & 0xffff;
+			c->sub = 5;
+			/* fall through */
+		case 5:
+			v = HW_PREP(ADIE_SX_BAND_WORD, MT7977_SAR_CODE(c->sar_acc, c->sar_i)) | c->sar_low;
+			if ((e = ctl_adie(c, sx | ADIE_SX_BAND, 0, &v)))
+				return e;
+			c->sub = 6;
+			/* fall through */
+		default:
 			code = MT7977_SAR_CODE(c->sar_acc, c->sar_i);
-			if ((e = adie_w(sx | ADIE_SX_BAND, HW_PREP(ADIE_SX_BAND_WORD, code) | c->sar_low)) ||
-			    (e = adie_w(sx | ADIE_SX_BAND2, HW_PREP(ADIE_SX_BAND2_WORD, code))))
+			v = HW_PREP(ADIE_SX_BAND2_WORD, code);
+			if ((e = ctl_adie(c, sx | ADIE_SX_BAND2, 0, &v)))
 				return e;
 			if (++c->sar_i < MT7977_SAR_STEPS) {
 				c->sub = 1;
@@ -153,16 +252,25 @@ static uint32_t ctl_exec(struct ctl *c, uint32_t op, uint32_t a, uint32_t b, uin
 		}
 		return ctl_waiting(c, arg) ? CTL_YIELD : MT7996_PROBE_CTL_TIMEOUT;
 	case MT7996_PROBE_CTL_OP_AW:
-		return adie_w(a, b);
+		v = b;
+		return ctl_adie(c, a, 0, &v);
 	case MT7996_PROBE_CTL_OP_AR:
-		return adie_xfer(a, 1, res);
+		return ctl_adie(c, a, 1, res);
 	case MT7996_PROBE_CTL_OP_ARMW:
-		if ((e = adie_xfer(a, 1, &v)))
+		/* two transactions: the word read is kept while the second is under way */
+		if (!c->sub) {
+			if ((e = ctl_adie(c, a, 1, &v)))
+				return e;
+			c->word = (v & ~b) | cc;
+			c->sub = 1;
+		}
+		if ((e = ctl_adie(c, a, 0, &c->word)))
 			return e;
-		*res = (v & ~b) | cc;
-		return adie_w(a, *res);
+		*res = c->word;
+		c->sub = 0;
+		return 0;
 	case MT7996_PROBE_CTL_OP_APOLL:
-		if ((e = adie_xfer(a, 1, &v)))
+		if ((e = ctl_adie(c, a, 1, &v)))
 			return e;
 		*res = v;
 		if ((v & b) == cc) {
@@ -399,6 +507,8 @@ static void ctl_init(struct ctl *c)
 	c->slice_max = 0;
 	c->slice_limit = 0;
 	c->stalled = 0;
+	c->spi = 0;
+	c->sub = 0;
 	c->rate_chunk = 0;
 	c->rate_at = rdcycle64();
 	if (R32(MT7996_PROBE_CTL_ACK) != c->req) {

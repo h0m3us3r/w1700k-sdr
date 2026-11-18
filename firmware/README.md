@@ -110,16 +110,18 @@ such a revision and at that radio's risk.
 - `packer.c` and `pack.S`, linked into the WA at `0x1001a400`: 28-bit packing, 8 words to 7,
   so 320 Msps fits one 10 GbE link; the producer raises the WA through a soft-interrupt slot.
 - `layout.h`: every fixed address and protocol word; `blob.py`: the compile/link recipe and the
-  packing schedules, a table in both images that the STREAM command indexes (raw; half = WM 4 +
-  WA 4 of every 16 chunks, for 320 Msps; full = WM 8 + WA 8, every chunk, up to 160 Msps, where
-  each packer is 62 % busy; split = WM 5 + WA 5 reduced to 14 bits, see below).
+  packing schedules, a table in both images that the STREAM command indexes, over a period of
+  32 chunks (raw; half = WM 8 + WA 8, for 320 Msps; full = WM 16 + WA 16, every chunk, up to
+  160 Msps, where each packer is 62 % busy; split = WM 9 + WA 11 reduced to 14 bits, see below).
 - `reduce14.S`: the split schedule's kernel. A 320 Msps stream on a link too slow for half
   (5 Gbit/s) must have every chunk at 14 bits per sample pair, and neither the radio's cores nor
   the SoC can requantise all of it; so the packers reduce 10 of every 16 chunks here (7 bits of I
   and of Q under one shift per chunk, two samples folded into a word and those packed 8 to 7:
   3584 bytes and a trailer naming the shift, `include/hw/mt7996/iq_format.h`), and leave 6 raw
-  for the SoC. 87 instructions per 16 samples against the pack's 75; at 320 Msps the WM is 78 %
-  busy and the WA 87 %. The shift comes from the host (the mailbox word `MT7996_PROBE_WM_SHIFT`,
+  for the SoC. 87 instructions per 16 samples against the pack's 75. The WM takes 9 of every 20
+  such chunks and the WA 11: at 10 each the WM, which also publishes every chunk and runs the
+  control programs, had no time left at 320 Msps, and a retune during a stream took seconds;
+  the WA, which only packs, is 97 % busy with its 11. The shift comes from the host (the mailbox word `MT7996_PROBE_WM_SHIFT`,
   which the producer relays to the WA): the cores have no cycles left to measure a chunk's
   level, and the SoC sees the level in the chunks between. `tests/test_firmware_kernels.py`
   runs this code and `pack.S` from their machine code against the format's model.
