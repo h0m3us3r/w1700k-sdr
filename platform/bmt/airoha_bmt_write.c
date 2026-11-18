@@ -218,8 +218,17 @@ int airoha_bmt_intent_decode(struct airoha_bmt_intent *r,
 	struct airoha_bmt_intent decoded;
 	airoha_u8 digest[32];
 	airoha_u32 i;
-	if (!hash || !t->page_bytes || len < t->page_bytes || memcmp(p, intent_magic, 8) ||
-	    rd16(p + 8) != 3 || p[31] != 0xff ||
+	if (!hash || !t->page_bytes || len < t->page_bytes)
+		return -EINVAL;
+	/* The hash first. A page whose hash does not hold is no record (-EBADMSG): one cut
+	 * short while it was written, or bytes that never were one. A page whose hash holds is
+	 * a record somebody wrote whole, and one that is not ours to read (another format,
+	 * another flash) is refused (-EINVAL): its work may be unfinished, and it is not to be
+	 * taken for an empty journal. */
+	hash(p, 208, digest);
+	if (memcmp(digest, p + 208, 32))
+		return -EBADMSG;
+	if (memcmp(p, intent_magic, 8) || rd16(p + 8) != 3 || p[31] != 0xff ||
 	    rd32(p + 128) != AIROHA_BMT_BLOCK_PAGES * t->page_bytes ||
 	    rd32(p + 132) != t->page_bytes || rd32(p + 136) != t->oob_bytes ||
 	    rd32(p + 140) != t->total_blocks)
@@ -227,9 +236,6 @@ int airoha_bmt_intent_decode(struct airoha_bmt_intent *r,
 	for (i = AIROHA_INTENT_BYTES; i < t->page_bytes; i++)
 		if (p[i] != 0xff)
 			return -EINVAL;
-	hash(p, 208, digest);
-	if (memcmp(digest, p + 208, 32))
-		return -EBADMSG;
 	memset(&decoded, 0, sizeof(decoded));
 	decoded.operation = rd16(p + 10);
 	decoded.journal_block = rd16(p + 12); decoded.candidate_block = rd16(p + 14);
@@ -335,39 +341,68 @@ static int find_selected(struct airoha_bmt *t, const struct airoha_bmt_flash *io
 	return -ENOENT;
 }
 
-/* Only for an initially-free metadata retry candidate. Erasing first both
- * removes any checksum-valid torn page and resets the page program budget.
- * The controller's erase status is authoritative; the following marker write
- * and readback are the verification boundary. */
-static int discard_metadata(const struct airoha_bmt_flash *io, airoha_u32 block)
+/* How much of a bad mark a block carries. retire() programs the mark's second byte to 0; a
+ * program the power cut short can leave some of its bits, and bits so left can read as
+ * programmed one day and as erased another. A mark is whole when a byte of it reads 0. */
+#define MARK_NONE 0
+#define MARK_PART 1
+#define MARK_WHOLE 2
+static int mark_state(const struct airoha_bmt_flash *io, airoha_u32 block)
 {
-	int rc = io->erase(io->ctx, block);
+	airoha_u8 markers[2];
+	int rc = io->markers(io->ctx, block, markers);
 	if (rc)
 		return rc < 0 ? rc : -EIO;
+	if (!markers[0] || !markers[1])
+		return MARK_WHOLE;
+	return markers[0] != 0xff || markers[1] != 0xff ? MARK_PART : MARK_NONE;
+}
+
+/* Only for an initially-free metadata retry candidate. Erasing first both
+ * removes any checksum-valid torn page and resets the page program budget.
+ * A block that will not erase is marked all the same: left unmarked it reads
+ * as nothing, counts as free again at the next start, and is tried again
+ * there, for good. The marker's readback is the verification boundary. */
+static int discard_metadata(const struct airoha_bmt_flash *io, airoha_u32 block)
+{
+	int rc;
+	io->erase(io->ctx, block);
 	/* Readback decides whether even a failed marker call actually retired it. */
 	io->retire(io->ctx, block);
 	rc = physical_bad(io, block);
 	return rc == 1 ? 0 : (rc < 0 ? rc : -EIO);
 }
 
+/* The tickets a record's publication has used: the last used ticket page, 0 for none.
+ * A torn ticket counts, and that includes one whose ECC does not decode: erased() reads
+ * through the ECC, and a ticket the power cut short answers -EBADMSG. Taking that for a
+ * failed read refused the publication at every later start. */
+int airoha_bmt_tickets_used(const struct airoha_bmt_flash *io, airoha_u32 journal_block)
+{
+	airoha_u32 page, used = 0;
+	int rc;
+	for (page = 1; page <= AIROHA_RETIRE_ATTEMPTS; page++) {
+		rc = io->erased(io->ctx, journal_block, page);
+		if (rc < 0 && rc != -EBADMSG)
+			return rc;
+		if (rc != 1)
+			used = page;
+	}
+	return (int)used;
+}
+
+/* 0, an error, or 1: every ticket is used. */
 static int consume_ticket(const struct airoha_bmt_flash *io,
 		const struct airoha_bmt_intent *r, airoha_u32 page_bytes,
 		airoha_u32 new_table, airoha_u8 *expected, airoha_u8 *actual)
 {
-	airoha_u32 page, used = 0;
-	int rc;
-	/* A torn ticket counts, including one whose ECC cannot be read. Inspect
-	 * RAW erased state, not an ECC-decoded/all-FF approximation. */
-	for (page = 1; page <= AIROHA_RETIRE_ATTEMPTS; page++) {
-		rc = io->erased(io->ctx, r->journal_block, page);
-		if (rc < 0)
-			return rc;
-		if (!rc)
-			used = page;
-	}
-	if (used == AIROHA_RETIRE_ATTEMPTS)
-		return -EIO;
-	page = used + 1;
+	airoha_u32 page;
+	int rc = airoha_bmt_tickets_used(io, r->journal_block);
+	if (rc < 0)
+		return rc;
+	if (rc == AIROHA_RETIRE_ATTEMPTS)
+		return 1;
+	page = (airoha_u32)rc + 1;
 	memset(expected, 0xff, page_bytes);
 	memcpy(expected, "SDRTICK2", 8);
 	wr16(expected + 8, r->old_table_block);
@@ -409,12 +444,6 @@ int airoha_bmt_publish(struct airoha_bmt *t, struct airoha_bmt *scratch,
 		return rc;
 	if (memcmp(expected, actual, page_bytes))
 		return -EBADMSG; /* never publish from an undurable or different record */
-	rc = io->verify_image(io->ctx, r);
-	if (rc)
-		return rc < 0 ? rc : -EIO;
-	rc = physical_bad(io, r->candidate_block);
-	if (rc)
-		return rc < 0 ? rc : -EIO;
 	rc = find_selected(t, io, actual, &selected);
 	if (rc)
 		return rc;
@@ -431,13 +460,47 @@ int airoha_bmt_publish(struct airoha_bmt *t, struct airoha_bmt *scratch,
 		if (t->bmt_to[i] > high_data)
 			high_data = t->bmt_to[i];
 	if (airoha_bmt_translate(t, r->logical_block) == r->candidate_block) {
+		/* The table in force maps the candidate: the publication reached the flash.
+		 * The candidate is the block's data now and is not looked at: it was verified
+		 * before the table was written, and it may have been written since (a record
+		 * whose erase was cut short can read back at a later start).
+		 *
+		 * What may be left is the old table's mark, and it is not taken on trust. The
+		 * old table sits above this one: unmarked, or with a mark that fades, it is
+		 * the table every reader takes the day it reads, and the block is then back
+		 * on the original with all that was written since gone. It is unmarked here
+		 * when it did not read at this start (a table that reads is the one selected),
+		 * and part-marked when its mark was cut short. One more mark for a ticket,
+		 * while there are tickets; with none left, a part mark is as much as this
+		 * block takes. */
 		if (selected <= high_data)
 			return -EUCLEAN;
+		rc = mark_state(io, r->old_table_block);
+		if (rc < 0)
+			return rc;
+		if (rc != MARK_WHOLE) {
+			int had = rc;
+			rc = consume_ticket(io, r, page_bytes, selected, expected, actual);
+			if (rc < 0 || (rc && had == MARK_NONE))
+				return rc < 0 ? rc : -EIO;
+			if (!rc) {
+				io->retire(io->ctx, r->old_table_block);
+				rc = mark_state(io, r->old_table_block);
+				if (rc != MARK_WHOLE)
+					return rc < 0 ? rc : -EIO;
+			}
+		}
 		*selected_table = selected;
 		return 0;
 	}
 	if (selected != r->old_table_block)
 		return -EINVAL;
+	rc = io->verify_image(io->ctx, r);
+	if (rc)
+		return rc < 0 ? rc : -EIO;
+	rc = physical_bad(io, r->candidate_block);
+	if (rc)
+		return rc < 0 ? rc : -EIO;
 	*scratch = *t;
 	rc = airoha_bmt_replace(scratch, r->logical_block, r->candidate_block);
 	if (rc)
@@ -475,6 +538,7 @@ int airoha_bmt_publish(struct airoha_bmt *t, struct airoha_bmt *scratch,
 		}
 		rc = io->erase(io->ctx, block);
 		if (rc) {
+			/* will not erase: marked and passed over */
 			rc = discard_metadata(io, block);
 			if (rc)
 				return rc;
@@ -496,11 +560,13 @@ int airoha_bmt_publish(struct airoha_bmt *t, struct airoha_bmt *scratch,
 		return -ENOSPC;
 	rc = consume_ticket(io, r, page_bytes, new_table, expected, actual);
 	if (rc)
-		return rc;
-	/* Never call the vendor markbad helper: it erases the old table first. */
+		return rc < 0 ? rc : -EIO;
+	/* Never call the vendor markbad helper: it erases the old table first.
+	 * Only a whole mark ends it here (mark_state): with part of one the record stays,
+	 * and the next start marks again. */
 	io->retire(io->ctx, selected);
-	rc = physical_bad(io, selected);
-	if (rc != 1)
+	rc = mark_state(io, selected);
+	if (rc != MARK_WHOLE)
 		return rc < 0 ? rc : -EIO;
 	rc = find_selected(t, io, actual, &selected);
 	if (rc)

@@ -47,7 +47,10 @@ struct airoha_bmt_progress {
 };
 
 /* One fixed journal location is a per-unit/profile input, separate from logical
- * partition offsets. A corrupt known journal is fatal, never free pool data.
+ * partition offsets. Its block is never free pool data. A journal that is no
+ * record is erased at the start, unless a publication is under way; a whole
+ * record that is not ours to read, and a table found there, are fatal to the
+ * writer (airoha_bmt_transaction.c, load_journal).
  * The caller holds one lock over reads and complete transactions/recovery.
  * image/work are ordinary buffers, not DMA allocations; callbacks are sync.
  */

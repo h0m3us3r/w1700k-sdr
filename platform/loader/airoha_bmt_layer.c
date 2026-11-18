@@ -2,7 +2,9 @@
 /* The vendor BMT translation as a U-Boot MTD layer, with the optional
  * replacement engine. Recovery runs before UBI, operations are serialized, and
  * the whole-chip MTD cannot write outside our partitions. Missing or invalid
- * tables fail the probe; there is no untranslated fallback. */
+ * tables fail the probe; there is no untranslated fallback.
+ * A writer that cannot start does not: the device then attaches read-only, with
+ * translation alone (attach_read_only). */
 #include <stdio.h>
 #include <malloc.h>
 #include <linux/errno.h>
@@ -39,6 +41,8 @@ static struct {
 #if BMT_WRITE
 	struct airoha_bmt_transaction *writer;
 	u8 *work, *io_page;
+	int read_only;		/* the writer did not start: translation alone, nothing written */
+	u32 flags_before;	/* the MTD's flags, to give back at detach */
 	struct {
 		u64 erase_attempts, erase_completed;
 		u64 program_attempts, program_completed;
@@ -274,13 +278,79 @@ U_BOOT_CMD(bmtstats, 1, 1, do_bmtstats,
 #endif
 
 
+/* Both tables, from the flash: the pool the stock boot computes from the same markers (fixed at
+ * 250 on the W25N04KV, scanned on the W25N04LV), then the BBT and the BMT it selects. */
+static int load_tables(struct mtd_info *mtd, u32 total)
+{
+	u8 *page;
+	int ret, pool;
+
+	memset(&layer.t, 0, sizeof(layer.t));
+	pool = airoha_bmt_vendor_pool(total, factory_marker_bad, mtd);
+	if (pool == AIROHA_BMT_E_MARKER)
+		return -EIO;
+	if (pool < 0 || airoha_bmt_set_geometry(&layer.t, total, (u32)pool))
+		return -EINVAL;
+
+	page = malloc(mtd->writesize);
+	if (!page)
+		return -ENOMEM;
+	ret = find_table(mtd, page, 1);
+	if (!ret)
+		ret = find_table(mtd, page, 0);
+	free(page);
+	if (ret)
+		return ret;
+	return layer.t.bbt_ascending ? 0 : -EINVAL;
+}
+
+#if BMT_WRITE
+/* What a read-only attachment answers to a write. The operations stay in place, and are not
+ * cleared: the MTD core registers no device that has no erase operation (add_mtd_device, unless
+ * the device is flagged MTD_NO_ERASE), so a device attached read-only with its erase cleared was
+ * refused there and the flash had no reader after all. The core calls none of these on a device
+ * that is not writeable; a caller that goes round the core gets the same answer. */
+static int read_only_write_oob(struct mtd_info *mtd, loff_t to, struct mtd_oob_ops *ops)
+{ (void)mtd; (void)to; ops->retlen = ops->oobretlen = 0; return -EROFS; }
+static int read_only_erase(struct mtd_info *mtd, struct erase_info *instr)
+{ (void)mtd; instr->fail_addr = MTD_FAIL_ADDR_UNKNOWN; return -EROFS; }
+static int read_only_markbad(struct mtd_info *mtd, loff_t ofs)
+{ (void)mtd; (void)ofs; return -EROFS; }
+
+/* The writer did not start (airoha_bmt_transaction_init): its journal's block is bad, an
+ * interrupted replacement could not be finished, or the pool is not the one stock computes.
+ * That used to fail the probe, and then the flash had no reader at all: no UBI, no system, and
+ * nothing short of the serial console to look at it with. The tables themselves were found and
+ * they translate; so the device attaches with translation alone and writes nothing. What needs
+ * a write (an update, a saved setting) fails and says so; the system starts.
+ *
+ * The map is read from the flash again first: a recovery that stopped part-way may have left
+ * the one in memory ahead of what the flash holds. Not for a transport that failed or memory
+ * that ran out: those are no state of the flash. */
+static int attach_read_only(struct mtd_info *mtd, u32 total, int why)
+{
+	int ret;
+
+	if (why == -ENOMEM || bmt_transport_failed)
+		return why;
+	ret = load_tables(mtd, total);
+	if (ret)
+		return ret;
+	printf("airoha-bmt: " "the replacement writer did not start (%d): attached READ-ONLY. The flash reads as before; "
+	       "nothing can be written to it until this is looked at\n", why);
+	return 0;
+}
+#endif
+
 static int attach_unlocked(struct mtd_info *mtd)
 {
 	unsigned int shift = 0;
 	u32 erasesize = mtd->erasesize;
 	u32 total;
-	u8 *page;
-	int ret, pool;
+	int ret;
+#if BMT_WRITE
+	int read_only = 0;
+#endif
 
 	if (layer.mtd)
 		return -ENOSPC;
@@ -305,30 +375,18 @@ static int attach_unlocked(struct mtd_info *mtd)
 	layer._block_isbad = mtd->_block_isbad;
 	layer._block_markbad = mtd->_block_markbad;
 
-	/* The pool the stock boot computes from the same markers: fixed at 250
-	 * on the W25N04KV, scanned on the W25N04LV. */
-	pool = airoha_bmt_vendor_pool(total, factory_marker_bad, mtd);
-	if (pool == AIROHA_BMT_E_MARKER)
-		return -EIO;
-	if (pool < 0 || airoha_bmt_set_geometry(&layer.t, total, (u32)pool))
-		return -EINVAL;
-
-	page = malloc(mtd->writesize);
-	if (!page)
-		return -ENOMEM;
-	ret = find_table(mtd, page, 1);
-	if (!ret)
-		ret = find_table(mtd, page, 0);
-	free(page);
 	/* Probe must fail before registration; raw fallback changes addresses. */
+	ret = load_tables(mtd, total);
 	if (ret)
 		return ret;
-	if (!layer.t.bbt_ascending)
-		return -EINVAL;
 
 #if BMT_WRITE
 	ret=managed_prepare(mtd);
-	if(ret) return ret;
+	if(ret) {
+		ret=attach_read_only(mtd,total,ret);
+		if(ret) return ret;
+		read_only=1;
+	}
 #endif
 	layer.mtd = mtd;
 	mtd->_read_oob = bmt_read_oob;
@@ -337,11 +395,22 @@ static int attach_unlocked(struct mtd_info *mtd)
 	mtd->_block_isbad = bmt_block_isbad;
 	mtd->_block_markbad = layer._block_markbad ? bmt_block_markbad : NULL;
 #if BMT_WRITE
-	mtd->_read_oob=managed_read;
-	mtd->_write_oob=managed_write;
-	mtd->_erase=managed_erase;
-	mtd->_block_isbad=managed_isbad;
-	mtd->_block_markbad=managed_markbad;
+	if(read_only) {
+		/* Translation alone, as a build without the writer has it, and nothing
+		 * that writes: UBI attaches such a device read-only. */
+		layer.read_only=1;
+		layer.flags_before=mtd->flags;
+		mtd->flags&=~MTD_WRITEABLE;
+		mtd->_write_oob=read_only_write_oob;
+		mtd->_erase=read_only_erase;
+		mtd->_block_markbad=read_only_markbad;
+	} else {
+		mtd->_read_oob=managed_read;
+		mtd->_write_oob=managed_write;
+		mtd->_erase=managed_erase;
+		mtd->_block_isbad=managed_isbad;
+		mtd->_block_markbad=managed_markbad;
+	}
 #endif
 	printf("airoha-bmt: attached (system_blocks=%u, pool=%u, bbt=%u, bmt=%u); "
 	       "markbad refused\n", layer.t.system_blocks, airoha_bmt_pool_blocks(&layer.t),
@@ -361,6 +430,10 @@ static void detach_unlocked(struct mtd_info *mtd)
 	mtd->_erase = layer._erase;
 	mtd->_block_isbad = layer._block_isbad;
 	mtd->_block_markbad = layer._block_markbad;
+#if BMT_WRITE
+	if (layer.read_only)
+		mtd->flags = layer.flags_before;
+#endif
 	memset(&layer, 0, sizeof(layer));
 }
 

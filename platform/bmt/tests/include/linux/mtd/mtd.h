@@ -13,6 +13,7 @@ struct mtd_req_stats { unsigned uncorrectable_errors, corrected_bitflips, max_bi
 struct mtd_oob_ops { struct mtd_req_stats *stats; unsigned mode; size_t len,retlen,ooblen,oobretlen; unsigned ooboffs; u8 *datbuf,*oobbuf; };
 #define MTD_ERASE_DONE 8
 #define MTD_ERASE_FAILED 16
+#define MTD_FAIL_ADDR_UNKNOWN -1LL
 struct erase_info { u64 addr,len,fail_addr; struct mtd_info *mtd; unsigned long priv; unsigned state; };
 struct mtd_info { u64 size; u32 erasesize,writesize,oobsize,oobavail,flags;
 struct { void *parent; } dev;

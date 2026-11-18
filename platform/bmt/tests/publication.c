@@ -22,6 +22,29 @@ static unsigned char expected[T_PS], actual[T_PS], image[T_PAGES*T_STRIDE];
 static unsigned actions, cut_action, cut_phase, failures, old_mark_calls;
 static int fail_program, fail_erase, fail_old_mark, fail_marker_read, fail_image;
 static int fail_after_mark;
+/* What real NAND does that the plain model did not. Off unless a harness turns them on; setup()
+ * clears what they left.
+ *   garble      an erase cut short leaves the block's first page failing its ECC: neither erased
+ *               nor readable (the plain model leaves the first half of the pages cleanly erased)
+ *   tear_ecc    a program cut short leaves its page failing its ECC (the plain model leaves a
+ *               clean, readable half page)
+ *   unreadable  per page, how many more reads fail their ECC: 255 until the block is erased
+ *               (what a cut leaves), fewer for a page that reads badly for a while and then
+ *               reads again, holding what it held
+ *   dead        per block: it will not erase
+ *   flaky       a block whose next erase fails, once
+ *   marginal    a bad-block mark cut short reads as no mark now and as a mark later (age()); the
+ *               plain model's reads as a mark at once
+ *   weak        the other way: a mark cut short that reads as a mark now and as none later
+ *               (fade()), unless it was marked again whole in between */
+static int garble, tear_ecc, marginal_marks, flaky=-1;
+static unsigned char unreadable[T_TOTAL][T_PAGES], dead[T_TOTAL], marginal[T_TOTAL], weak[T_TOTAL];
+static int ecc(unsigned b, unsigned p)
+{
+	if (!unreadable[b][p]) return 0;
+	if (unreadable[b][p] != 255) unreadable[b][p]--;
+	return -EBADMSG;
+}
 static jmp_buf reset_point;
 
 static void hash(const unsigned char *p, unsigned len, unsigned char out[32])
@@ -43,6 +66,17 @@ static struct block *storage(unsigned b)
 	return nand[b];
 }
 
+/* What each action of a run was, for the harnesses that cut at a chosen one. */
+static struct { unsigned char kind; unsigned short b, p; } trace[8192];
+static void note(int kind, unsigned b, unsigned p)
+{ if (actions+1 < 8192) { trace[actions+1].kind=kind; trace[actions+1].b=b; trace[actions+1].p=p; } }
+__attribute__((unused)) static unsigned action_of(int kind, unsigned b, unsigned p, int last)
+{
+	unsigned found = 0;
+	for (unsigned a = 1; a <= actions && a < 8192; a++)
+		if (trace[a].kind==kind && trace[a].b==b && trace[a].p==p) { found = a; if (!last) break; }
+	return found;
+}
 static void before(void)
 {
 	actions++;
@@ -58,7 +92,7 @@ static int read_page(void *ctx, unsigned b, unsigned p, unsigned char *out)
 {
 	(void)ctx; assert(p < T_PAGES);
 	if(nand[b]) memcpy(out, nand[b]->main[p], T_PS); else memset(out,255,T_PS);
-	return 0;
+	return ecc(b,p);
 }
 static int program_page(void *ctx, unsigned b, unsigned p, const unsigned char *data)
 {
@@ -66,12 +100,13 @@ static int program_page(void *ctx, unsigned b, unsigned p, const unsigned char *
 	unsigned len = T_PS;
 	int error;
 	(void)ctx; assert(p < T_PAGES);
-	before();
+	note('P',b,p); before();
 	assert((int)p >= s->last && s->programs[p] < 4);
 	s->programs[p]++; s->last = p;
 	error = fail_program && b == (T_LAST-1);
 	if (error) { fail_program = 0; failures++; }
 	if (torn() || error) len = (T_PS/2);
+	if (torn() && tear_ecc) unreadable[b][p] = 255;
 	for (unsigned i = 0; i < len; i++) {
 		assert((s->main[p][i] & data[i]) == data[i]);
 		s->main[p][i] &= data[i];
@@ -91,9 +126,13 @@ static int erase(void *ctx, unsigned b)
 #else
 	assert(b!=T_SYSTEM && b!=T_LAST && (b==65 || b>=T_SYSTEM));
 #endif
-	before();
+	note('E',b,0); before();
 	if (fail_erase && b == (T_LAST-1)) return -EIO;
+	if (dead[b]) return -EIO;
+	if ((int)b == flaky) { flaky = -1; return -EIO; }
 	unsigned end = torn() ? T_PAGES/2 : T_PAGES;
+	memset(unreadable[b], 0, T_PAGES);	/* a whole erase clears what a cut left */
+	if (garble && torn()) unreadable[b][0] = 255;
 	for (unsigned p = 0; p < end; p++) {
 		memset(s->main[p], 255, T_PS); memset(s->spare[p], 255, T_OS);
 		s->programs[p] = 0;
@@ -107,6 +146,7 @@ static int erased(void *ctx, unsigned b, unsigned p)
 {
 	struct block *s = nand[b];
 	(void)ctx;
+	if(ecc(b,p)) return -EBADMSG;
 	if(!s) return 1;
 	for (unsigned i = 0; i < T_PS; i++) if (s->main[p][i] != 255) return 0;
 	for (unsigned i = 0; i < T_OS; i++) if (s->spare[p][i] != 255) return 0;
@@ -128,13 +168,26 @@ static int retire(void *ctx, unsigned b)
 #else
 	assert(b!=T_SYSTEM && b!=(T_SYSTEM+2) && (b==65 || b>=T_SYSTEM));
 #endif
-	before();
+	note('M',b,0); before();
 	assert(s->last <= 0 && s->programs[0] < 4);
 	s->last = 0; s->programs[0]++;
 	if (b == T_LAST) old_mark_calls++;
 	if (b == T_LAST && fail_old_mark) return -EIO;
-	s->spare[0][1] &= torn() ? 0xfe : 0;
+	if (marginal_marks && torn()) marginal[b] = 1;
+	else { s->spare[0][1] &= torn() ? 0xfe : 0; weak[b] = torn(); }
 	after(); return 0;
+}
+/* Time passes: a mark that was cut short shows (for the harnesses that turn marginal marks on), */
+__attribute__((unused)) static void age(void)
+{
+	for (unsigned b = 0; b < T_TOTAL; b++)
+		if (marginal[b]) { storage(b)->spare[0][1] &= 0xfe; marginal[b] = 0; weak[b] = 1; }
+}
+/* or one that showed is gone. */
+__attribute__((unused)) static void fade(void)
+{
+	for (unsigned b = 0; b < T_TOTAL; b++)
+		if (weak[b] && storage(b)->spare[0][1]) { storage(b)->spare[0][1] = 255; weak[b] = 0; }
 }
 static void image_hash(unsigned b, unsigned char out[32])
 {
@@ -165,7 +218,7 @@ static unsigned stock_table(void)
 {
 	for (unsigned b = T_TOTAL; b-- > T_SYSTEM;) {
 		struct block *s = nand[b]; unsigned sum, count;
-		if(!s) continue;
+		if(!s || unreadable[b][0]) continue;	/* stock passes over a page it cannot read */
 		unsigned char *p = s->main[0];
 		if (s->spare[0][0] != 255 || s->spare[0][1] != 255 || memcmp(p,"BMT",3)) continue;
 		count = p[5]; if (count > 250) continue;
@@ -189,6 +242,8 @@ static void setup(int mapped, int injected)
 	for (unsigned b = T_SYSTEM; b < T_TOTAL; b++) { free(nand[b]); nand[b] = NULL; }
 	actions=cut_action=cut_phase=failures=old_mark_calls=0;
 	fail_program=fail_erase=fail_old_mark=fail_marker_read=fail_image=fail_after_mark=0;
+	memset(unreadable,0,sizeof unreadable); memset(dead,0,sizeof dead); flaky=-1;
+	memset(marginal,0,sizeof marginal); memset(weak,0,sizeof weak);
 	assert(!airoha_bmt_set_geometry(&t,T_TOTAL,T_POOL) && !airoha_bmt_set_pages(&t,T_PS,T_FREE));
 	t.bbt_loaded=t.bmt_loaded=t.bbt_ascending=1; t.bbt_size=1; t.bbt_entries[0]=5;
 	if (mapped) { t.bmt_size=1; t.bmt_from[0]=65; t.bmt_to[0]=(T_SYSTEM+1); }
@@ -259,9 +314,11 @@ static void faults(void)
 	setup(0,0); fail_image=1; assert(publish(&selected)==-EBADMSG && !actions);
 	setup(0,0); storage(T_SYSTEM+2)->main[0][200]^=1;
 	assert(publish(&selected)==-EBADMSG && !actions);
+	/* A block that will not erase is marked bad and passed over: the table goes one lower. */
 	setup(0,0); fail_erase=1;
-	assert(publish(&selected)==-EIO && actions==2 && stock_table()==T_LAST);
-	fail_erase=0; assert(!publish(&selected));
+	assert(!publish(&selected) && selected==(T_LAST-2) && stock_table()==selected);
+	assert(!storage(T_LAST-1)->spare[0][1]);
+	fail_erase=0;
 	setup(0,0); fail_after_mark=1; assert(publish(&selected)==-EIO);
 	assert(stock_table()==(T_LAST-1)); fail_after_mark=0; t=original;
 	assert(!publish(&selected) && selected==(T_LAST-1) && old_mark_calls==1);
