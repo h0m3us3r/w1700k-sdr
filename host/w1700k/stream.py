@@ -69,7 +69,7 @@ STATUS = {-1: 'no result page', 0: 'not reached', 2: 'go word never came', 3: 'o
           8: 'WA did not start', 9: 'WA did not exit', 10: 'WA dispatch not at rest'}
 RES32 = ('status', 'cpu_end', 'tx_dma_end', 'cr9_end', 'cr0_end', 'sent_after', 'done_after', 'err_status',
          'go_wait_cycles', 'first_cr9', 'wa_status', 'pack_max_cycles', 'max_lag', 'wa_pack_max', 'wa_sp', 'wa_ra',
-         'wa_exit_cycles', 'ctl_served')
+         'wa_exit_cycles', 'ctl_served', 'ctl_slice_max', 'ctl_slice_limit')
 RES64 = ('chunks', 'cycles', 'written', 'credit_waits', 'wa_waits', 'wm_waits', 'wm_packs', 'wm_pack_cycles',
          'wa_packs', 'wa_pack_cycles', 'wa_idle')
 RESULT_WORDS = 4 + len(RES32) + 2 * len(RES64)   # the result page from DONE_AT

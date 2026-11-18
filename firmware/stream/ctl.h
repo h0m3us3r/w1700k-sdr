@@ -54,7 +54,17 @@ struct ctl {
 	uint32_t rf_pc, rf_count, rf_out, rf_check, rf_unlocked;
 	uint32_t chunk, chunk0;		/* the producer keeps chunk = chunks published */
 	int active;
+	/* The longest slice (cycles), the longest a slice may be while a stream runs (cycles; 0: not
+	 * known yet, or no stream), whether one was longer, and where the stream's rate was last
+	 * taken (ctl_rate). */
+	uint32_t slice_max, slice_limit, stalled, rate_chunk;
+	uint64_t rate_at;
 };
+
+/* A stream's rate is taken over at least this many chunks. */
+#define CTL_RATE_CHUNKS	64u
+/* A slice may last three quarters of a lap of the capture ring, in chunks. */
+#define CTL_SLICE_CHUNKS (RING / MT7996_IQ_CHUNK_BYTES / 4 * 3)
 
 /* An op's return when it resumes on the next call: no CTL status code (BAD_OP is 1). */
 #define CTL_YIELD 0xffffffffu
@@ -261,17 +271,54 @@ static void ctl_finish(struct ctl *c, uint32_t status)
 	c->active = 0;
 }
 
-/* One slice of work: start a new program if one is posted, then run ops until the budget is
- * spent or an op yields. */
+/*
+ * How long a slice may last while a stream runs, from the stream itself: the cycles a chunk
+ * takes, over the chunks the producer published since the last time, times CTL_SLICE_CHUNKS.
+ * Called once in 1024 idle calls. Nothing while no chunks pass (no stream), and nothing from a
+ * stretch too long for the 32-bit division.
+ */
+static void ctl_rate(struct ctl *c)
+{
+	uint64_t now = rdcycle64(), took = now - c->rate_at;
+	uint32_t chunks = c->chunk - c->rate_chunk;
+
+	if (chunks < CTL_RATE_CHUNKS)
+		return;
+	if (!(took >> 32))
+		c->slice_limit = (uint32_t)took / chunks * CTL_SLICE_CHUNKS;
+	c->rate_at = now;
+	c->rate_chunk = c->chunk;
+}
+
+static void ctl_run(struct ctl *c, uint32_t t0);
+
+/*
+ * One slice of work: start a new program if one is posted, then run ops until the budget is
+ * spent or an op yields.
+ *
+ * A slice that did something is timed. It is the one thing in the producer's loop that can
+ * take long (an RF op waiting a millisecond on a semaphore that is not given, a read of an
+ * address that does not answer), and the producer counts a lap of the capture ring by seeing
+ * the capture pointer wrap: a look that comes more than a lap after the one before counts one
+ * lap too few, the lag is then a megabyte short, no overrun is seen, and a megabyte of samples
+ * is dropped with the chunk numbers running on. A slice past three quarters of a lap sets
+ * `stalled`, and the producer ends the stream as the overrun it is.
+ *
+ * All of this is here and in struct ctl, and none of it in the producer's loop, on purpose.
+ * That loop has no time to give away at 320 Msps, and which of its variables the compiler
+ * keeps in registers changes with any line added to it: a version of this check that only
+ * added two locals there tripled the peak lag and overran one start in four. [measured]
+ */
 static void ctl_step(struct ctl *c)
 {
-	uint32_t t0 = rdcycle(), v, e, at, res;
+	uint32_t t0 = rdcycle(), v;
 
 	if (!c->active) {
 		v = R32(MT7996_PROBE_CTL_REQ);
 		if (!(++c->calls & 1023)) {
 			R32(MT7996_PROBE_CTL_CALLS) = c->calls;
 			R32(MT7996_PROBE_CTL_SEEN) = v;
+			ctl_rate(c);
 		}
 		if (v == c->req || !v)
 			return;
@@ -294,6 +341,18 @@ static void ctl_step(struct ctl *c)
 			return;
 		}
 	}
+	ctl_run(c, t0);
+	v = rdcycle() - t0;
+	if (v > c->slice_max)
+		c->slice_max = v;
+	if (c->slice_limit && v > c->slice_limit)
+		c->stalled = 1;
+}
+
+static void ctl_run(struct ctl *c, uint32_t t0)
+{
+	uint32_t e, at, res;
+
 	while (c->pc < c->count) {
 		at = MT7996_PROBE_CTL_OP(c->pc);
 		res = R32(MT7996_PROBE_CTL_RES(c->pc));
@@ -337,6 +396,11 @@ static void ctl_init(struct ctl *c)
 	c->rf = 0;
 	c->served = 0;
 	c->calls = 0;
+	c->slice_max = 0;
+	c->slice_limit = 0;
+	c->stalled = 0;
+	c->rate_chunk = 0;
+	c->rate_at = rdcycle64();
 	if (R32(MT7996_PROBE_CTL_ACK) != c->req) {
 		R32(MT7996_PROBE_CTL_STATUS) = MT7996_PROBE_CTL_NOT_RUN;
 		asm volatile("fence" ::: "memory");

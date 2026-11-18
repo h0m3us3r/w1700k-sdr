@@ -27,6 +27,8 @@ struct res {
 	uint32_t status, cpu_end, tx_dma_end, cr9_end, cr0_end, sent_after, done_after, err_status;
 	uint32_t go_wait_cycles, first_cr9, wa_status, pack_max_cycles, max_lag, wa_pack_max, wa_sp, wa_ra;
 	uint32_t wa_exit_cycles, ctl_served;
+	uint32_t ctl_slice_max, ctl_slice_limit;	/* cycles: the longest slice of control work, and the
+							 * longest one may be (ctl.h); 0: never measured */
 	uint64_t chunks, cycles, written, credit_waits, wa_waits, wm_waits, wm_packs, wm_pack_cycles;
 	uint64_t wa_packs, wa_pack_cycles, wa_idle;
 };

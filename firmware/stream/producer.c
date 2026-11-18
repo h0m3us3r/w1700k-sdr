@@ -64,8 +64,13 @@ static int start_wa(uint32_t packing, uint32_t wa_mask)
 	SH->packing = packing;
 	SH->shift = MT7996_IQ_RADIO14_SHIFT_MAX;	/* until the first relay: the shift that cannot wrap */
 	R32(MT7996_MCU_WA_SWI_SLOT1) = WA_CODE;
-	R32(MT7996_MCU_SWDEF_WA_ACTION) = MT7996_MCU_SWDEF_WA_ACTION_SLOT1;
+	/* The interrupt word before the action word. Our WA polls the action word and, when it
+	 * finds the bit, clears the interrupt word (wa.c). With the action written first, a WA
+	 * that saw it between our two writes cleared the interrupt word before we raised it, and
+	 * it then stayed raised: every later start found the dispatch "not at rest" (10) until a
+	 * reload. */
 	R32(MT7996_MCU_WA_SWI) = MT7996_MCU_WA_SWI_RAISE;
+	R32(MT7996_MCU_SWDEF_WA_ACTION) = MT7996_MCU_SWDEF_WA_ACTION_SLOT1;
 	g0 = rdcycle();
 	while (!SH->started)
 		if (rdcycle() - g0 > MT7996_MCU_CLOCK_HZ / 10)	/* 100 ms */
@@ -206,8 +211,13 @@ __attribute__((used)) void producer(uint32_t packing)
 		 * (the prefetcher reads past the end) and TX0 has sent what its buffer held.
 		 */
 		ctl.chunk = (uint32_t)chunks;
-		if ((uint32_t)lag < MT7996_PROBE_CTL_LAG_CHUNKS * CHUNK)
+		if ((uint32_t)lag < MT7996_PROBE_CTL_LAG_CHUNKS * CHUNK) {
 			ctl_step(&ctl);
+			if (ctl.stalled) {	/* a slice so long that a lap may have gone uncounted (ctl.h) */
+				status = 3;
+				break;
+			}
+		}
 		if (wm_mask) {
 			if ((int32_t)(wc - inval_at) >= (int32_t)INVAL_EVERY) {
 				cache_wbinval_all();
@@ -254,6 +264,8 @@ __attribute__((used)) void producer(uint32_t packing)
 	r->wm_pack_cycles = wm_cycles;
 	r->pack_max_cycles = pmax;
 	r->ctl_served = ctl.served;
+	r->ctl_slice_max = ctl.slice_max;
+	r->ctl_slice_limit = ctl.slice_limit;
 	for (t = SPIN; t; t--)			/* TX0 drains with ICAP still running */
 		if (R32(MT7996_MCU_DMA0_TX0_DIDX) == cpu)
 			break;

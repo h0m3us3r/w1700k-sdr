@@ -140,18 +140,23 @@
 #define MT7996_PROBE_RES_WA_RA            0x3cu
 #define MT7996_PROBE_RES_WA_EXIT_CYCLES   0x40u
 #define MT7996_PROBE_RES_CTL_SERVED       0x44u
-#define MT7996_PROBE_RES_CHUNKS           0x48u	/* u64 from here on */
-#define MT7996_PROBE_RES_CYCLES           0x50u
-#define MT7996_PROBE_RES_WRITTEN          0x58u
-#define MT7996_PROBE_RES_CREDIT_WAITS     0x60u
-#define MT7996_PROBE_RES_WA_WAITS         0x68u
-#define MT7996_PROBE_RES_WM_WAITS         0x70u
-#define MT7996_PROBE_RES_WM_PACKS         0x78u
-#define MT7996_PROBE_RES_WM_PACK_CYCLES   0x80u
-#define MT7996_PROBE_RES_WA_PACKS         0x88u
-#define MT7996_PROBE_RES_WA_PACK_CYCLES   0x90u
-#define MT7996_PROBE_RES_WA_IDLE          0x98u
-#define MT7996_PROBE_RES_SIZE             0xa0u
+/* The longest slice of control work (cycles), and the longest one may be while this stream
+ * runs: three quarters of a lap of the capture ring, measured from the stream (0: never
+ * measured). A longer slice ends the stream with ST_OVERRUN (firmware/stream/ctl.h). */
+#define MT7996_PROBE_RES_CTL_SLICE_MAX    0x48u
+#define MT7996_PROBE_RES_CTL_SLICE_LIMIT  0x4cu
+#define MT7996_PROBE_RES_CHUNKS           0x50u	/* u64 from here on */
+#define MT7996_PROBE_RES_CYCLES           0x58u
+#define MT7996_PROBE_RES_WRITTEN          0x60u
+#define MT7996_PROBE_RES_CREDIT_WAITS     0x68u
+#define MT7996_PROBE_RES_WA_WAITS         0x70u
+#define MT7996_PROBE_RES_WM_WAITS         0x78u
+#define MT7996_PROBE_RES_WM_PACKS         0x80u
+#define MT7996_PROBE_RES_WM_PACK_CYCLES   0x88u
+#define MT7996_PROBE_RES_WA_PACKS         0x90u
+#define MT7996_PROBE_RES_WA_PACK_CYCLES   0x98u
+#define MT7996_PROBE_RES_WA_IDLE          0xa0u
+#define MT7996_PROBE_RES_SIZE             0xa8u
 
 /*
  * WM packed-chunk buffers (stream, 7168 bytes each = one 8 KiB chunk packed
