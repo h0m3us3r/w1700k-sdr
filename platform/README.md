@@ -36,7 +36,9 @@ Later builds redo only what changed (a no-change platform build takes seconds). 
 sources; `make distclean` removes `platform/build/` entirely.
 
 Host requirements: a C compiler, make, git, patch, Python 3.10+, perl, rsync,
-bc, cpio, unzip and the usual Buildroot prerequisites. Bison and flex are built
+bc, cpio, unzip, xxd (U-Boot turns the loader's and dumper's environment files
+into C with `xxd -i`; Debian and Ubuntu ship it in the `xxd` package, older
+releases in `vim-common`) and the usual Buildroot prerequisites. Bison and flex are built
 by Buildroot. If the host's `install` is not GNU coreutils (some distributions
 ship uutils), `gnuinstall` or `ginstall` must exist. Buildroot also builds its
 own `tar` where the host's is older than 1.35 (quinlansls asked why, in
