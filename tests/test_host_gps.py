@@ -122,6 +122,16 @@ class Receiver(unittest.TestCase):
         with self.assertRaisesRegex(gps.GpsError, 'the receiver is switched off'):
             gps.check(self.link(REFUSED), seconds=2)
 
+    def test_a_reason_that_comes_a_moment_after_the_output_closes_is_still_the_reason(self):
+        """A command that is refusing closes its output before it has ended (seen on a slower
+        machine, where the reason was lost and only "the link ended" was said)."""
+        slow = ("import os, sys, time\nos.close(1)\ntime.sleep(0.4)\n"
+                "sys.stderr.write('w1700k-gps: the receiver is switched off: nothing would be heard (w1700k-gps on)\\n')\n"
+                "sys.exit(1)\n")
+        for _ in range(3):
+            with self.assertRaisesRegex(gps.GpsError, 'the receiver is switched off'):
+                gps.check(self.link(slow), seconds=2)
+
     def test_nothing_is_written_to_the_receiver_to_check_it(self):
         heard = Path(tempfile.mkdtemp()) / 'heard'
         self.addCleanup(__import__('shutil').rmtree, heard.parent)

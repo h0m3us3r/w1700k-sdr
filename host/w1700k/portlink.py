@@ -33,8 +33,15 @@ class Link:
             raise self.error(self._ended()) from None
 
     def _ended(self):
-        """Why the link ended: the last thing its command said, where it said anything."""
+        """Why the link ended: the last thing its command said, where it said anything. Its
+        output closing is seen a moment before the command itself has ended, so it is waited
+        for: asked at once, a command that was refusing with a reason looked like one that
+        gave none."""
         said = b''
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
         if self.process.poll() is not None and self.process.stderr:
             said = self.process.stderr.read() or b''
         text = said.decode(errors='replace').strip().splitlines()
