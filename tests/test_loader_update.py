@@ -10,6 +10,7 @@ last one left. The system is started as the loader starts it, one stage of `boot
 and what is added to the device tree's /chosen on the way is kept in `chosen`."""
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,7 +35,7 @@ saveenv() {
     for name in update_tried update_failed loader_tried loader_failed loader_booted; do
         eval "[ -z \"\${$name+x}\" ]" || eval "echo \"$name=\$$name\""
     done > "$M/saved"
-    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on gps_v serial_number; do
+    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on gps_v serial_number efr32_v efr32_keep; do
         eval "[ -z \"\${$name+x}\" ]" || { echo "saved a scratch variable: $name" >> "$M/log"; }
     done
 }
@@ -95,14 +96,15 @@ setexpr() {
     *) echo "setexpr $*: not modelled" >&2; return 1 ;;
     esac
 }
-# The level register of GPIO 32 to 63 keeps a written bit only for a line that is an output; the
+# A level register (GPIO 0 to 31, GPIO 32 to 63) keeps a written bit only for a line that is an output; the
 # others go on reading their pins (seen on a unit: a level written before the line was enabled
 # was lost, and the line then drove what its pin had read).
 mw() {
     [ $# = 2 ] || return 1
     mkdir -p "$M/mem"
-    if [ "$1" = 0x1fbf0270 ]; then
-        was=$(cat "$M/mem/$1" 2>/dev/null || echo 0) enabled=$(cat "$M/mem/0x1fbf0278" 2>/dev/null || echo 0)
+    if [ "$1" = 0x1fbf0270 ] || [ "$1" = 0x1fbf0204 ]; then
+        if [ "$1" = 0x1fbf0270 ]; then oe=0x1fbf0278; else oe=0x1fbf0214; fi
+        was=$(cat "$M/mem/$1" 2>/dev/null || echo 0) enabled=$(cat "$M/mem/$oe" 2>/dev/null || echo 0)
         printf '%x\n' $(( (0x$2 & 0x$enabled) | (0x$was & ~0x$enabled & 0xffffffff) )) > "$M/mem/$1"
     else
         echo "$2" > "$M/mem/$1"
@@ -172,7 +174,7 @@ bootm() {
     prep) [ "$stage" = fdt ] || return 1; stage=prep; prepared=$bootargs; return 0 ;;
     go)
         [ "$stage" = prep ] || return 1
-        for name in key_line key_on gps_v serial_number; do
+        for name in key_line key_on gps_v serial_number efr32_v efr32_keep; do
             eval "[ -z \"\${$name+x}\" ]" || note "left a scratch variable: $name"
         done
         echo "$prepared" >> "$M/bootargs"
@@ -193,9 +195,11 @@ rm -f "$M/chosen"
 [ -z "$SLOT" ] || loader_slot=$SLOT
 run gps_off
 run board_id
+run efr32_off
 run loader_next
 run update_apply
 run key_pass
+run efr32_pass
 run system_start
 echo "the system was not started" >&2
 exit 1
@@ -271,7 +275,8 @@ class Model(unittest.TestCase):
 class LoaderUpdate(Model):
     def test_the_boot_command_applies_updates_first_and_then_boots_as_before(self):
         bootcmd = (self.model / 'env' / 'bootcmd').read_text()
-        self.assertTrue(bootcmd.startswith('run gps_off; run board_id; run loader_next; run update_apply; run key_pass; '
+        self.assertTrue(bootcmd.startswith('run gps_off; run board_id; run efr32_off; run loader_next; run update_apply; '
+                                           'run key_pass; run efr32_pass; '
                                            'ubi part.ro ${bootpart} && ubi read'))
         self.assertTrue(bootcmd.endswith('iminfo ${loadaddr} && run system_start'))
         start = (self.model / 'env' / 'system_start').read_text()
@@ -662,7 +667,7 @@ class BoardName(GpsReceiver):
 
     def test_the_receiver_is_switched_off_before_the_unit_is_named(self):
         bootcmd = (self.model / 'env' / 'bootcmd').read_text()
-        self.assertTrue(bootcmd.startswith('run gps_off; run board_id; run loader_next; '),
+        self.assertTrue(bootcmd.startswith('run gps_off; run board_id; run efr32_off; run loader_next; '),
                         'off first, whatever the identity turns out to say; named before a second loader is started')
         self.assertNotIn('gps_off', (self.model / 'env' / 'board_id').read_text())
 
@@ -703,6 +708,162 @@ class BoardName(GpsReceiver):
         self.identity('W1700KTEST0001')
         self.assertEqual(self.named(), 'w1700k')
         self.assertEqual(self.led_or_receiver_line(), (True, False))
+
+
+class LowPowerRadio(Model):
+    """The W1700K's EFR32 (Bluetooth LE, Zigbee/Thread) starts its firmware at power-on unless its
+    reset, line 24 of the pin controller, is held low; nothing of ours talks to it. On a unit the
+    loader has named a W1700K it holds the line once the board is named, and lets it go again
+    only where the owner's switch in durable storage (`efr32/switch`, written by w1700k-efr32)
+    says on. What it did goes to Linux on the kernel command line. On any other board the line
+    is not its to drive: the XR1710G has no such chip."""
+    DATA, ENABLE, DIRECTION = '0x1fbf0204', '0x1fbf0214', '0x1fbf0220'
+    BIT, DIR_BITS = 1 << 24, 3 << 16
+    SERIAL = 'W1700KTEST0001'
+
+    def setUp(self):
+        super().setUp()
+        self.identity(self.SERIAL)
+
+    def identity(self, serial):
+        path = self.model / 'calibration'
+        if serial is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(BoardName.IDENTITY.format(serial=serial).encode())
+
+    def registers(self, **values):
+        (self.model / 'mem').mkdir(exist_ok=True)
+        for name, value in values.items():
+            (self.model / 'mem' / getattr(self, name)).write_text(f'{value:x}\n')
+
+    def register(self, name):
+        return int((self.model / 'mem' / getattr(self, name)).read_text(), 16)
+
+    def switch(self, text):
+        directory = self.model / 'durable' / 'efr32'
+        directory.mkdir(exist_ok=True)
+        (directory / 'switch').write_text(text)
+
+    def said(self):
+        handed = self.model / 'bootargs'
+        handed.unlink(missing_ok=True)
+        self.boot()
+        self.assertNotIn('left a scratch variable', ' '.join(self.lines))
+        line, = handed.read_text().splitlines()
+        self.board = line.rpartition(' w1700k.board=')[2]
+        return [word for word in line.split() if word.startswith('w1700k.efr32')]
+
+    def held(self):
+        return (self.register('ENABLE') & self.BIT, self.register('DIRECTION') & self.DIR_BITS,
+                self.register('DATA') & self.BIT) == (self.BIT, 1 << 16, 0)
+
+    def test_with_no_switch_the_reset_is_held_and_no_other_line_is_touched(self):
+        # Line 24 an input reading high, as the chip's own pull-up leaves it; lines 17, 19, 20 and
+        # 29 (the LEDs) outputs at some level, line 30 an input reading high.
+        self.registers(DATA=0x611a0000, ENABLE=0x201a0000, DIRECTION=0x04000144)
+        self.assertEqual(self.said(), ['w1700k.efr32=off'])
+        self.assertEqual(self.board, 'w1700k')
+        self.assertEqual(self.register('ENABLE'), 0x211a0000, 'line 24 is an output')
+        self.assertEqual(self.register('DIRECTION'), 0x04010144, 'two bits a line from line 16: bit 16 is line 24')
+        self.assertEqual(self.register('DATA'), 0x601a0000, 'bit 24 low, the rest as it was')
+        self.assertIn(f'booted {digest(self.OLD)}', self.lines)
+
+    def test_the_line_is_made_an_output_before_its_level_is_set(self):
+        """As for the GPS receiver: a level written to a line that is not yet an output is lost."""
+        script = (self.model / 'env' / 'efr32_off').read_text()
+        self.assertLess(script.index('0x1fbf0214'), script.index('0x1fbf0204'))
+        self.assertLess(script.index('0x1fbf0220'), script.index('0x1fbf0204'))
+        self.assertTrue(script.endswith('; setenv efr32_v'))
+
+    def test_it_is_held_as_soon_as_the_board_is_named_and_by_both_loaders(self):
+        bootcmd = (self.model / 'env' / 'bootcmd').read_text()
+        self.assertTrue(bootcmd.startswith('run gps_off; run board_id; run efr32_off; run loader_next; '),
+                        'before a second loader is started, an update applied or storage read')
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
+        self.assertEqual(self.said(), ['w1700k.efr32=off'])
+        self.assertIn('the second loader starts', self.lines)
+        self.assertTrue(self.held())
+
+    def test_an_owner_who_keeps_it_on_has_it_let_go_at_every_boot(self):
+        """Let go, not driven high: the line is an input again and the chip's pull-up ends the
+        reset, as on a board nothing of ours has touched. It was held first all the same."""
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        self.switch('efr32_keep=on\n')
+        for _ in range(2):
+            self.assertEqual(self.said(), ['w1700k.efr32=on'])
+            self.assertEqual((self.register('ENABLE') & self.BIT, self.register('DIRECTION') & self.DIR_BITS), (0, 0))
+        (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
+        self.assertEqual(self.said(), ['w1700k.efr32=on'], 'the second loader reads the switch as the first did')
+        self.assertEqual(self.register('ENABLE') & self.BIT, 0)
+
+    def test_switching_it_off_again_holds_it_from_the_next_boot(self):
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        self.switch('efr32_keep=on\n')
+        self.assertEqual(self.said(), ['w1700k.efr32=on'])
+        self.switch('efr32_keep=off\n')
+        self.assertEqual(self.said(), ['w1700k.efr32=off'])
+        self.assertTrue(self.held())
+
+    def test_anything_but_a_plain_on_is_off(self):
+        """A switch that cannot be read, is empty, or says something else: the radio stays held."""
+        for text in ('', 'efr32_keep=\n', 'efr32_keep=1\n', 'efr32_keep=ON\n', 'keep=on\n', 'efr32_keep=on please\n'):
+            with self.subTest(text=text):
+                self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+                self.switch(text)
+                self.assertEqual(self.said(), ['w1700k.efr32=off'])
+                self.assertTrue(self.held())
+        self.switch('efr32_keep=on\n')
+        (self.model / 'durable').rename(self.model / 'durable.gone')
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        self.assertEqual(self.said(), ['w1700k.efr32=off'], 'storage that cannot be read')
+        self.assertTrue(self.held())
+
+    def test_nothing_of_it_is_saved_beside_an_update(self):
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        self.switch('efr32_keep=on\n')
+        self.stage(self.NEW, self.OLD)
+        self.assertEqual(self.said(), ['w1700k.efr32=on'])
+        self.assertIn('saveenv', self.lines)
+        self.assertNotIn('efr32', ' '.join(self.saved()))
+
+    def test_a_w1700k2_is_a_w1700k(self):
+        self.identity('W1700K2TEST0001')
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        self.assertEqual(self.said(), ['w1700k.efr32=off'])
+        self.assertTrue(self.held())
+
+    def test_on_any_other_board_the_line_is_left_alone_and_nothing_is_said(self):
+        """The XR1710G has no such chip and its line 24 is not known; a unit the loader cannot
+        name may be one. Neither is driven, with or without a switch in its storage, by either
+        loader, and the kernel is told nothing of a radio."""
+        as_found = dict(DATA=0xdfdbeef7, ENABLE=0x20000000, DIRECTION=0x04000000)     # as read on a unit at its loader
+        for serial, name in (('XR1710GTEST0001', 'xr1710g'), (None, 'unknown'), ('ZZ9000TEST0001', 'unknown'),
+                             ('W1700K', 'unknown')):
+            for switch in (None, 'efr32_keep=on\n', 'efr32_keep=off\n'):
+                for second in (False, True):
+                    with self.subTest(serial=serial, switch=switch, second=second):
+                        self.identity(serial)
+                        shutil.rmtree(self.model / 'durable' / 'efr32', ignore_errors=True)
+                        if switch:
+                            self.switch(switch)
+                        (self.model / 'loaderb').unlink(missing_ok=True)
+                        if second:
+                            (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
+                        self.registers(**as_found)
+                        self.assertEqual(self.said(), [])
+                        self.assertEqual(self.board, name)
+                        self.assertEqual({k: self.register(k) for k in as_found}, as_found)
+
+    def test_the_table_and_the_loader_agree_on_which_boards_have_it(self):
+        sys.path.insert(0, str(ROOT / 'platform'))
+        import boards
+        with_radio = [board for board in boards.ALL if board.efr32_reset_line is not None]
+        self.assertEqual([(board.key, board.efr32_reset_line) for board in with_radio], [('w1700k', 24)])
+        for name in ('efr32_off', 'efr32_pass'):
+            script = (self.model / 'env' / name).read_text()
+            self.assertEqual(re.findall(r'test "\$\{board\}" = "([a-z0-9]+)"', script), [board.key for board in with_radio], name)
 
 
 class KeySlot(Model):

@@ -11,7 +11,7 @@ bootpart=system
 bootvol=fit
 bootconf=conf-sdr
 bootlimit=1
-bootcmd=run gps_off; run board_id; run loader_next; run update_apply; run key_pass; ubi part.ro ${bootpart} && ubi read ${loadaddr} ${bootvol} && iminfo ${loadaddr} && run system_start
+bootcmd=run gps_off; run board_id; run efr32_off; run loader_next; run update_apply; run key_pass; run efr32_pass; ubi part.ro ${bootpart} && ubi read ${loadaddr} ${bootvol} && iminfo ${loadaddr} && run system_start
 update_spare=0x94000000
 update_check=hash sha256 ${loadaddr} ${filesize} update_got && test "${update_got}" = "${update_want}"
 update_fetch=ubi part.ro durable && ubifsmount ubi0:durable && ubifsload ${loadaddr} update/${update_file} && run update_check
@@ -27,6 +27,8 @@ system_start=if bootm start ${loadaddr}#${bootconf} && bootm loados && bootm ram
 gps_off=setexpr gps_v *0x1fbf0278 "|" 0x800 && mw 0x1fbf0278 ${gps_v} && setexpr gps_v *0x1fbf0260 "|" 0x400000 && mw 0x1fbf0260 ${gps_v} && setexpr gps_v *0x1fbf0270 "&" 0xfffff7ff && mw 0x1fbf0270 ${gps_v}; setenv gps_v
 board_id=setenv board unknown; setenv serial_number; if mtd read calibration ${update_spare} 0 0x800; then env import -t ${update_spare} 0x800 serial_number; fi; if test "x${serial_number}" ">" "xW1700K" && test "x${serial_number}" "<" "xW1700L"; then setenv board w1700k; fi; if test "x${serial_number}" ">" "xXR1710G" && test "x${serial_number}" "<" "xXR1710H"; then setenv board xr1710g; run board_xr1710g; fi; setenv serial_number
 board_xr1710g=setexpr gps_v *0x1fbf0270 "|" 0x800 && mw 0x1fbf0270 ${gps_v}; setenv gps_v
+efr32_off=if test "${board}" = "w1700k"; then setexpr efr32_v *0x1fbf0214 "|" 0x1000000 && mw 0x1fbf0214 ${efr32_v} && setexpr efr32_v *0x1fbf0220 "|" 0x10000 && mw 0x1fbf0220 ${efr32_v} && setexpr efr32_v *0x1fbf0204 "&" 0xfeffffff && mw 0x1fbf0204 ${efr32_v}; fi; setenv efr32_v
+efr32_pass=setenv efr32_keep; if test "${board}" = "w1700k"; then if ubi part.ro durable && ubifsmount ubi0:durable; then if ubifsload ${update_spare} efr32/switch; then env import -t ${update_spare} ${filesize} efr32_keep; fi; ubifsumount; fi; if test "${efr32_keep}" = "on"; then setexpr efr32_v *0x1fbf0214 "&" 0xfeffffff && mw 0x1fbf0214 ${efr32_v} && setexpr efr32_v *0x1fbf0220 "&" 0xfffcffff && mw 0x1fbf0220 ${efr32_v}; setenv bootargs "${bootargs} w1700k.efr32=on"; else setenv bootargs "${bootargs} w1700k.efr32=off"; fi; fi; setenv efr32_keep; setenv efr32_v
 board_pass=fdt set /chosen w1700k,board "${board}"; setenv bootargs "${bootargs} w1700k.board=${board}"
 loader_slot=a
 bootdelay=5

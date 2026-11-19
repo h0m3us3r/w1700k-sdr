@@ -117,6 +117,12 @@ def check_boards(image):
     missing = [board.key for board in boards.ALL
                if f'"x{board.serial_prefix}"' not in named or f'setenv board {board.key};' not in named]
     require(not missing, 'loader: board_id does not name: ' + ', '.join(missing))
+    # The low-power radio's reset is driven on the boards that carry the chip, and on no other.
+    held = image[image.index(b'efr32_off='):].split(b'\0', 1)[0].decode()
+    wanted = [f'test "${{board}}" = "{board.key}"' for board in boards.ALL if board.efr32_reset_line is not None]
+    require(image.count(b'bootcmd=run gps_off; run board_id; run efr32_off; ') == 1 and
+            [part for part in wanted if part in held] == wanted and held.count('test "${board}"') == len(wanted),
+            'loader: efr32_off does not hold the low-power radio on exactly the boards that have one')
 
 
 def main():
