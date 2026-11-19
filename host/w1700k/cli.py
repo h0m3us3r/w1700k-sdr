@@ -6,7 +6,9 @@
     w1700k band B [--rate 40|80|160|320|640/2] [--lo FREQ]
                                     capture band B (at another sample rate, Msps, or LO); 640/2:
                                     band 2 captured at 640 Msps, every other sample streamed
-    w1700k start [--packing P]      stream IQ: 14-bit raw where the link carries it, else packed, else fewer bits
+    w1700k start [--packing P] [--channels 2]
+                                    stream IQ: 14-bit raw where the link carries it, else packed, else fewer bits;
+                                    --channels 2: chains 0 and 1 of the band together, as two channels
                                     to 28 bits (lossless): every chunk, or every other at 320 Msps
     w1700k stop
     w1700k status [--rf]            receiver state (--rf: read the active band's RF registers)
@@ -164,11 +166,24 @@ def build_parser():
     p = sub.add_parser('start', help='start streaming')
     p.add_argument('--packing', choices=PACKINGS,
                    help='set the packing by hand, instead of the one the sample rate and the link give')
+    p.add_argument('--channels', type=int, choices=(1, 2), default=1,
+                   help='2: two receive chains of the band (0 and 1), sampled together, each at the sample rate')
     sub.add_parser('stop', help='stop streaming')
     p = sub.add_parser('status', help='print the receiver state')
     p.add_argument('--rf', action='store_true', help="also read the active band's RF registers")
     p = sub.add_parser('tune', help='retune the active band')
     p.add_argument('frequency', type=frequency)
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--keep-phase', dest='phase', action='store_const', const='keep',
+                   help='move the LO with the synthesizer\'s lock kept, so the phase between the chains stays; '
+                        'refused where the lock does not reach (16 MHz from where it locked, 12 at 2.4 GHz). The rule while '
+                        'two channels are streamed, where it reaches')
+    g.add_argument('--relock', dest='phase', action='store_const', const='relock',
+                   help='lock the synthesizer again (the rule otherwise): the chains\' phase lands at random in '
+                        'one of two states half a turn apart')
+    p = sub.add_parser('rephase', help='start one chain\'s LO path again: its phase against the other chains lands '
+                                       'anew in one of its two states (two_channel.py align uses it)')
+    p.add_argument('--chain', type=int, default=1)
     p = sub.add_parser('gain', help='gain of the active band')
     p.add_argument('--agc', action='store_true')
     p.add_argument('--lna', type=int, choices=range(5))
@@ -259,14 +274,16 @@ def run_command(controller, args):
         rate, capture = RATE_CHOICES.get(args.rate, (None, None))
         controller.configure(args.band, rate, args.lo, capture)
     elif command == 'start':
-        controller.start(args.packing)
+        controller.start(args.packing, args.channels)
     elif command == 'stop':
         controller.stop()
     elif command == 'status':
         if args.rf:
             return dict(controller.state(), rf_registers=controller.rf_status())
     elif command == 'tune':
-        controller.tune(args.frequency)
+        controller.tune(args.frequency, args.phase)
+    elif command == 'rephase':
+        controller.rephase(args.chain)
     elif command == 'gain':
         if not args.agc and (args.lna is None or args.lpf is None):
             raise ValueError('gain: --agc, or both --lna and --lpf')

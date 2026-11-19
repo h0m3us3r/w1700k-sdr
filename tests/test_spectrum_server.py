@@ -41,6 +41,7 @@ FAKE_CONTROLLER = os.path.join(ROOT, "tests", "spectrum_fake_controller.py")
 MAGIC = 0x31524453
 SLICE_SAMPLES = 2048
 TONE_HZ = 5185e6     # the RF frequency of the exporter's tone
+TONE_1_HZ = 5174e6   # ... and of the tone it puts in channel 1 of a two-channel stream
 FFT_SIZE = 4096
 DUMP_SECONDS = 0.01  # the length of a SIGUSR1 snapshot here
 DUMP_BEHIND = 64     # slices a snapshot ends short of the newest (serve.cpp)
@@ -67,6 +68,20 @@ def tone_words(cycles, amplitude=4000):
     for n in range(SLICE_SAMPLES):
         phase = 2 * math.pi * cycles * n / SLICE_SAMPLES
         words.append(sample_word(round(amplitude * math.cos(phase)), round(amplitude * math.sin(phase))))
+    return words
+
+
+def two_channel_tone_words(cycles0, cycles1, amplitude=4000):
+    """A two-channel slice: beats of four words, channel 0 at two sample times then channel 1 at
+    the same two; each channel a tone of its own, in cycles per its 1024 sample times."""
+    per = SLICE_SAMPLES // 2
+
+    def tone(cycles, t):
+        phase = 2 * math.pi * cycles * t / per
+        return sample_word(round(amplitude * math.cos(phase)), round(amplitude * math.sin(phase)))
+    words = []
+    for t in range(0, per, 2):
+        words += [tone(cycles0, t), tone(cycles0, t + 1), tone(cycles1, t), tone(cycles1, t + 1)]
     return words
 
 
@@ -109,6 +124,14 @@ class Exporter(threading.Thread):
             return None
 
     def payload(self, tuning):
+        if tuning.get("channels") == 2:
+            # Two channels, each at the sample rate: this tone in channel 0, another in channel 1.
+            key = ("two", tuning["center_hz"], tuning["sample_rate"])
+            if key not in self.payloads:
+                per = SLICE_SAMPLES // 2
+                cycles = [round((hz - tuning["center_hz"]) / tuning["sample_rate"] * per) for hz in (self.tone_hz, TONE_1_HZ)]
+                self.payloads[key] = struct.pack("<%dI" % SLICE_SAMPLES, *two_channel_tone_words(*cycles))
+            return self.payloads[key]
         cycles = round((self.tone_hz - tuning["center_hz"]) / tuning["sample_rate"] * SLICE_SAMPLES)
         if abs(cycles) > 0.4 * SLICE_SAMPLES:
             cycles = None
@@ -265,7 +288,7 @@ class WebSocketClient:
         codes = data[48:48 + bins]
         peak = max(range(bins), key=codes.__getitem__)
         frame = {"start": start, "stop": stop, "bins": bins, "peak_hz": start + (peak + 0.5) * (stop - start) / bins,
-                 "peak_db": base + codes[peak] * step, "at": time.monotonic()}
+                 "peak_db": base + codes[peak] * step, "at": time.monotonic(), "channel": (flags >> 1) & 1}
         with self.cond:
             self.frames.append(frame)
             self.cond.notify_all()
@@ -549,6 +572,73 @@ class SpectrumServerTest(unittest.TestCase):
         ws.send({"t": "run", "on": False})
         s.wait_op(lambda r: sum(o["op"] == "stop" for o in s.ops()) > stops, what="a stop")
         ws.wait(lambda: not self.controller(ws)["state"]["stream"]["running"], what="the stream to stop")
+
+    def test_a_two_channel_stream_is_started_from_the_page_and_either_channel_is_shown(self):
+        """The run message asks for two channels; the controller's state then says the stream has
+        them, the stream service is told (here by the server, as it would be again after a
+        restart), and the frames are of one channel: channel 0 until the page asks for 1."""
+        s = ServerFixture(self)
+        ws = s.ws
+        ws.wait(lambda: self.controller(ws).get("state"), what="the controller's state")
+        self.assertEqual(ws.status["receiver"]["channels"], 1)
+        ws.send({"t": "run", "on": True, "channels": 2})
+        self.assertEqual(s.wait_op(lambda r: r["op"] == "start").get("channels"), 2)
+        ws.wait(lambda: ws.status["receiver"]["channels"] == 2, what="two channels in the status")
+        shm = stream_shm.Shm(s.stream_name)
+        self.addCleanup(shm.close)
+        deadline = time.monotonic() + 10
+        while shm.layout()[2] != 2:
+            self.assertLess(time.monotonic(), deadline, "the stream service was not told of two channels")
+            time.sleep(0.05)
+
+        def shows(tone_hz):
+            def newest():
+                with ws.cond:
+                    frame = ws.frames[-1] if ws.frames else None
+                if not frame:
+                    return None
+                width = (frame["stop"] - frame["start"]) / frame["bins"]
+                wide = abs(frame["stop"] - frame["start"] - 40e6) < 1       # a channel's rate, not twice it
+                return frame if wide and abs(frame["peak_hz"] - tone_hz) < 2 * width else None
+            return newest
+        self.assertEqual(ws.status["fft"]["channel"], 0)
+        self.assertEqual(ws.wait(shows(TONE_HZ), 15, "frames of channel 0, with its tone")["channel"], 0)
+        ws.send({"t": "fft", "channel": 1})
+        ws.wait(lambda: ws.status["fft"]["channel"] == 1, what="channel 1 in the status")
+        self.assertEqual(ws.wait(shows(TONE_1_HZ), 15, "frames of channel 1, with its tone")["channel"], 1,
+                         "every frame says which channel it is of")
+        # Both at once: a frame of each channel over the same samples, channel 0's then channel 1's.
+        ws.send({"t": "fft", "channel": 2})
+        ws.wait(lambda: ws.status["fft"]["channel"] == 2, what="both channels in the status")
+        since = time.monotonic() + 0.5
+
+        def pairs():
+            with ws.cond:
+                frames = [f for f in ws.frames if f["at"] > since]
+            return frames if len(frames) >= 40 else None
+        frames = ws.wait(pairs, 20, "frames of both channels")
+        first = next(i for i, f in enumerate(frames) if f["channel"] == 0)
+        got = frames[first:first + 30]
+        self.assertEqual([f["channel"] for f in got], [0, 1] * 15, "in pairs, channel 0's frame first")
+        for f in got:
+            width = (f["stop"] - f["start"]) / f["bins"]
+            self.assertLess(abs(f["peak_hz"] - (TONE_HZ, TONE_1_HZ)[f["channel"]]), 2 * width, "each with its own tone")
+        ws.send({"t": "fft", "channel": 0})
+        ws.wait(lambda: ws.status["fft"]["channel"] == 0, what="channel 0 alone again")
+        since = time.monotonic() + 0.5
+
+        def only_zero():
+            with ws.cond:
+                frames = [f for f in ws.frames if f["at"] > since]
+            return frames if len(frames) >= 15 else None
+        self.assertEqual({f["channel"] for f in ws.wait(only_zero, 20, "frames of channel 0 alone")}, {0})
+        ws.send({"t": "fft", "channel": 3})
+        ws.wait_notice("channel must be 0, 1 or 2")
+        ws.send({"t": "run", "on": False})
+        s.wait_op(lambda r: r["op"] == "stop")
+        ws.wait(lambda: ws.status["receiver"]["channels"] == 1, what="one channel again in the status")
+        ws.send({"t": "run", "on": True, "channels": 3})
+        ws.wait_notice("channels must be 1 or 2")
 
     def test_controller_death_is_reported_and_recovered(self):
         s = ServerFixture(self)

@@ -7,7 +7,7 @@
 // the server on a slow link) and reconnects by itself when the link drops.
 // Receiver settings go to the server as `set` and `run` messages; its
 // controller applies them and the status reports what the receiver does.
-import {Renderer, NO_DATA, PALETTES, paletteCss} from './render.js';
+import {Renderer, NO_DATA, PALETTES, CHANNEL_COLORS, paletteCss} from './render.js';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, low, high) => Math.min(high, Math.max(low, x));
@@ -20,6 +20,7 @@ const DEFAULTS = {
     waterfallAttack: 1.0, waterfallDecay: 0.9,
     palette: 'sdrsharp', fill: true, peakHold: false,
     split: 0.42, maxFps: 0, maxKbps: 0, maxBins: -1,  // -1: automatic resolution
+    bothLayout: 'overlaid',  // both channels of a two-channel stream: 'overlaid' or 'side' by side
     sidebar: window.innerWidth > 900,
     open: {receiver: true, fft: true, display: false, stream: true, link: false},
     // The analog filter follows the sample rate; asked of the receiver again on every connection.
@@ -54,6 +55,10 @@ let windows = [];           // FFT windows the server offers: {name, bandwidth (
 let maxBins = 4096;         // most bins the server sends in a frame
 const spectrum = {key: '', start: 0, stop: 0, bins: 0, target: null, display: null, peak: null, settled: true};
 const waterfall = {key: '', row: null};
+// One trace and one waterfall a track: track 0 is what is shown of one signal; with both channels of
+// a two-channel stream shown, track 0 is channel 0 and track 1 channel 1.
+const spectra = [spectrum, {key: '', start: 0, stop: 0, bins: 0, target: null, display: null, peak: null, settled: true}];
+const waterfalls = [waterfall, {key: '', row: null}];
 const view = {offset: 0, span: 0};     // relative to the LO: centre offset and width, Hz
 const pointer = {x: -1, y: -1, inside: false};
 let marker = null;                     // Hz
@@ -74,7 +79,7 @@ try {
 $('gl').addEventListener('webglcontextlost', (e) => e.preventDefault());
 $('gl').addEventListener('webglcontextrestored', () => {
     renderer.setup();
-    waterfall.key = '';
+    for (const w of waterfalls) w.key = '';
     dirty.plot = true;
 });
 
@@ -190,6 +195,9 @@ function onFrame(buffer) {
     const d = new DataView(buffer);
     if (d.getUint8(0) !== 1) return;
     const peakMode = d.getUint8(1) & 1, bins = d.getUint16(2, true), sequence = d.getUint32(4, true);
+    // Bit 1 of the flags: the channel the frame is of (0 or 1 of a two-channel stream). One channel
+    // is drawn at a time for now; a view of both takes its frames apart by this.
+    const channel = (d.getUint8(1) >> 1) & 1;
     send({t: 'ack', seq: sequence});
     const start = d.getFloat64(8, true), stop = d.getFloat64(16, true);
     const base = d.getFloat32(24, true), step = d.getFloat32(28, true);
@@ -200,8 +208,12 @@ function onFrame(buffer) {
     stats.frames++;
     stats.merged += merged - 1;
 
-    queueFrame({db, bins, start, stop, time, key: `${bins}:${start}:${stop}:${peakMode}`,
-                ms: (Math.max(1, merged) * 1000) / (status ? status.fft.rate : 100)},  // the sample time it covers
+    // With both channels shown the frames come in pairs over the same samples, channel 0's first:
+    // each goes to its own track, and the pair is one step of the display's clock.
+    const both = bothShown(), ms = (Math.max(1, merged) * 1000) / (status ? status.fft.rate : 100);  // the sample time it covers
+    queueFrame({db, bins, start, stop, time, channel, track: both ? channel : 0,
+                key: `${bins}:${start}:${stop}:${peakMode}:${both ? 'both' : channel}`,
+                ms: both && channel === 0 ? 0 : ms},
                performance.now(), document.hidden);
 }
 
@@ -254,32 +266,64 @@ function playFrames(now, elapsed) {
     while (p.queue.length && p.queue[0].at + p.shift <= now) showFrame(p.queue.shift());
 }
 
-function showFrame({db, bins, start, stop, time, key}) {
+function showFrame({db, bins, start, stop, time, key, track = 0}) {
     stats.shown++;
-    if (key !== spectrum.key) {
-        Object.assign(spectrum, {key, start, stop, bins, display: db.slice(), peak: db.slice()});
+    const sp = spectra[track], fall = waterfalls[track];
+    if (key !== sp.key) {
+        Object.assign(sp, {key, start, stop, bins, display: db.slice(), peak: db.slice()});
     } else if (prefs.peakHold) {
-        for (let i = 0; i < bins; i++) spectrum.peak[i] = Math.max(spectrum.peak[i], db[i]);
+        for (let i = 0; i < bins; i++) sp.peak[i] = Math.max(sp.peak[i], db[i]);
     }
-    spectrum.target = db;
-    spectrum.settled = false;
+    sp.target = db;
+    sp.settled = false;
 
     // SDR#'s waterfall smoothing, applied from row to row.
     let row = db;
-    if (waterfall.key === key) {
+    if (fall.key === key) {
         row = new Float32Array(bins);
-        const previous = waterfall.row, up = prefs.waterfallAttack, down = prefs.waterfallDecay;
+        const previous = fall.row, up = prefs.waterfallAttack, down = prefs.waterfallDecay;
         for (let i = 0; i < bins; i++) {
             const delta = db[i] - previous[i];
             row[i] = previous[i] + (delta > 0 ? up : down) * delta;
         }
     }
-    waterfall.key = key;
-    waterfall.row = row;
-    renderer.pushRow(row, start, stop, time);
+    fall.key = key;
+    fall.row = row;
+    renderer.pushRow(row, start, stop, time, track);
 
     stats.age = performance.timeOrigin + performance.now() + link.clockOffset - time;
     dirty.plot = true;
+}
+
+// ---- one signal, or both channels ---------------------------------------------------------------------
+
+// Both channels of a two-channel stream are shown: the server sends a frame of each over the same
+// samples, channel 0's first.
+function bothShown() { return status?.receiver?.channels === 2 && status?.fft?.channel === 2; }
+// 'single': one trace and one waterfall. 'overlaid': both traces on one graph, the waterfall's
+// upper half channel 0 and its lower half channel 1. 'side': channel 0's plots in the left half,
+// channel 1's in the right, each over the whole view.
+function drawMode() { return !bothShown() ? 'single' : prefs.bothLayout === 'side' ? 'side' : 'overlaid'; }
+function paneCount() { return drawMode() === 'side' ? 2 : 1; }
+function paneWidth() { return canvases.clientWidth / paneCount(); }  // CSS pixels
+// The pane a pointer at x is in, and x within it.
+function paneAt(x) {
+    const w = paneWidth(), n = clamp(Math.floor(x / w), 0, paneCount() - 1);
+    return {pane: n, x: x - n * w};
+}
+let shownMode = 'single';
+// A change of what is drawn: the tracks hold other signals than they will, and the frames wanted
+// are a pane wide.
+function modeChanged() {
+    const mode = drawMode();
+    if (mode === shownMode) return;
+    shownMode = mode;
+    for (const sp of spectra) Object.assign(sp, {key: '', target: null, display: null, peak: null, settled: true});
+    for (const w of waterfalls) w.key = '';
+    renderer.clearWaterfall();
+    playout.key = '';
+    sendView();
+    dirty.plot = dirty.overlay = true;
 }
 
 // ---- view ----------------------------------------------------------------------------------------------
@@ -325,7 +369,7 @@ function sendViewSoon() {
 // Asks for the visible range plus a margin to pan into, at about one bin
 // per screen pixel.
 function sendView() {
-    const f = fullSpan(), v = visible(), width = renderer.canvas.width;
+    const f = fullSpan(), v = visible(), width = renderer.paneWidth(drawMode());  // a pane's device pixels
     let start = 0, stop = 0, bins = width;
     if (f) {
         const margin = (v.stop - v.start) * (view.span && view.span < f.rate ? 0.25 : 0);
@@ -338,22 +382,22 @@ function sendView() {
           fps: document.hidden ? 2 : prefs.maxFps, kbps: prefs.maxKbps});
 }
 
-function frequencyAt(x) {  // x in CSS pixels
+function frequencyAt(x) {  // x in CSS pixels; every pane shows the whole view
     const v = visible();
-    return v.start + (x / canvases.clientWidth) * (v.stop - v.start);
+    return v.start + (paneAt(x).x / paneWidth()) * (v.stop - v.start);
 }
 
 function zoomAround(x, factor) {
     const f = fullSpan();
     if (!f) return;
     const v = visible(), hz = frequencyAt(x), span = clamp((v.stop - v.start) * factor, minimumSpan(), f.rate);
-    const start = hz - (x / canvases.clientWidth) * span;
+    const start = hz - (paneAt(x).x / paneWidth()) * span;
     setView(start + span / 2 - f.lo, span);
 }
 
 function pan(pixels) {
     const v = visible();
-    setView(view.offset - (pixels / canvases.clientWidth) * (v.stop - v.start), v.stop - v.start);
+    setView(view.offset - (pixels / paneWidth()) * (v.stop - v.start), v.stop - v.start);
 }
 
 // Plot layout in CSS pixels.
@@ -491,14 +535,15 @@ new ResizeObserver(() => {
 // ---- drawing ----------------------------------------------------------------------------------------
 
 let traceColumns = new Float32Array(0), peakColumns = new Float32Array(0);
+let traceColumns1 = new Float32Array(0), peakColumns1 = new Float32Array(0);   // track 1's
 
 // For each device-pixel column: the maximum of the bins under it, or the
 // value interpolated between bins when zoomed in beyond them.
-function columns(values, out) {
-    const w = out.length, v = visible(), bins = spectrum.bins;
-    const scale = bins / (spectrum.stop - spectrum.start), step = (v.stop - v.start) / w;
+function columns(values, out, sp = spectrum) {
+    const w = out.length, v = visible(), bins = sp.bins;
+    const scale = bins / (sp.stop - sp.start), step = (v.stop - v.start) / w;
     for (let c = 0; c < w; c++) {
-        const b0 = (v.start + c * step - spectrum.start) * scale, b1 = b0 + step * scale;
+        const b0 = (v.start + c * step - sp.start) * scale, b1 = b0 + step * scale;
         if (b1 <= 0 || b0 >= bins) {
             out[c] = NO_DATA;
         } else if (b1 - b0 >= 1) {
@@ -522,36 +567,42 @@ function animate(now) {
 
     // SDR#'s spectrum attack and decay are per FFT frame; applied here in
     // proportion to the time passed, the trace glides at the display rate.
-    if (spectrum.target && !spectrum.settled) {
+    for (const sp of spectra) {
+        if (!sp.target || sp.settled) continue;
         const frames = dt * (status ? status.fft.rate : 40);
         const up = 1 - Math.pow(1 - prefs.spectrumAttack, frames), down = 1 - Math.pow(1 - prefs.spectrumDecay, frames);
-        const d = spectrum.display, t = spectrum.target;
+        const d = sp.display, t = sp.target;
         let moving = false;
         for (let i = 0; i < d.length; i++) {
             const delta = t[i] - d[i];
             d[i] += (delta > 0 ? up : down) * delta;
             if (delta > 0.05 || delta < -0.05) moving = true;
         }
-        spectrum.settled = !moving;
+        sp.settled = !moving;
         dirty.plot = true;
     }
 
     if (dirty.plot) {
         const started = performance.now(), l = layout();
-        const width = renderer.canvas.width;
+        const mode = drawMode(), width = renderer.paneWidth(mode);
         if (traceColumns.length !== width) {
             traceColumns = new Float32Array(width);
             peakColumns = new Float32Array(width);
+            traceColumns1 = new Float32Array(width);
+            peakColumns1 = new Float32Array(width);
         }
-        if (spectrum.display) {
-            columns(spectrum.display, traceColumns);
-            if (prefs.peakHold) columns(spectrum.peak, peakColumns);
-        } else {
-            traceColumns.fill(NO_DATA);
+        const tracks = [[spectra[0], traceColumns, peakColumns, 0], [spectra[1], traceColumns1, peakColumns1, 1]];
+        for (const [sp, trace, peak, n] of mode === 'single' ? tracks.slice(0, 1) : tracks) {
+            if (sp.display) {
+                columns(sp.display, trace, sp);
+                if (prefs.peakHold) columns(sp.peak, peak, sp);
+            } else {
+                trace.fill(NO_DATA);
+            }
+            renderer.setColumns(trace, prefs.peakHold ? peak : null, n);
         }
-        renderer.setColumns(traceColumns, prefs.peakHold ? peakColumns : null);
         renderer.draw(l, visible(), {top: prefs.top, bottom: prefs.top - prefs.range, contrast: prefs.contrast / 100,
-                                     fill: prefs.fill, peak: prefs.peakHold});
+                                     fill: prefs.fill, peak: prefs.peakHold, mode});
         dirty.plot = false;
         // The overlay shows the trace's level only at the pointer and the marker: with neither it
         // stays as it is, and with one a few readings a second are enough. Redrawing it with
@@ -587,14 +638,37 @@ function formatHz(hz, step) {
     return (hz / 1e6).toFixed(decimals);
 }
 
+const channelCss = (n) => `rgb(${CHANNEL_COLORS[n].map((c) => Math.round(255 * c)).join(', ')})`;
+
+// The grid, labels, marker and pointer above the plots. With both channels side by side there are
+// two panes, each over the whole view: the marker and the pointer are drawn in both, at the same
+// frequency, each with its own channel's level.
 function drawOverlay() {
     const ctx = renderer.context2d, r = renderer.ratio || 1;
-    const w = canvases.clientWidth, h = canvases.clientHeight, l = layout(), v = visible();
+    const total = canvases.clientWidth, h = canvases.clientHeight, l = layout(), v = visible();
+    const mode = drawMode(), count = paneCount(), w = total / count;
+    const at = pointer.inside ? paneAt(pointer.x) : null;
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+    ctx.clearRect(0, 0, total, h);
+    for (let pane = 0; pane < count; pane++) {
+        ctx.save();
+        ctx.translate(pane * w, 0);
+        ctx.beginPath();
+        ctx.rect(0, 0, w, h);
+        ctx.clip();
+        drawPane(ctx, r, pane, w, h, l, v, mode, at);
+        ctx.restore();
+    }
+    if (count > 1) {  // between the panes
+        ctx.fillStyle = '#0d1116';
+        ctx.fillRect(Math.round(w) - 1, 0, 2, h);
+    }
+}
+
+function drawPane(ctx, r, pane, w, h, l, v, mode, at) {
     const x = (hz) => ((hz - v.start) / (v.stop - v.start)) * w;
     const top = prefs.top, bottom = prefs.top - prefs.range;
     const y = (db) => ((top - db) / (top - bottom)) * l.spectrum;
-    ctx.setTransform(r, 0, 0, r, 0, 0);
-    ctx.clearRect(0, 0, w, h);
     ctx.font = '11px system-ui, sans-serif';
     ctx.textBaseline = 'middle';
 
@@ -647,9 +721,47 @@ function drawOverlay() {
         ctx.setLineDash([]);
     }
 
-    const levelAt = (px) => {
-        const c = Math.round(px * r);
-        return c >= 0 && c < traceColumns.length && traceColumns[c] > NO_DATA ? traceColumns[c] : null;
+    // Which channel is where. Overlaid: both traces on this graph, the waterfall's upper half
+    // channel 0 and its lower half channel 1. Side by side: this pane is one channel's.
+    const fallTop = l.spectrum + l.axis, lowerFall = Math.floor(l.waterfall / 2), upperFall = l.waterfall - lowerFall;
+    const tag = (text, xx, yy, color, align = 'right') => {
+        ctx.font = '11px system-ui, sans-serif';
+        const width = ctx.measureText(text).width + 10, left = align === 'right' ? xx - width : xx;
+        ctx.fillStyle = 'rgba(10, 13, 17, 0.75)';
+        ctx.fillRect(left, yy - 9, width, 18);
+        ctx.fillStyle = color;
+        ctx.textAlign = 'left';
+        ctx.fillText(text, left + 5, yy);
+    };
+    if (mode === 'side') {
+        tag(`Channel ${pane}`, w - 6, 14, channelCss(pane));
+    } else if (mode === 'overlaid') {
+        tag('Channel 1', w - 6, 14, channelCss(1));
+        tag('Channel 0', w - 6 - 70, 14, channelCss(0));
+        if (lowerFall > 24) {
+            tag('Channel 0', 4, fallTop + 12, channelCss(0), 'left');
+            tag('Channel 1', 4, fallTop + upperFall + 12, channelCss(1), 'left');
+            ctx.fillStyle = 'rgba(13, 17, 22, 0.9)';
+            ctx.fillRect(0, fallTop + upperFall - 1, w, 2);
+        }
+    }
+
+    // The traces whose level is read at a point of this pane, and the waterfall row under a point.
+    const here = mode === 'side' ? [pane] : mode === 'overlaid' ? [0, 1] : [0];
+    const levelAt = (px, track) => {
+        const values = track ? traceColumns1 : traceColumns, c = Math.round(px * r);
+        return c >= 0 && c < values.length && values[c] > NO_DATA ? values[c] : null;
+    };
+    const levels = (px) => {
+        const found = here.map((track) => [track, levelAt(px, track)]).filter(([, level]) => level !== null);
+        if (!found.length) return '';
+        if (here.length === 1) return `  ${found[0][1].toFixed(1)} dBFS`;
+        return '  ' + found.map(([track, level]) => `ch ${track}: ${level.toFixed(1)}`).join('  ') + ' dBFS';
+    };
+    const rowTimeAt = (py) => {
+        const into = py - fallTop;
+        if (mode === 'overlaid') return into < upperFall ? renderer.rowTime(Math.floor(into), 0) : renderer.rowTime(Math.floor(into - upperFall), 1);
+        return renderer.rowTime(Math.floor(into), mode === 'side' ? pane : 0);
     };
     const label = (text, xx, yy, color) => {
         ctx.font = '12px system-ui, sans-serif';
@@ -670,13 +782,11 @@ function drawOverlay() {
             ctx.moveTo(xx, 0);
             ctx.lineTo(xx, h);
             ctx.stroke();
-            const level = levelAt(xx);
-            label(`${(marker / 1e6).toFixed(digits)} MHz${level === null ? '' : `  ${level.toFixed(1)} dBFS`}`,
-                  xx, 24, '#ffc766');
+            label(`${(marker / 1e6).toFixed(digits)} MHz${levels(xx)}`, xx, 34, '#ffc766');
         }
     }
-    if (pointer.inside && !drag?.moved) {
-        const xx = Math.round(pointer.x) + 0.5;
+    if (at && !drag?.moved) {
+        const xx = Math.round(at.x) + 0.5;
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
         ctx.beginPath();
         ctx.moveTo(xx, 0);
@@ -684,14 +794,13 @@ function drawOverlay() {
         ctx.stroke();
         let text = `${(frequencyAt(pointer.x) / 1e6).toFixed(digits)} MHz`;
         if (pointer.y < l.spectrum) {
-            const level = levelAt(pointer.x);
-            if (level !== null) text += `  ${level.toFixed(1)} dBFS`;
+            text += levels(at.x);
             if (marker !== null) text += `  Δ ${((frequencyAt(pointer.x) - marker) / 1e3).toFixed(1)} kHz`;
-        } else if (pointer.y > l.spectrum + l.axis) {
-            const t = renderer.rowTime(Math.floor(pointer.y - l.spectrum - l.axis));
+        } else if (pointer.y > fallTop) {
+            const t = rowTimeAt(pointer.y);
             if (t) text += `  ${((Date.now() + link.clockOffset - t) / 1000).toFixed(1)} s ago`;
         }
-        label(text, pointer.x, clamp(pointer.y - 18, 12, h - 12), '#e8eef5');
+        label(text, at.x, clamp(pointer.y - 18, 12, h - 12), '#e8eef5');
     }
 }
 
@@ -1252,6 +1361,13 @@ function showReceiver(s) {
         showGainOutputs();
     }
     showConfigNote();
+    // A running stream shows what it is; a stopped one, what the next start asks for.
+    const two = r?.channels === 2;
+    if (streaming()) showValue($('two-channels'), two);
+    $('two-channels').disabled = streaming();
+    $('channels-note').textContent = two ? 'The stream is of two channels: chains 0 and 1, one gain on both.'
+        : streaming() && $('two-channels').checked ? '' : !streaming() && $('two-channels').checked ? 'Applies from the next start.' : '';
+    $('fft-channel-row').hidden = !two;
     $('flatten-note').textContent = !r?.flatten ? ''
         : r.flatten_active ? 'The stream is corrected: the decimation\'s roll-off is divided out of the samples.'
         : r.flatten_available ? 'Applies from the next slices.'
@@ -1295,7 +1411,8 @@ function enableControls() {
 }
 
 $('run').addEventListener('click', () => {
-    if (!send({t: 'run', on: !streaming()})) toast('Not connected.', 'bad');
+    // Two channels are asked for with the start; a stream that runs keeps what it was started with.
+    if (!send({t: 'run', on: !streaming(), channels: $('two-channels').checked ? 2 : 1})) toast('Not connected.', 'bad');
 });
 $('band').addEventListener('change', editConfig);
 for (const b of $('rate').querySelectorAll('button'))
@@ -1385,6 +1502,7 @@ function restoreFft(current) {
         averaging: (v) => AVERAGING.includes(v),
         peak: (v) => typeof v === 'boolean',
         dc: (v) => typeof v === 'boolean',
+        channel: (v) => v === 0 || v === 1 || v === 2,
     };
     const changes = {};
     for (const [key, value] of Object.entries(prefs.fft)) {
@@ -1409,6 +1527,15 @@ bindSlider('fft-averaging', (v, immediate) => {
     $('fft-averaging').nextElementSibling.textContent = AVERAGING[v] || 'all';
     if (immediate) sendFft({averaging: AVERAGING[v]});
 });
+for (const b of $('fft-channel').querySelectorAll('button'))
+    b.addEventListener('click', () => sendFft({channel: Number(b.dataset.v)}));
+for (const b of $('both-layout').querySelectorAll('button'))
+    b.addEventListener('click', () => {
+        prefs.bothLayout = b.dataset.v;
+        savePrefs();
+        showSegmented('both-layout', prefs.bothLayout);
+        modeChanged();
+    });
 for (const b of $('fft-detector').querySelectorAll('button'))
     b.addEventListener('click', () => sendFft({peak: b.dataset.v === 'peak'}));
 $('fft-dc').addEventListener('change', () => sendFft({dc: $('fft-dc').checked}));
@@ -1423,6 +1550,10 @@ function showFft(s) {
     if (document.activeElement !== $('fft-averaging')) $('fft-averaging').nextElementSibling.textContent = f.averaging || 'all';
     showSegmented('fft-detector', f.peak ? 'peak' : 'average');
     showValue($('fft-dc'), f.dc);
+    showSegmented('fft-channel', f.channel || 0);
+    showSegmented('both-layout', prefs.bothLayout);
+    $('both-layout-row').hidden = !bothShown();
+    modeChanged();
     const rate = s.receiver ? s.receiver.sample_rate : 80e6, bin = rate / f.size;
     const rbw = bin * (windows.find((w) => w.name === f.window)?.bandwidth || 1);
     $('fft-note').textContent = `Bins ${(bin / 1e3).toFixed(2)} kHz apart, resolution bandwidth ${(rbw / 1e3).toFixed(2)} kHz. ` +
@@ -1468,7 +1599,7 @@ bindPreference('s-decay', 'spectrumDecay');
 bindPreference('w-attack', 'waterfallAttack');
 bindPreference('w-decay', 'waterfallDecay');
 bindPreference('fill', 'fill');
-bindPreference('peak-hold', 'peakHold', () => { if (spectrum.target) spectrum.peak = spectrum.display.slice(); });
+bindPreference('peak-hold', 'peakHold', () => { for (const sp of spectra) if (sp.target) sp.peak = sp.display.slice(); });
 bindPreference('contrast', 'contrast');
 bindPreference('range', 'range');
 bindPreference('offset', 'top');
@@ -1489,7 +1620,7 @@ $('display-defaults').addEventListener('click', () => resetPreferences(
      'contrast', 'range', 'top']));
 $('link-defaults').addEventListener('click', () => resetPreferences(['maxFps', 'maxKbps', 'maxBins']));
 $('peak-reset').addEventListener('click', () => {
-    if (spectrum.display) spectrum.peak = spectrum.display.slice();
+    for (const sp of spectra) if (sp.display) sp.peak = sp.display.slice();
     dirty.plot = true;
 });
 $('clear-waterfall').addEventListener('click', () => {
@@ -1498,7 +1629,8 @@ $('clear-waterfall').addEventListener('click', () => {
 });
 $('auto-levels').addEventListener('click', () => {
     if (!traceColumns.length) return;
-    const values = [...traceColumns].filter((v) => v > NO_DATA).sort((a, b) => a - b);
+    const shown = drawMode() === 'single' ? [...traceColumns] : [...traceColumns, ...traceColumns1];
+    const values = shown.filter((v) => v > NO_DATA).sort((a, b) => a - b);
     if (!values.length) return;
     const floor = values[Math.floor(values.length * 0.1)], peak = values[values.length - 1];
     prefs.top = clamp(Math.ceil((peak + 8) / 10) * 10, -160, 20);

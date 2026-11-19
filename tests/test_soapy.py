@@ -16,7 +16,8 @@ import time
 import unittest
 
 from stream_shm import Shm, ready as stream_ready
-from test_stream import BINARY as STREAM_BINARY, MAGIC, STREAM, build_problem, free_udp_port, noise_words, pack, unpacked
+from test_stream import (BINARY as STREAM_BINARY, MAGIC, STREAM, build_problem, free_udp_port, noise_words, pack,
+                         two_channels, unpacked)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOAPY = os.path.join(ROOT, "host", "soapy")
@@ -140,7 +141,7 @@ class SoapyTest(unittest.TestCase):
 
     def test_the_device_describes_the_receiver(self):
         (state,), _ = self.run_tool(self.args(), "state")
-        self.assertEqual((state["driver"], state["hardware"], state["channels"]), ("w1700k", "W1700K", 1))
+        self.assertEqual((state["driver"], state["hardware"], state["channels"]), ("w1700k", "W1700K", 2))
         self.assertEqual(state["antennas"], ["2.4G", "5G", "6G"])
         self.assertEqual((state["antenna"], state["freq"], state["rate"], state["bw"]), ("5G", 5180e6, 40e6, 20e6))
         self.assertEqual(state["rates"], 4)
@@ -226,6 +227,64 @@ class SoapyTest(unittest.TestCase):
         self.assertEqual(len(got), len(expected))
         self.assertTrue(got == expected, "the samples, bit for bit")
         self.assertEqual(self.requests(), [{"op": "start"}, {"op": "stop"}], "it started the stream, so it stops it")
+
+    def test_two_channels_are_read_as_two_buffers_of_the_same_instants(self):
+        """A stream of channels 0 and 1: the device asks the controller for a two-channel stream
+        (which tells the service, as the test does here), and gives each channel's samples in a
+        buffer of its own, the same index the same instant. A lost slice is one gap in both."""
+        shm = Shm(self.name)
+        shm.set("radio_channels", 2)
+        shm.close()
+        time.sleep(0.3)
+        words = {s: noise_words(s) for s in range(1300)}
+        path = os.path.join(self.tmp, "two.cs16")
+        per = SLICE // 2
+        want = 1298 * per
+        process = self.tool_start(self.args(), "read2:CS16:%d:%s" % (want, path))
+        self.reading(process)
+        for s in range(1300):
+            if s == 20:
+                self.send(s, b"\x00" * 64)
+            elif s == 30:
+                continue
+            else:
+                self.send(s, struct.pack("<2048I", *words[s]))
+        report = self.finish(process)
+        self.assertEqual((report["samples"], report["overflows"], report["lost_samples"]), (want, 1, per))
+        self.assertEqual((report["time_errors"], report["errors"]), (0, 0))
+        self.assertEqual(report["span_ns"], round(1299 * per * 1e9 / 40e6), "a channel's sample rate times its samples")
+        for channel, name in ((0, path), (1, path + ".1")):
+            with open(name, "rb") as f:
+                got = f.read()
+            expected = b"".join(struct.pack("<%dh" % (2 * per), *(v for iq in two_channels(words[s])[channel] for v in iq))
+                                for s in range(1300) if s not in (20, 30))
+            self.assertTrue(got == expected, "channel %d, bit for bit" % channel)
+        self.assertEqual(self.requests(), [{"op": "start", "channels": 2}, {"op": "stop"}])
+
+    def test_one_channel_of_a_two_channel_stream_is_channel_0(self):
+        """A stream of two channels that somebody else runs, read as one: channel 0 of it."""
+        shm = Shm(self.name)
+        shm.set("radio_channels", 2)
+        shm.close()
+        time.sleep(0.3)
+        words = {s: noise_words(s) for s in range(200)}
+        path = os.path.join(self.tmp, "first.cs16")
+        per = SLICE // 2
+        process = self.tool_start(self.args("--running --channels 2"), "read:CS16:%d:%s" % (150 * per, path))
+        self.reading(process)
+        self.send_slices(range(200), words)
+        report = self.finish(process)
+        self.assertEqual((report["samples"], report["overflows"]), (150 * per, 0))
+        with open(path, "rb") as f:
+            got = f.read()
+        expected = b"".join(struct.pack("<%dh" % (2 * per), *(v for iq in two_channels(words[s])[0] for v in iq)) for s in range(150))
+        self.assertTrue(got == expected)
+        self.assertEqual(self.requests(), [], "it is not this device's stream to start or stop")
+
+    def test_two_channels_are_not_taken_from_a_one_channel_stream_already_running(self):
+        (line,), err = self.run_tool(self.args("--running"), "read2:CS16:1000:-")
+        self.assertIn("the stream that is running has one channel", line.get("error", "") + err)
+        self.assertEqual(self.requests(), [], "and it is left running")
 
     def test_a_stream_already_running_is_joined_from_now_and_left_running(self):
         words = {s: noise_words(s) for s in range(300)}

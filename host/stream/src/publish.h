@@ -54,6 +54,7 @@ private:
         uint64_t sequence = 0, run = 0, first = 0, last = 0;
         const Flatten *flatten = nullptr;
         bool flush = false;
+        unsigned channels = 1;  // the run's: 2 lays each slot out by channel
     };
     struct Worker;
 
@@ -63,7 +64,7 @@ private:
     enum class Slot { Data, Event, Lost };
     Slot classify(uint64_t run, uint64_t index, bool flush) const;
     bool overrun(uint64_t run, uint64_t index) const;
-    void publish_position(uint64_t run, uint64_t newest);
+    void publish_position(uint64_t run, uint64_t newest, unsigned channels);
     const Flatten *correction() const;  // from the control words, nullptr: none applies
     void report();                      // heartbeat and counters into the header
 

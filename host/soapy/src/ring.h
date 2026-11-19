@@ -43,6 +43,9 @@ public:
     // into every mapping. The correction itself is another consumer's to ask for until
     // set_flatten is called here; from then on this one's wish is written too.
     void set_radio(double sample_rate, double capture_rate, double filter_hz);
+    // The channels of the stream that is running, as the controller reports them: the service was
+    // told by whoever started the stream, and is told again from here should it restart.
+    void set_channels(unsigned channels);
     void set_flatten(bool on);
 
 private:
@@ -52,6 +55,7 @@ private:
     std::mutex mutex_;
     std::shared_ptr<const RingView> view_;
     uint64_t sample_rate_ = 0, capture_rate_ = 0, filter_hz_ = 0;
+    uint64_t channels_ = 0;  // 0: not known here, the word is left as it is
     bool radio_known_ = false, flatten_set_ = false, flatten_ = false;
 };
 
@@ -67,14 +71,20 @@ public:
     // first. `rate` is the stream's sample rate, for the sample times.
     void start(double rate);
 
-    // Up to `count` samples into `cs16` (int16 I, Q) or, when that is null, `cf32` (float I, Q,
-    // full scale 1.0), waiting up to `timeout_us` for the first. Returns how many, with `time_ns`
+    // How many channels this reader gives: 1, or 2 (two receive chains sampled together). Set
+    // before start(). A reader of one channel takes channel 0 of a two-channel run; a reader of
+    // two waits through a one-channel run, which has no second channel to give.
+    void set_channels(unsigned channels) { want_ = channels == 2 ? 2 : 1; }
+
+    // Up to `count` samples (sample times) of each channel into `cs16[c]` (int16 I, Q) or, when
+    // `cs16` is null, `cf32[c]` (float I, Q, full scale 1.0), c below the reader's channels,
+    // waiting up to `timeout_us` for the first. The channels' samples are of the same instants. Returns how many, with `time_ns`
     // the first one's time; kTimeout; or kGap: samples before the next ones were lost (never
     // received, or overwritten in the ring before this reader came to them), `time_ns` then
     // being where the stream goes on. Times are on the host's monotonic clock: the moment
     // reading began, advanced by the samples since, received or lost; a new run (the stream
     // restarted) starts again from the time the service saw it begin.
-    long read(int16_t *cs16, float *cf32, size_t count, long timeout_us, double rate, long long &time_ns);
+    long read(int16_t *const *cs16, float *const *cf32, size_t count, long timeout_us, double rate, long long &time_ns);
 
     // Since start(): the samples given, the gaps among them, of those the ones where this reader
     // was too slow (the ring overwrote what it had not read), and the furthest it was behind the
@@ -88,11 +98,14 @@ private:
     long long now_ns() const;
     void rebase(long long at_ns, double rate);
     void skip(uint64_t slices);
+    unsigned per_slice() const { return w1700k_stream_slice_samples(run_channels_); }  // sample times in a slot of run_
 
     Ring &ring_;
     std::shared_ptr<const RingView> view_;
     uint64_t run_ = 0, index_ = 0;  // the service's run number; the next slice
     unsigned offset_ = 0;           // samples of that slice already given
+    unsigned want_ = 1;             // the channels this reader gives
+    unsigned run_channels_ = 1;     // the channels of run_
     bool joined_ = false;           // run_ and index_ are set
     double rate_ = 0;
     long long base_ns_ = 0;         // the time of sample 0 of samples_

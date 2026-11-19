@@ -241,7 +241,9 @@ class RadioCommands(unittest.TestCase):
         and a WA started on an unconfigured radio leaves it deaf. The refusals are no producer
         status."""
         h = host_fake.header_defines(*HEADERS)
-        self.assertEqual(wm.STREAM_REFUSALS.keys(), {h['RADIO_STREAM_BAD_PACKING'], h['RADIO_STREAM_NOT_READY']})
+        self.assertEqual(wm.STREAM_REFUSALS.keys(), {h['RADIO_STREAM_BAD_PACKING'], h['RADIO_STREAM_NOT_READY'],
+                                                     h['RADIO_STREAM_BAD_PATHS']})
+        self.assertEqual((h['RADIO_STREAM_PATHS_ONE'], h['RADIO_STREAM_PATHS_TWO'], h['RADIO_BW_CLASS_320']), (1, 2, 4))
         self.assertEqual(wm.STATE_SELECTED, {b: h['RADIO_STATE_SELECTED'](b) for b in range(3)})
         self.assertTrue(all(code >= 0x100 for code in wm.STREAM_REFUSALS), 'above every producer status')
         ready = self.dev.st('radio_state')

@@ -88,7 +88,7 @@ class Load(ControllerTest):
         self.assertEqual(state['radio']['synth_locked'], [True, True, True])
         self.assertEqual(state['stream'], {'running': False, 'packing': None, 'packing_manual': False,
                                            'link_mbps': None, 'sample_rate': 320_000_000,
-                                           'center_hz': 5_250_000_000})
+                                           'center_hz': 5_250_000_000, 'channels': 1})
         progress = [e['fraction'] for e in self.events if e.get('event') == 'progress']
         self.assertEqual((progress[0], progress[-1]), (0.0, 1.0))
         self.assertIsNone(state['error'])
@@ -253,6 +253,104 @@ class Streaming(ControllerTest):
         self.assertFalse(self.dev.streaming or self.dev.route_armed)
         self.assertIsNone(self.ctl.state()['stream']['packing'])
         self.assertIn('stream stopped: 1000 chunks in 1.0 s', self.logs())
+
+    def test_two_channels_are_asked_of_the_radio_and_cost_twice_the_rate(self):
+        """Two receive chains of a band in one stream. The radio, the unit and the link carry two
+        channels at a rate as they carry one at twice it, so the packing is that rate's: 2 x 80
+        Msps on a 5 Gbit/s link is packed as 160 Msps is."""
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=80_000_000)
+        self.ctl.gain(lna=3, lpf=6)                         # a gain set by hand is left alone
+        self.dev.radio_commands.clear()
+        self.dev.link_mbps = 5000
+        self.ctl.start(channels=2)
+        self.assertEqual((self.dev.radio_commands, self.dev.stream_paths), ([('stream', (2,))], 2))
+        state = self.ctl.state()
+        self.assertEqual((state['stream']['running'], state['stream']['packing'], state['stream']['channels'],
+                          state['stream']['sample_rate']), (True, 'full', 2, 80_000_000))
+        self.assertEqual((state['rf']['agc'], state['rf']['lna'], state['rf']['lpf']), (False, 3, 6))
+        self.ctl.tune(5_500_000_000)                        # the LO moves under it, as under any stream
+        self.assertTrue(self.dev.streaming)
+        with self.assertRaisesRegex(ControlError, 'two-channel stream is running'):
+            self.ctl.configure(1, sample_rate=40_000_000)
+        with self.assertRaisesRegex(ControlError, 'two-channel stream is running'):
+            self.ctl.configure(2)
+        self.assertTrue(self.dev.streaming, 'and it runs on')
+        self.ctl.stop()
+        self.assertEqual(self.ctl.state()['stream']['channels'], 1)
+        self.assertEqual(self.ctl.state()['rf']['lna'], 3, 'the gain set by hand stays')
+        self.dev.radio_commands.clear()
+        self.ctl.start()                                    # the next stream is one channel again
+        self.assertEqual((self.dev.radio_commands, self.dev.stream_paths), ([('stream', (0,))], 0),
+                         'the command as it always was')
+        self.assertEqual(self.ctl.state()['stream']['packing'], 'raw')
+
+    def test_two_channels_at_160_msps_are_split_on_a_5_gbit_link_as_320_msps_is(self):
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=160_000_000)
+        self.dev.link_mbps = 5000
+        self.ctl.start(channels=2)
+        self.assertEqual((self.ctl.state()['stream']['packing'], self.dev.stream_paths), ('split', 2))
+
+    def test_two_channels_get_one_fixed_gain_and_a_stop_gives_the_agc_back(self):
+        """Under the AGC each chain's gain steps by itself, and with it the ratio and the phase
+        between the two channels. So a two-channel stream fixes one gain on both chains, unless
+        one was set by hand, and says so; the stop that was asked for puts the AGC back."""
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=80_000_000)
+        self.assertTrue(self.ctl.state()['rf']['agc'])
+        self.ctl.start(channels=2)
+        rfs = self.ctl.state()['rf']
+        self.assertEqual((rfs['agc'], rfs['lna'], rfs['lpf']), (False, 2, 5))
+        self.assertIn('two channels: the gain is fixed at LNA 2, LPF 5 on both chains', ' '.join(self.logs()))
+        other = Controller(self.config, unit=self.unit)     # another session finds it so
+        other.attach()
+        self.assertEqual(other.state()['stream']['channels'], 2)
+        other.close()
+        self.ctl.stop()
+        self.assertTrue(self.ctl.state()['rf']['agc'])
+
+    def test_two_channels_are_refused_where_the_radio_cannot_give_them(self):
+        """At 320 Msps each (more than the radio moves), and where 320 Msps is captured at 640
+        (another datapath, which the radio refuses too). Nothing is started or changed."""
+        self.loaded(1)                                      # band 1 at 320 Msps
+        with self.assertRaisesRegex(ControlError, 'two channels are streamed up to 160 Msps each'):
+            self.ctl.start(channels=2)
+        self.ctl.configure(2, sample_rate=320_000_000, capture_rate=640_000_000)
+        with self.assertRaisesRegex(ControlError, 'captured at 640'):
+            self.ctl.start(channels=2)
+        self.assertFalse(self.dev.streaming)
+        self.assertEqual(self.commands().count('stream'), 0)
+        with self.assertRaisesRegex(ValueError, 'channels: 1 or 2'):
+            self.ctl.start(channels=3)
+        state = self.ctl.state()
+        self.assertEqual((state['stream']['channels'], state['rf']['agc']), (1, True))
+
+    def test_the_hosts_stream_service_is_told_the_channels_before_the_radio_is(self):
+        told = []
+        with mock.patch('w1700k.controller.announce_channels', side_effect=lambda n, name: told.append(
+                (n, name, self.commands().count('stream'))) or True):
+            ctl = Controller(replace(self.config, export=replace(self.config.export, service='/w1700k-test')),
+                             emit=self.events.append, unit=self.unit)
+            ctl.attach()
+            ctl.load(1)
+            ctl.configure(1, sample_rate=80_000_000)
+            self.dev.radio_commands.clear()
+            ctl.start(channels=2)
+            ctl.stop()
+            ctl.start()
+            ctl.stop()
+            ctl.close()
+        self.assertEqual(told, [(2, '/w1700k-test', 0), (1, '/w1700k-test', 1)], 'each before its STREAM command')
+        self.assertNotIn('was told', ' '.join(self.logs()))
+
+    def test_two_channels_with_no_service_to_tell_are_started_and_it_is_said(self):
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=80_000_000)
+        self.ctl.start(channels=2)                          # the tests' configuration names no service
+        self.assertTrue(self.dev.streaming)
+        self.assertIn('no w1700k-stream of this user on this host was told that the stream has two channels',
+                      ' '.join(self.logs()))
 
     def test_a_stream_our_wm_refuses_is_reported_and_no_pump_is_started_on_it(self):
         self.loaded(1)
@@ -650,6 +748,150 @@ class RfControl(ControllerTest):
         del self.dev.unlocking[1]
         self.ctl.tune(5_300_000_000)
         self.assertEqual(self.ctl.state()['radio']['synth_locked'], [True, True, True])
+
+
+class PhaseKeeping(ControllerTest):
+    """Each lock of a band's synthesizer leaves its chains at random in one of two phases half a
+    turn apart; a retune by the frequency words alone (HOLD) leaves them as they are."""
+
+    M = 1_000_000
+
+    def two_channels(self, band=1):
+        self.loaded(band)
+        self.ctl.configure(band, sample_rate=80_000_000)
+        self.ctl.start(channels=2)
+        self.dev.rf_ops.clear()
+        self.events.clear()
+        return self.ctl.state()['rf']['relocks']
+
+    def kinds(self):
+        return [op[0] for op in self.dev.rf_ops if op[0] in (rf.RF_TUNE, rf.RF_HOLD)]
+
+    def lo(self, mhz, band=1):
+        return radio.actual_lo(band, mhz * self.M)
+
+    def test_a_two_channel_stream_is_retuned_with_its_lock_kept(self):
+        """Wherever the lock reaches: no new lock, the count of them unchanged, the LO the band's."""
+        count = self.two_channels()
+        locks = self.dev.locks[1]
+        for mhz in (5260, 5234, 5266, 5250):
+            self.ctl.tune(mhz * self.M)
+            self.assertEqual(self.ctl.state()['rf']['lo_hz'], self.lo(mhz))
+        self.assertEqual(self.kinds(), [rf.RF_HOLD] * 4)
+        self.assertEqual((self.dev.locks[1], self.ctl.state()['rf']['relocks']), (locks, count))
+        self.assertEqual(self.ctl.state()['radio']['lo_hz'], self.lo(5250))
+        self.assertEqual(self.logs(), [])
+
+    def test_beyond_the_locks_reach_it_locks_again_and_says_so(self):
+        """The stream follows wherever it is tuned: past the reach the synthesizer locks again, the
+        count moves and a warning names what may have happened. From there the lock is kept again."""
+        count = self.two_channels()
+        self.ctl.tune(5300 * self.M)
+        self.assertEqual(self.kinds(), [rf.RF_HOLD, rf.RF_TUNE])
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count + 1)
+        self.assertTrue(any('locked again' in line and 'half a turn' in line for line in self.logs()), self.logs())
+        self.ctl.tune(5310 * self.M)
+        self.assertEqual(self.kinds()[2:], [rf.RF_HOLD])
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count + 1)
+
+    def test_one_channel_locks_again_as_it_always_did(self):
+        self.loaded(1)
+        count = self.ctl.state()['rf']['relocks']
+        self.ctl.tune(5260 * self.M)
+        self.ctl.start()
+        self.ctl.tune(5255 * self.M)
+        self.assertEqual(self.kinds(), [rf.RF_TUNE] * 2)
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count + 2)
+
+    def test_keep_is_kept_or_refused(self):
+        """Asked for by hand, with or without a stream: within reach the lock is kept; beyond it the
+        tune is refused and nothing has moved."""
+        self.loaded(1)
+        count = self.ctl.state()['rf']['relocks']
+        self.ctl.tune(5262 * self.M, 'keep')
+        with self.assertRaisesRegex(ControlError, 'not reached from its lock'):
+            self.ctl.tune(5300 * self.M, 'keep')
+        self.assertEqual(self.kinds(), [rf.RF_HOLD] * 2)
+        state = self.ctl.state()
+        self.assertEqual((state['rf']['lo_hz'], state['rf']['relocks']), (self.lo(5262), count))
+
+    def test_relock_is_a_new_lock_under_two_channels_too(self):
+        count = self.two_channels()
+        self.ctl.tune(5255 * self.M, 'relock')
+        self.assertEqual(self.kinds(), [rf.RF_TUNE])
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count + 1)
+        with self.assertRaisesRegex(ValueError, 'keep or relock'):
+            self.ctl.tune(5255 * self.M, 'either')
+
+    def test_a_lock_that_did_not_follow_is_locked_again(self):
+        """Judged by the tuning voltage. The band is not left on a loop that may not hold: it is
+        locked again at the target, counted and said; asked to keep the phase, that is an error."""
+        count = self.two_channels()
+        self.dev.hold_vtune[1] = 30
+        self.ctl.tune(5260 * self.M)
+        self.assertEqual(self.kinds(), [rf.RF_HOLD, rf.RF_TUNE])
+        state = self.ctl.state()
+        self.assertEqual((state['rf']['lo_hz'], state['rf']['relocks']), (self.lo(5260), count + 1))
+        self.assertTrue(any('tuning voltage reads 30' in line for line in self.logs()), self.logs())
+        with self.assertRaisesRegex(ControlError, 'locked again there'):
+            self.ctl.tune(5265 * self.M, 'keep')
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count + 2)
+        self.assertEqual(self.ctl.state()['rf']['lo_hz'], self.lo(5265))
+
+    def test_a_band_with_no_lock_has_none_to_keep(self):
+        count = self.two_channels()
+        self.dev.unlocking[1] = 2
+        with self.assertRaises(rf.SynthUnlocked):
+            self.ctl.tune(5400 * self.M)
+        self.dev.rf_ops.clear()
+        del self.dev.unlocking[1]
+        with self.assertRaisesRegex(ControlError, 'no lock to keep'):
+            self.ctl.tune(5405 * self.M, 'keep')
+        self.ctl.tune(5405 * self.M)
+        self.assertEqual(self.kinds(), [rf.RF_TUNE])
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count + 2)
+
+    def test_the_count_of_locks_is_each_bands_and_outlives_the_session(self):
+        """Loading locks every band (and searches each one's range); another session reads on."""
+        self.loaded(1)
+        counts = dict(self.ctl.relocks)
+        self.assertTrue(all(counts[b] > 0 for b in counts), counts)
+        self.ctl.tune(5300 * self.M)
+        self.ctl.close()
+        self.ctl = Controller(self.config, emit=self.events.append, unit=self.unit)
+        self.ctl.attach()
+        self.assertEqual(self.ctl.relocks, {**counts, 1: counts[1] + 1})
+
+    def test_a_configure_that_moves_the_lo_keeps_the_lock_too(self):
+        count = self.two_channels()
+        self.ctl.configure(1, lo_hz=5258 * self.M)
+        self.assertEqual(self.kinds(), [rf.RF_HOLD])
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count)
+
+    def test_rephase_starts_one_chain_again_and_is_counted_with_the_locks(self):
+        """What a new lock does to every chain's phase, done to one: whoever measured a phase
+        between the channels sees by the count that it may have turned."""
+        count = self.two_channels()
+        self.ctl.rephase()
+        handle(self.ctl, {'op': 'rephase', 'chain': 0})
+        self.assertEqual(self.dev.rephases, [(1, 1), (1, 0)])
+        self.assertEqual(self.ctl.state()['rf']['relocks'], count + 2)
+        self.assertEqual(self.kinds(), [], 'no retune')
+        self.assertTrue(self.dev.streaming)
+        for chain in (4, -1, True):
+            with self.assertRaises(ValueError):
+                self.ctl.rephase(chain)
+        self.assertEqual(len(self.dev.rephases), 2)
+
+    def test_rephase_needs_a_loaded_radio(self):
+        with self.assertRaisesRegex(ControlError, 'not loaded'):
+            self.ctl.rephase()
+
+    def test_serve_takes_the_phase_of_a_tune(self):
+        self.loaded(1)
+        handle(self.ctl, {'op': 'tune', 'hz': 5260 * self.M, 'phase': 'keep'})
+        handle(self.ctl, {'op': 'tune', 'hz': 5270 * self.M})
+        self.assertEqual(self.kinds(), [rf.RF_HOLD, rf.RF_TUNE])
 
 
 class BandSwitch(ControllerTest):

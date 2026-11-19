@@ -169,7 +169,7 @@ private:
 // The controller's STATE, as far as a device needs it.
 struct Radio {
     bool loaded = false, running = false, agc = true, follows = true;
-    int band = 0, lna = -1, lpf = -1;
+    int band = 0, lna = -1, lpf = -1, channels = 1;   // channels: the running stream's, 1 or 2
     double lo_hz = 0, rate = 0, capture = 0, filter_mhz = 0, link_mbps = 0;
     std::string packing, error;
     int locked[kBands] = {-1, -1, -1};  // -1: not read
@@ -189,6 +189,7 @@ Radio radio_from(const JsonValue &state)
     r.rate = radio->number_or("sample_rate", 0);
     r.capture = radio->number_or("capture_rate", r.rate);
     r.running = stream->boolean_or("running", false);
+    r.channels = stream->number_or("channels", 1) == 2 ? 2 : 1;
     r.packing = stream->string_or("packing");
     r.link_mbps = stream->number_or("link_mbps", 0);
     r.agc = rf->boolean_or("agc", true);
@@ -212,7 +213,10 @@ public:
     std::string getHardwareKey() const override { return "W1700K"; }
     SoapySDR::Kwargs getHardwareInfo() const override;
 
-    size_t getNumChannels(const int direction) const override { return direction == SOAPY_SDR_RX ? 1 : 0; }
+    // Two receive channels: chains 0 and 1 of the band in use, sampled at the same instants. They
+    // are one radio: frequency, sample rate, bandwidth and gain are common to both, and setting
+    // one channel's sets the other's.
+    size_t getNumChannels(const int direction) const override { return direction == SOAPY_SDR_RX ? 2 : 0; }
     bool getFullDuplex(const int, const size_t) const override { return false; }
 
     std::vector<std::string> getStreamFormats(const int, const size_t) const override
@@ -303,6 +307,7 @@ private:
         explicit Rx(Ring &ring) : reader(ring) {}
         Reader reader;
         bool cf32 = false, active = false;
+        unsigned channels = 1;   // 2: channels 0 and 1 together
     };
 
     // The receiver as the controller last reported it (what has arrived is taken in first).
@@ -415,6 +420,7 @@ void W1700K::sync() const
     rate_ = radio_.rate;
     // The service corrects the stream's roll-off by what it is told of the radio.
     if (radio_.loaded) ring_.set_radio(radio_.rate, radio_.capture, radio_.filter_mhz * 1e6);
+    if (radio_.running) ring_.set_channels(unsigned(radio_.channels));
 }
 
 Radio W1700K::radio() const
@@ -452,7 +458,7 @@ void W1700K::need_loaded()
 
 void W1700K::check_channel(const int direction, const size_t channel) const
 {
-    if (direction != SOAPY_SDR_RX || channel != 0) throw std::runtime_error("w1700k: one receive channel, 0");
+    if (direction != SOAPY_SDR_RX || channel > 1) throw std::runtime_error("w1700k: receive channels 0 and 1");
 }
 
 SoapySDR::Kwargs W1700K::getHardwareInfo() const
@@ -470,12 +476,17 @@ SoapySDR::Stream *W1700K::setupStream(const int direction, const std::string &fo
                                       const std::vector<size_t> &channels, const SoapySDR::Kwargs &)
 {
     if (direction != SOAPY_SDR_RX) throw std::runtime_error("w1700k: receive only");
-    if (channels.size() > 1 || (channels.size() == 1 && channels[0] != 0))
-        throw std::runtime_error("w1700k: one receive channel, 0");
+    // Channel 0 alone, or 0 and 1 together: channel 1 is the second of a pair, and the unit
+    // streams it only beside channel 0.
+    const bool two = channels.size() == 2 && channels[0] == 0 && channels[1] == 1;
+    if (!two && (channels.size() > 1 || (channels.size() == 1 && channels[0] != 0)))
+        throw std::runtime_error("w1700k: a stream of channel 0, or of channels 0 and 1 in that order");
     if (format != SOAPY_SDR_CS16 && format != SOAPY_SDR_CF32)
         throw std::runtime_error("w1700k: stream format " + format + ": CS16 or CF32");
     auto rx = std::make_unique<Rx>(ring_);
     rx->cf32 = format == SOAPY_SDR_CF32;
+    rx->channels = two ? 2 : 1;
+    rx->reader.set_channels(rx->channels);
     return reinterpret_cast<SoapySDR::Stream *>(rx.release());
 }
 
@@ -494,8 +505,12 @@ int W1700K::activateStream(SoapySDR::Stream *stream, const int flags, const long
     if (control_) {
         need_loaded();
         if (!radio_.running) {
-            command("start", "", 120);
+            command("start", rx->channels == 2 ? ",\"channels\":2" : "", 120);
             started_here_ = true;
+        } else if (rx->channels == 2 && radio_.channels != 2) {
+            // Not stopped for it: the stream running has readers of its own.
+            throw std::runtime_error("w1700k: the stream that is running has one channel; stop it, and a stream of "
+                                     "channels 0 and 1 starts one of two");
         }
     }
     rx->reader.start(rate_);
@@ -516,7 +531,7 @@ int W1700K::deactivateStream(SoapySDR::Stream *stream, const int flags, const lo
                    "w1700k: read %llu samples with %llu gaps, %llu of them because the reader was too slow; "
                    "at most %.0f ms behind the stream",
                    (unsigned long long)t.samples, (unsigned long long)t.gaps, (unsigned long long)t.lapped,
-                   rate_ > 0 ? double(t.behind) * W1700K_STREAM_SLICE * 1e3 / rate_ : 0.0);
+                   rate_ > 0 ? double(t.behind) * w1700k_stream_slice_samples(radio_.channels) * 1e3 / rate_ : 0.0);
     // The unit's stream stops with its last reader here, if it was started here: one that was
     // already running has other consumers on this host.
     if (--active_ == 0 && started_here_ && control_) {
@@ -548,8 +563,9 @@ int W1700K::readStream(SoapySDR::Stream *stream, void *const *buffers, const siz
             mutex_.unlock();
         }
     }
-    const long n = rx->reader.read(rx->cf32 ? nullptr : static_cast<int16_t *>(buffers[0]),
-                                   rx->cf32 ? static_cast<float *>(buffers[0]) : nullptr, count, timeout_us,
+    // One buffer a channel, each of `count` samples; the same sample index is the same instant.
+    const long n = rx->reader.read(rx->cf32 ? nullptr : reinterpret_cast<int16_t *const *>(buffers),
+                                   rx->cf32 ? reinterpret_cast<float *const *>(buffers) : nullptr, count, timeout_us,
                                    rate_.load(std::memory_order_relaxed), time_ns);
     if (n == Reader::kTimeout) return SOAPY_SDR_TIMEOUT;
     flags = SOAPY_SDR_HAS_TIME;

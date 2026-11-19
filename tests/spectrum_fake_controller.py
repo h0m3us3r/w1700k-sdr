@@ -37,7 +37,7 @@ def packing_for(rate):
 
 
 class Controller:
-    def __init__(self, log_path, tuning_path, progress_delay, unloaded=False, running=False, packing=None):
+    def __init__(self, log_path, tuning_path, progress_delay, unloaded=False, running=False, packing=None, channels=1):
         self.log = open(log_path, "a", buffering=1)
         self.tuning_path = tuning_path
         self.delay = progress_delay
@@ -48,7 +48,7 @@ class Controller:
             "radio": {"loaded": True, "band": 1, "rf_band": "5g", "lo_hz": self.lo[1], "sample_rate": 40000000,
                       "capture_rate": 40000000,
                       "bands_ready": [0, 1, 2]},
-            "stream": {"running": False, "packing": None, "sample_rate": 40000000, "center_hz": self.lo[1]},
+            "stream": {"running": False, "packing": None, "sample_rate": 40000000, "center_hz": self.lo[1], "channels": 1},
             "rf": {"lo_hz": self.lo[1], "agc": True, "lna": None, "lpf": None, "filter_mhz": 20,
                    "lo_range_hz": LO_RANGE[1]},
             "error": None,
@@ -56,7 +56,7 @@ class Controller:
         if unloaded:
             self.state["radio"]["loaded"] = False
         if running:
-            self.state["stream"].update(running=True, packing=packing_for(40000000))
+            self.state["stream"].update(running=True, packing=packing_for(channels * 40000000), channels=channels)
 
     def emit(self, message):
         sys.stdout.write(json.dumps(message) + "\n")
@@ -67,7 +67,7 @@ class Controller:
             stream = self.state["stream"]
             temporary = self.tuning_path + ".new"
             with open(temporary, "w") as f:
-                json.dump({k: stream[k] for k in ("center_hz", "sample_rate", "running", "packing")}, f)
+                json.dump({k: stream[k] for k in ("center_hz", "sample_rate", "running", "packing", "channels")}, f)
             os.replace(temporary, self.tuning_path)
         self.emit({"event": "state", "state": copy.deepcopy(self.state)})
 
@@ -87,13 +87,18 @@ class Controller:
         return {}
 
     def op_start(self, request):
+        channels = request.get("channels", 1)
+        if channels not in (1, 2):
+            raise ValueError("channels: 1 or 2")
         self.state["stream"]["running"] = True
-        self.state["stream"]["packing"] = packing_for(self.state["stream"]["sample_rate"])
+        self.state["stream"]["channels"] = channels
+        self.state["stream"]["packing"] = packing_for(channels * self.state["stream"]["sample_rate"])
         self.publish()
         return {}
 
     def op_stop(self, request):
         self.state["stream"]["running"] = False
+        self.state["stream"]["channels"] = 1
         self.publish()
         return {}
 
@@ -182,9 +187,11 @@ def main():
     parser.add_argument("--progress-delay", type=float, default=0.2, help="seconds between configure steps")
     parser.add_argument("--unloaded", action="store_true", help="the radio is not loaded until a load")
     parser.add_argument("--running", action="store_true", help="the stream is already running")
+    parser.add_argument("--channels", type=int, default=1, help="with --running: that stream's channels")
     parser.add_argument("--packing", help="a packing set by hand, as `w1700k serve` takes it: noted in the log's first line")
     args = parser.parse_args()
-    controller = Controller(args.log, args.tuning_file, args.progress_delay, args.unloaded, args.running, args.packing)
+    controller = Controller(args.log, args.tuning_file, args.progress_delay, args.unloaded, args.running, args.packing,
+                            args.channels)
     controller.publish()
     controller.serve()
 

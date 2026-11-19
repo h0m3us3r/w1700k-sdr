@@ -22,7 +22,7 @@
  *   CAPTURE band bw                the band's capture path as MediaTek's capture prime leaves it
  *                                  (after its channel set; bw 0..4 as CHANSET)
  *   SELECT band                    ICAP listens to the band (no stream on another band running)
- *   STREAM packing                 a stream with a packing schedule (RADIO_PACKING_*): the WA
+ *   STREAM packing [paths]         a stream with a packing schedule (RADIO_PACKING_*): the WA
  *                                  started if it packs, the route and ICAP0 armed, then the
  *                                  producer until the host's stop word; ACK when it has ended
  *                                  (RES = the producer's status, the result page as before), the
@@ -30,7 +30,14 @@
  *                                  no producer status) unless the radio is up and the band
  *                                  ICAP listens to has its capture path set up: a stream of
  *                                  nothing never ends by itself, and a WA started before the
- *                                  radio is configured leaves it deaf for good
+ *                                  radio is configured leaves it deaf for good. paths 2
+ *                                  (RADIO_STREAM_PATHS_TWO; 0 or 1 is one path, as before):
+ *                                  both of the band's capture paths, two sample times of each
+ *                                  to a beat (iq_format.h "no packer"), so the stream is two
+ *                                  coherent channels at the band's rate and costs what one
+ *                                  costs at twice that rate. EXPERIMENTAL: the chunks do not
+ *                                  say which they hold. Refused at the 320 MHz class, whose
+ *                                  capture is another datapath
  *   STEP step arg                  one bring-up step alone, for development (RADIO_STEP_*)
  */
 #ifndef RADIO_RADIO_CMD_H
@@ -62,6 +69,13 @@
 #define RADIO_STREAM_BAD_PACKING 0x200u		/* refused: not a packing schedule */
 #define RADIO_STREAM_NOT_READY	0x300u		/* refused: the radio is not up, or no band is selected
 						 * whose capture path is set up */
+#define RADIO_STREAM_BAD_PATHS	0x400u		/* refused: not 0, 1 or 2 paths, or two at the 320 MHz class */
+/* STREAM's second argument: how many of the band's capture paths a beat carries. */
+#define RADIO_STREAM_PATHS_ONE	1u	/* path 0, four sample times to a beat (0 means this too) */
+#define RADIO_STREAM_PATHS_TWO	2u	/* paths 0 and 1, two sample times of each to a beat */
+/* The bandwidth class of SETUP, RATE and CAPTURE (0..4: 20, 40, 80, 160, 320 MHz) from which the
+ * capture is the wide datapath. */
+#define RADIO_BW_CLASS_320	4u
 
 #define RADIO_CHAN_BW		0x000000ffu	/* SETUP arg 3 fields */
 #define RADIO_CHAN_FLAGS	0x0000ff00u

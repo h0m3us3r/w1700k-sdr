@@ -53,6 +53,8 @@
       <div class="row check"><label title="The filter is as wide as the sample rate, on every band. It is what keeps signals 320 MHz away from folding onto the band: the wider it is than the rate needs, the stronger those ghosts (about 19 dB down at 320 MHz, 32 at 160, 45 at 80). Choosing a width by hand unticks this"><input id="filter-follow" type="checkbox"> Follow the sample rate</label></div>
       <div class="row check"><label title="Divides the decimation's roll-off out of the IQ stream itself (w1700k-stream), for every consumer; it applies where the filter is as wide as the sample rate, and not at 640/2, which is flat already"><input id="flatten" type="checkbox"> Flatten the passband</label></div>
       <p class="note" id="flatten-note"></p>
+      <div class="row check"><label title="Chains 0 and 1 of the band, sampled at the same instants, each at the sample rate (up to 160 Msps). It applies from the next start; both chains then get one fixed gain."><input id="two-channels" type="checkbox"> Two channels</label></div>
+      <p class="note" id="channels-note"></p>
       <div class="row check"><label><input id="agc" type="checkbox"> Automatic gain control</label></div>
       <div class="row slider"><label for="lna" title="Low-noise amplifier, about 6 dB a step">LNA</label><input id="lna" type="range" min="0" max="4" step="1" value="2"><output for="lna" class="wide"></output></div>
       <div class="row slider"><label for="lpf" title="Baseband amplifier, about 2 dB a step">Baseband</label><input id="lpf" type="range" min="0" max="9" step="1" value="5"><output for="lpf" class="wide"></output></div>
@@ -68,6 +70,10 @@
       <div class="row"><span class="label">Detector</span>
         <div class="segmented" id="fft-detector"><button type="button" data-v="average">Average</button><button type="button" data-v="peak">Peak</button></div></div>
       <div class="row check"><label><input id="fft-dc" type="checkbox"> Remove DC</label></div>
+      <div class="row" id="fft-channel-row" hidden><span class="label" title="Of a two-channel stream: the channel the spectrum and the waterfall are of">Channel</span>
+        <div class="segmented" id="fft-channel"><button type="button" data-v="0">0</button><button type="button" data-v="1">1</button><button type="button" data-v="2" title="Both channels at once, from the same samples">Both</button></div></div>
+      <div class="row" id="both-layout-row" hidden><span class="label" title="Overlaid: both traces on one graph, and the waterfall's upper half channel 0, its lower half channel 1. Side by side: each channel's spectrum and waterfall in its own half, over the same frequencies.">Layout</span>
+        <div class="segmented" id="both-layout"><button type="button" data-v="overlaid">Overlaid</button><button type="button" data-v="side">Side by side</button></div></div>
       <p class="note" id="fft-note"></p>
       <div class="row buttons"><button id="fft-defaults" type="button" class="small" title="The server's own FFT settings; this browser stops asking for others">Reset to defaults</button></div>
     </details>

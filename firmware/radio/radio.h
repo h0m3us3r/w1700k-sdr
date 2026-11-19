@@ -60,6 +60,8 @@ extern struct radio_cal radio_cal;
  * RATE); set once SETUP has run. */
 struct radio_band {
 	uint64_t lo_hz;
+	uint64_t lock_hz;	/* the LO its synthesizer last locked at (a TUNE's); 0: never. A HOLD moves
+				 * lo_hz away from it and leaves it */
 	uint32_t bw, set;
 };
 extern struct radio_band radio_band[RADIO_BANDS];

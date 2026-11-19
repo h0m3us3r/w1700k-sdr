@@ -173,6 +173,45 @@ class Commands(unittest.TestCase):
             rf.tune(self.session, 2, 6_105_000_000)
         self.assertEqual(rf.synth_locks(self.session), [True, True, False])
 
+    def test_hold_waits_for_the_loop_and_judges_it(self):
+        """A HOLD returns the LO once the status flag has cleared (LOCKS, read until it has) and the
+        tuning voltage is in its window; refused, nothing moved; a loop that never settles, or
+        settles at the edge of its range, is lost."""
+        m, naps = 1_000_000, []
+        with self.assertRaisesRegex(rf.HoldRefused, 'not reached from its lock'):
+            rf.hold(self.session, 1, 5260 * m)                        # never locked
+        rf.tune(self.session, 1, 5250 * m)
+        self.dev.rf_ops.clear()
+        self.assertEqual(rf.hold(self.session, 1, 5258 * m, sleep=naps.append), radio.actual_lo(1, 5258 * m))
+        self.assertEqual(([op[0] for op in self.dev.rf_ops], naps), ([rf.RF_HOLD, rf.RF_LOCKS], []))
+        self.dev.hold_reads[1] = 3                                    # a large move: the flag takes a while
+        self.assertEqual(rf.hold(self.session, 1, 5266 * m, sleep=naps.append), radio.actual_lo(1, 5266 * m))
+        self.assertEqual(naps, [rf.HOLD_POLL] * 3)
+        with self.assertRaises(rf.HoldRefused):
+            rf.hold(self.session, 1, 5267 * m)
+        self.assertEqual(self.dev.lo[1], radio.actual_lo(1, 5266 * m), 'a refusal moves nothing')
+        self.dev.hold_reads[1] = 10 ** 6
+        with self.assertRaisesRegex(rf.HoldLost, 'still reads too high after 250 ms'):
+            rf.hold(self.session, 1, 5250 * m, sleep=naps.append)
+        self.assertEqual(len(naps), 3 + round(rf.HOLD_SETTLE / rf.HOLD_POLL))
+        self.dev.hold_reads[1], self.dev.hold_vtune[1] = 0, 29
+        with self.assertRaisesRegex(rf.HoldLost, 'tuning voltage reads 29, held within 3..28'):
+            rf.hold(self.session, 1, 5250 * m)
+        with self.assertRaises(ValueError):
+            rf.hold(self.session, 0, 5250 * m)
+
+    def test_rephase(self):
+        rf.rephase(self.session, 1, 1)
+        rf.rephase(self.session, 2, 4)
+        self.assertEqual(self.dev.rephases, [(1, 1), (2, 4)])
+        for band, chain in ((0, 4), (1, -1), (3, 0)):
+            with self.assertRaises(ValueError):
+                rf.rephase(self.session, band, chain)
+        self.assertEqual(len(self.dev.rephases), 2)
+
+    def test_synth_health(self):
+        self.assertEqual(rf.synth_health(self.session), [(0, 15)] * 3)
+
     def test_gain_filter_trim(self):
         self.assertEqual(rf.set_gain(self.session, 0, 2, 9), [0x929203] * 4)
         self.assertEqual(rf.set_gain(self.session, 0), [0] * 4)
@@ -208,8 +247,8 @@ class Commands(unittest.TestCase):
             rf.select_band(self.session, 3)
 
     def test_refused_by_the_firmware(self):
-        with self.assertRaisesRegex(rf.CtlError, '^RF command 9 band 0: RF command or argument refused$'):
-            rf.rf_command(self.session, 9)
+        with self.assertRaisesRegex(rf.CtlError, '^RF command 99 band 0: RF command or argument refused$'):
+            rf.rf_command(self.session, 99)
 
     def test_needs_our_wm(self):
         with self.assertRaisesRegex(rf.CtlError, 'need our own WM'):

@@ -70,13 +70,16 @@ void state(SoapySDR::Device *d)
                 sensors.c_str(), settings.c_str());
 }
 
-void read(SoapySDR::Device *d, const std::string &format, long long want, const std::string &path)
+// `channels` 2: channels 0 and 1 together, channel 1's samples to FILE.1.
+void read(SoapySDR::Device *d, const std::string &format, long long want, const std::string &path, unsigned channels = 1)
 {
     const size_t element = format == SOAPY_SDR_CF32 ? 8 : 4;
-    SoapySDR::Stream *stream = d->setupStream(SOAPY_SDR_RX, format, {0});
+    SoapySDR::Stream *stream = d->setupStream(SOAPY_SDR_RX, format, channels == 2 ? std::vector<size_t>{0, 1}
+                                                                                   : std::vector<size_t>{0});
     const size_t mtu = d->getStreamMTU(stream);
-    std::vector<char> buffer(mtu * element);
+    std::vector<char> buffer(mtu * element), buffer1(mtu * element);
     FILE *out = path == "-" ? nullptr : std::fopen(path.c_str(), "wb");
+    FILE *out1 = path == "-" || channels != 2 ? nullptr : std::fopen((path + ".1").c_str(), "wb");
     const int activated = d->activateStream(stream);
     const double rate = d->getSampleRate(SOAPY_SDR_RX, 0);
     std::printf("{\"reading\":%s,\"mtu\":%zu}\n", activated == 0 ? "true" : "false", mtu);
@@ -89,7 +92,7 @@ void read(SoapySDR::Device *d, const std::string &format, long long want, const 
     const auto begun = std::chrono::steady_clock::now();
     auto last_data = begun;
     while (samples < want) {
-        void *buffers[1] = {buffer.data()};
+        void *buffers[2] = {buffer.data(), buffer1.data()};
         int flags = 0;
         long long time_ns = 0;
         const size_t ask = size_t(std::min<long long>(want - samples, (long long)mtu));
@@ -117,12 +120,14 @@ void read(SoapySDR::Device *d, const std::string &format, long long want, const 
         last = time_ns;
         expected = time_ns + std::llround(double(n) * 1e9 / rate);
         if (out) std::fwrite(buffer.data(), element, size_t(n), out);
+        if (out1) std::fwrite(buffer1.data(), element, size_t(n), out1);
         samples += n;
     }
     const double seconds = std::chrono::duration<double>(last_data - begun).count();
     d->deactivateStream(stream);
     d->closeStream(stream);
     if (out) std::fclose(out);
+    if (out1) std::fclose(out1);
     std::printf("{\"samples\":%lld,\"overflows\":%lld,\"lost_samples\":%.0f,\"time_errors\":%lld,\"errors\":%lld,"
                 "\"first_ns\":%lld,\"last_ns\":%lld,\"span_ns\":%lld,\"rate\":%.0f,\"seconds\":%.3f}\n",
                 samples, overflows, double(lost_ns) * rate / 1e9, time_errors, other, first, last,
@@ -153,6 +158,9 @@ int main(int argc, char **argv)
             } else if (key.rfind("read:", 0) == 0) {
                 const size_t a = op.find(':', 5), b = op.find(':', a + 1);
                 read(d, op.substr(5, a - 5), std::atoll(op.substr(a + 1, b - a - 1).c_str()), op.substr(b + 1));
+            } else if (key.rfind("read2:", 0) == 0) {   // the same of channels 0 and 1 together: FILE and FILE.1
+                const size_t a = op.find(':', 6), b = op.find(':', a + 1);
+                read(d, op.substr(6, a - 6), std::atoll(op.substr(a + 1, b - a - 1).c_str()), op.substr(b + 1), 2);
             } else {
                 if (key == "antenna") d->setAntenna(rx, 0, value);
                 else if (key == "freq") d->setFrequency(rx, 0, std::atof(value.c_str()));

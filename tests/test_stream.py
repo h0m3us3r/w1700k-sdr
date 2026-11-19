@@ -378,6 +378,122 @@ class StreamServiceTest(Service):
         self.assertEqual(self.shm.samples(0), unpacked(noise_words(300)), "the new run counts from its first slice")
 
 
+def two_channels(words):
+    """A two-channel slice's words as (channel 0's samples, channel 1's): a beat is four words,
+    words 0 and 1 channel 0 at two sample times, words 2 and 3 channel 1 at the same two."""
+    pairs = unpacked(words)
+    return ([p for b in range(0, SLICE, 4) for p in pairs[b:b + 2]], [p for b in range(0, SLICE, 4) for p in pairs[b + 2:b + 4]])
+
+
+def two_channel_tone_words(cycles0, cycles1, amplitude):
+    """Channel 0 a tone of `cycles0` per slot (1024 sample times), channel 1 one of `cycles1`."""
+    per = SLICE // 2
+    tone = lambda cycles, t: word(round(amplitude * math.cos(2 * math.pi * cycles * t / per)),
+                                  round(amplitude * math.sin(2 * math.pi * cycles * t / per)))
+    out = []
+    for t in range(0, per, 2):
+        out += [tone(cycles0, t), tone(cycles0, t + 1), tone(cycles1, t), tone(cycles1, t + 1)]
+    return out
+
+
+@unittest.skipIf(build_problem(), build_problem())
+class TwoChannels(Service):
+    """A stream of two channels (the radio's two capture paths, announced in radio_channels before
+    it starts): each slot is laid out by channel, its one tag covering both."""
+
+    def test_a_slot_is_channel_0_then_channel_1_and_an_event_or_a_loss_is_both_channels(self):
+        self.shm.set("radio_channels", 2)
+        time.sleep(0.3)
+        words = {s: noise_words(s) for s in range(1200)}
+        for s in range(1200):
+            if s == 20:
+                self.send(s, b"\x00" * 64)             # a firmware event
+            elif s == 30:
+                continue                               # lost
+            elif s == 10:
+                self.send_words(s, pack(words[s]))     # packed: the packing does not know of channels
+            else:
+                self.send_words(s, words[s])
+        run = self.wait_newest(1200)   # a loss is settled once a thousand newer are in
+        self.assertEqual(self.shm.layout(), (run, 1200, 2))
+        self.assertEqual(self.shm.tag(20), tag(run, 20) | TAG_EVENT)
+        self.assertEqual(self.shm.tag(30), tag(run, 30) | TAG_LOST)
+        for s in (0, 9, 10, 11, 31, 1199):
+            want0, want1 = two_channels(words[s])
+            self.assertEqual(self.shm.tag(s), tag(run, s), "slot %d" % s)
+            self.assertEqual(self.shm.channel(s, 0), want0, "slot %d, channel 0" % s)
+            self.assertEqual(self.shm.channel(s, 1), want1, "slot %d, channel 1" % s)
+        self.assertEqual((self.shm.get("slices"), self.shm.get("events"), self.shm.get("lost")), (1198, 1, 1))
+
+    def test_no_run_is_of_both_a_change_of_the_channels_begins_a_new_run(self):
+        words = noise_words(3)
+        for s in range(40):
+            self.send_words(s, words)
+        run = self.wait_newest(40)
+        self.assertEqual(self.shm.layout(), (run, 40, 1))
+        self.assertEqual(self.shm.samples(5), unpacked(words), "one channel: as it always was")
+        self.shm.set("radio_channels", 2)
+        time.sleep(0.3)
+        for s in range(40, 80):
+            self.send_words(s, noise_words(s))
+        deadline = time.monotonic() + 10
+        while self.shm.position()[0] == run:
+            self.assertLess(time.monotonic(), deadline, "no new run")
+            time.sleep(0.02)
+        self.wait_newest(40)
+        self.assertEqual(self.shm.layout(), (run + 1, 40, 2))
+        self.assertEqual(self.shm.channel(0, 1), two_channels(noise_words(40))[1])
+        self.shm.set("radio_channels", 0)              # 0 and 1 both say one channel
+        time.sleep(0.3)
+        for s in range(80, 120):
+            self.send_words(s, noise_words(s))
+        deadline = time.monotonic() + 10
+        while self.shm.position()[0] == run + 1:
+            self.assertLess(time.monotonic(), deadline, "no new run")
+            time.sleep(0.02)
+        self.wait_newest(40)
+        self.assertEqual(self.shm.layout(), (run + 2, 40, 1))
+        self.assertEqual(self.shm.samples(0), unpacked(noise_words(80)))
+
+    def test_each_channel_is_corrected_as_a_stream_of_its_own(self):
+        """The roll-off's correction at a channel's sample rate, applied to each channel: a tone in
+        one channel comes out with that tone's gain and leaves nothing of itself in the other."""
+        for field, value in (("radio_sample_rate", 320000000), ("radio_capture_rate", 320000000),
+                             ("radio_filter_hz", 320000000), ("flatten", 1), ("radio_channels", 2)):
+            self.shm.set(field, value)
+        deadline = time.monotonic() + 5
+        while self.shm.get("flatten_active") != 1:
+            self.assertLess(time.monotonic(), deadline, "the correction never applied")
+            time.sleep(0.01)
+        time.sleep(0.3)
+        amplitude, per = 600, SLICE // 2
+        plan = [(128, 384), (-384, 461), (481, 128)]      # cycles per slot of 1024 sample times: channel 0, channel 1
+        seq = 0
+        for c0, c1 in plan:
+            w = two_channel_tone_words(c0, c1, amplitude)
+            for _ in range(48):
+                self.send_words(seq, w)
+                seq += 1
+        run = self.wait_newest(seq)
+        self.assertEqual(self.shm.layout(), (run, seq, 2))
+
+        def amplitude_of(samples, cycles):
+            acc = sum(complex(i, q) * cmath.exp(-2j * math.pi * cycles * n / per) for n, (i, q) in enumerate(samples))
+            return abs(acc) / per
+
+        for k, (c0, c1) in enumerate(plan):
+            s = 48 * k + 24
+            self.assertEqual(self.shm.tag(s), tag(run, s) | TAG_FLAT)
+            for channel, cycles, other in ((0, c0, c1), (1, c1, c0)):
+                samples = self.shm.channel(s, channel)
+                got = 20 * math.log10(amplitude_of(samples, cycles) / amplitude)
+                want = -rolloff_320(abs(cycles) / (per / 2))
+                self.assertAlmostEqual(got, want, delta=0.4, msg="channel %d, %d cycles: %.2f dB, want %.2f" % (channel, cycles, got, want))
+                self.assertLess(amplitude_of(samples, other), amplitude * 0.01, "nothing of the other channel's tone")
+        self.assertEqual(self.shm.get("saturated"), 0)
+        self.assertEqual(self.shm.get("flattened"), seq)
+
+
 @unittest.skipIf(build_problem(), build_problem())
 class IndexesNotBelieved(Service):
     """A slice's index is the sender's word. One that puts the stream somewhere it cannot be is not
