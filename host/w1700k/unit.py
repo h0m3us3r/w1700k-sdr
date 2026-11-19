@@ -171,6 +171,11 @@ class Unit:
         return subprocess.Popen(self._ssh(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, text=True, bufsize=1)
 
+    def popen_bytes(self, command):
+        """A long-lived unit command joined byte for byte: unbuffered binary stdin and stdout."""
+        return subprocess.Popen(self._ssh(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, bufsize=0)
+
     def close(self):
         """End the shared connection."""
         subprocess.run(['ssh', '-o', f'ControlPath={self._control}', '-O', 'exit', self.target], stdin=subprocess.DEVNULL,

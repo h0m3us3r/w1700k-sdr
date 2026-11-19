@@ -176,6 +176,41 @@ analog filter. Defaults, all set by every load:
 - Nothing transmits: our firmware runs no transmit calibration and keeps the MAC's transmit
   path disabled.
 
+## The low-power radio
+
+The W1700K carries a second radio, a Silicon Labs EFR32MG21 for Bluetooth LE
+and Zigbee/Thread, which the unit holds in reset unless its owner turns it on
+([`platform`](../../platform/README.md#the-low-power-radio)). `w1700k efr32`
+is that radio from the host. It involves no receiver state and starts no
+controller.
+
+| | |
+|---|---|
+| `efr32 status` | whether it runs (`efr32`), what start-up does (`start`), whether its port is there (`port`) |
+| `efr32 on [--keep]`, `efr32 off [--keep]` | let it run or hold it in reset, until the unit next starts; with `--keep`, at every start-up too |
+| `efr32 identify` | ask the radio what firmware it runs |
+| `efr32 pty [--baud N]` | its serial port as a terminal device on this host, until stopped |
+
+The port is there only at a boot where the radio is kept on, so the first time
+is `w1700k efr32 on --keep`, a restart of the unit, then `identify`:
+
+```
+$ w1700k efr32 identify
+{"firmware": "bgapi", "stack": "6.2.0", "build": 212, ...}
+```
+
+- **`identify`** sends the two commands of Silicon Labs' BGAPI that every
+  Bluetooth co-processor image answers and that make it do nothing else
+  (`system_hello`, `system_get_version`). The factory firmware is such an
+  image. Other firmware will not answer, and that is said.
+- **`pty`** prints a device path (`/dev/pts/N`) and stays: that device is the
+  radio's port, at 115200 baud (the factory firmware's) or 230400, 8N1 without
+  flow control, carried over ssh. Point a Bluetooth host stack, a flasher or a
+  terminal at it. The link adds a few milliseconds each way.
+- **What goes through the port is the user's doing.** A host that tells the
+  radio to advertise, scan or connect makes the unit transmit at 2.4 GHz, up to
+  10 dBm, beside its own 2.4 GHz antennas. Nothing here does that.
+
 ## `w1700k serve`
 
 One JSON object per line on stdin; one reply per request `{"id":N,"ok":true,"state":STATE}` or

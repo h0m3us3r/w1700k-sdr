@@ -28,11 +28,13 @@ import argparse
 import json
 from dataclasses import replace
 import re
+import signal
 import sys
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from pathlib import Path
 
 from . import config as config_mod
+from . import efr32
 from .config import REPO
 from .controller import PACKINGS, Controller, serve
 from .radio import RATE_CODE
@@ -81,6 +83,37 @@ def push(config, source, target):
           'in the configuration; the next `w1700k load` loads this driver.', file=sys.stderr)
 
 
+def radio_command(config, args):
+    """`w1700k efr32 ...`: the low-power radio. No receiver state is involved, so no controller."""
+    unit = Unit(config.unit)
+    try:
+        if args.radio == 'status':
+            result = efr32.status(unit)
+        elif args.radio in ('on', 'off'):
+            result = dict(efr32.switch(unit, args.radio == 'on', args.keep), port=efr32.status(unit).get('port'))
+        elif args.radio == 'identify':
+            link = efr32.open_link(unit)
+            try:
+                result = efr32.identify(link)
+            finally:
+                link.close()
+        else:
+            # Ended by an interrupt or by being told to end (a service's way), either way cleanly.
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGTERM, signal.default_int_handler)
+            efr32.pty(unit, args.baud, announce=lambda path: print(path, flush=True))
+            return 0
+    except KeyboardInterrupt:
+        return 0
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f'w1700k efr32 {args.radio}: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        unit.close()
+    print(json.dumps(result, indent=1))
+    return 0
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog='w1700k', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -116,6 +149,17 @@ def build_parser():
     p.add_argument('--from', dest='source', type=Path, default=REPO / 'kernel' / 'w1700k_sdr' / 'build')
     p.add_argument('--to', dest='target', default=DEV_DIR)
     sub.add_parser('fw', help="our WM's and WA's status blocks (development)")
+    p = sub.add_parser('efr32', help='the low-power radio (Bluetooth LE, Zigbee/Thread): its state, and its '
+                                     'serial port on this host')
+    radio = p.add_subparsers(dest='radio', required=True)
+    radio.add_parser('status', help='whether it runs, what start-up does, whether its port is there')
+    for name in ('on', 'off'):
+        q = radio.add_parser(name, help='let it run' if name == 'on' else 'hold it in reset')
+        q.add_argument('--keep', action='store_true', help='at every start-up from now on too')
+    radio.add_parser('identify', help='ask the radio what firmware it runs (it transmits nothing for this)')
+    q = radio.add_parser('pty', help="the radio's serial port as a terminal device here, until stopped; what a "
+                                     'host sends through it may make the unit transmit')
+    q.add_argument('--baud', type=int, default=efr32.BAUD, choices=efr32.BAUDS)
     return ap
 
 
@@ -128,6 +172,8 @@ def main(argv=None):
     if args.command == 'push':
         push(config, args.source, args.target)
         return 0
+    if args.command == 'efr32':
+        return radio_command(config, args)
     if args.command == 'serve':
         if args.packing:
             config = replace(config, export=replace(config.export, packing=args.packing))

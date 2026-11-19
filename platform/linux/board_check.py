@@ -51,6 +51,10 @@ def board(dtb):
     for label in DISABLED:
         require(fdt.string(node(label).get('status', b'okay\0')) == 'disabled',
                 f'DTB: {label} is not disabled')
+    # The low-power radio's port: disabled as built (above), and with its pins named, so that the
+    # loader has only its status to change (platform/loader: efr32_give).
+    require('pinctrl-0' in node('uart2') and fdt.string(symbols['uart2']) == '/soc/serial@1fbf0300',
+            'DTB: uart2 has no pins, or is not where the loader enables it')
     require(fdt.string(node('gsw_port1')['label']) == 'lan3' and
             fdt.string(node('gsw_port2')['label']) == 'lan4', 'DTB: wrong switch ports')
     for mac, pcs, phy, address, reset in TEN_GIGABIT:

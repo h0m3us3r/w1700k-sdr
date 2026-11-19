@@ -39,6 +39,13 @@
 &en7581_pinctrl {
 	gpio-ranges = <&en7581_pinctrl 0 13 50>;
 
+	uart2_pins: uart2-pins {
+		mux {
+			function = "uart";
+			groups = "uart2";
+		};
+	};
+
 	mdio_pins: mdio-pins {
 		mux {
 			function = "mdio";
@@ -146,6 +153,22 @@
 /* The ATF, NPU firmware and QDMA reservations of the SoC include stay; the
  * Wi-Fi-only NPU pools are left out. Auxiliary UARTs stay disabled.
  */
+
+/* The W1700K's low-power radio (an EFR32MG21) is on UART2. As built the port is disabled, so
+ * that its pads stay plain GPIO and no program can open it; the loader enables it in the tree
+ * it hands over, on a W1700K whose owner keeps the radio on (`efr32_give` in its environment).
+ */
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2_pins>;
+};
+
+/* So that the radio's port is /dev/ttyS1 wherever it is there, whatever else is enabled. */
+/ {
+	aliases {
+		serial1 = &uart2;
+	};
+};
 &snfi {
 	status = "okay";
 };

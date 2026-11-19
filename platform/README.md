@@ -346,12 +346,25 @@ Nothing of ours uses it either, and it is held in reset.
   line: it makes it an input again and the chip's pull-up ends the reset. A
   unit whose loader is older than this holds nothing (`start=unheld`): its
   radio runs from power-on until `off` is said.
-- **Its port** is the SoC's second UART (`serial@1fbf0300`, pin group `uart2`),
-  disabled in our device tree: no program can talk to it, and nothing here
-  changes its firmware.
+- **Its port** is the SoC's second UART (`serial@1fbf0300`, pin group `uart2`,
+  `/dev/ttyS1`). It is disabled in the device tree as built, so by default its
+  pads stay plain GPIO and no program can talk to the radio. The loader
+  enables it in the tree it hands over (`efr32_give`, in `system_start`) at a
+  boot where the owner's switch says on, and at no other: talking to the radio
+  takes `w1700k-efr32 on --keep` and a restart. `status` says `port=on` then.
+- **`w1700k-efr32 link`** is that port on standard input and output, byte for
+  byte (`w1700k-efr32-link`), for a host to run over ssh; the host's
+  `w1700k efr32 identify` and `w1700k efr32 pty` are built on it
+  ([`host/w1700k`](../host/w1700k/README.md#the-low-power-radio)). The port is
+  8N1 without flow control at 115200 baud, the factory firmware's speed, or
+  230400. On this port the kernel's driver gives half the speed it is asked
+  for (it takes every port's divider to be fed 20 MHz; this one's is fed 10),
+  so the link tool asks for twice the speed wanted, and 230400 is as far as
+  the port goes. Nothing on the unit speaks the radio's protocol, and nothing
+  here changes its firmware.
 
-Seen on a unit (hardware 2.1), with the port enabled in a build made for the
-purpose and booted from RAM: the chip runs a Silicon Labs Bluetooth
+Seen on a unit (hardware 2.1), first with the port enabled in a build made for
+the purpose and booted from RAM: the chip runs a Silicon Labs Bluetooth
 co-processor (BGAPI, stack 6.2.0 build 212) at 115200 baud, which the kernel's
 driver gives on this port when asked for 230400; it says nothing until spoken
 to, answers `system_hello`, and announces itself after every reset, which is

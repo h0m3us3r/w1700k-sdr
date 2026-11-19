@@ -35,7 +35,7 @@ saveenv() {
     for name in update_tried update_failed loader_tried loader_failed loader_booted; do
         eval "[ -z \"\${$name+x}\" ]" || eval "echo \"$name=\$$name\""
     done > "$M/saved"
-    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on gps_v serial_number efr32_v efr32_keep; do
+    for name in update_new update_old update_file update_want update_got loader_new loader_kind key_line key_on gps_v serial_number efr32_v efr32_keep efr32_port; do
         eval "[ -z \"\${$name+x}\" ]" || { echo "saved a scratch variable: $name" >> "$M/log"; }
     done
 }
@@ -151,9 +151,15 @@ fdt() {
     case $1 in
     addr) [ "$(head -c 4 "$M/ram/$2")" = FIT: ] && fdt_at=$2 ;;
     set)
-        # Only the system's tree takes a property, and only once it is where it will be handed over.
-        [ "$stage" = fdt ] && [ "$2" = /chosen ] && [ $# = 4 ] || { echo "fdt $*: not modelled" >&2; return 1; }
-        printf '%s=%s\n' "$3" "$4" >> "$M/chosen" ;;
+        # Only the system's tree takes a property, and only once it is where it will be handed over:
+        # in /chosen, and the status of the low-power radio's port.
+        [ "$stage" = fdt ] && [ $# = 4 ] || { echo "fdt $*: not modelled" >&2; return 1; }
+        case $2 in
+        /chosen) printf '%s=%s\n' "$3" "$4" >> "$M/chosen" ;;
+        /soc/serial@1fbf0300) [ "$3" = status ] || { echo "fdt $*: not modelled" >&2; return 1; }
+            printf '%s %s=%s\n' "$2" "$3" "$4" >> "$M/tree" ;;
+        *) echo "fdt $*: not modelled" >&2; return 1 ;;
+        esac ;;
     get)
         [ "$2 $4 $5" = "value / description" ] || { echo "fdt $*: not modelled" >&2; return 1; }
         # The names of a tree's properties are at its end: nothing is found by name in an
@@ -174,7 +180,7 @@ bootm() {
     prep) [ "$stage" = fdt ] || return 1; stage=prep; prepared=$bootargs; return 0 ;;
     go)
         [ "$stage" = prep ] || return 1
-        for name in key_line key_on gps_v serial_number efr32_v efr32_keep; do
+        for name in key_line key_on gps_v serial_number efr32_v efr32_keep efr32_port; do
             eval "[ -z \"\${$name+x}\" ]" || note "left a scratch variable: $name"
         done
         echo "$prepared" >> "$M/bootargs"
@@ -189,7 +195,7 @@ bootm() {
 }
 attached=none mode=ro mounted=0 fdt_at= stage=none prepared=
 mkdir -p "$M/ram"
-rm -f "$M/chosen"
+rm -f "$M/chosen" "$M/tree"
 . "$M/defaults"
 [ ! -f "$M/saved" ] || . "$M/saved"
 [ -z "$SLOT" ] || loader_slot=$SLOT
@@ -281,8 +287,9 @@ class LoaderUpdate(Model):
         self.assertTrue(bootcmd.endswith('iminfo ${loadaddr} && run system_start'))
         start = (self.model / 'env' / 'system_start').read_text()
         self.assertEqual(start, 'if bootm start ${loadaddr}#${bootconf} && bootm loados && bootm ramdisk && bootm fdt; '
-                                'then run board_pass; bootm prep && bootm go; fi',
-                         "the same boot, a stage at a time, with the board's name put in before the last two")
+                                'then run board_pass; run efr32_give; bootm prep && bootm go; fi',
+                         "the same boot, a stage at a time, with the board's name put in, and the low-power "
+                         "radio's port where it is kept on, before the last two")
 
     def test_nothing_staged_nothing_written(self):
         self.assertEqual(self.boot(), [f'booted {digest(self.OLD)}'])
@@ -758,6 +765,11 @@ class LowPowerRadio(Model):
         return (self.register('ENABLE') & self.BIT, self.register('DIRECTION') & self.DIR_BITS,
                 self.register('DATA') & self.BIT) == (self.BIT, 1 << 16, 0)
 
+    def port(self):
+        """What the loader changed in the tree it handed over, outside /chosen."""
+        path = self.model / 'tree'
+        return path.read_text().splitlines() if path.exists() else []
+
     def test_with_no_switch_the_reset_is_held_and_no_other_line_is_touched(self):
         # Line 24 an input reading high, as the chip's own pull-up leaves it; lines 17, 19, 20 and
         # 29 (the LEDs) outputs at some level, line 30 an input reading high.
@@ -797,6 +809,27 @@ class LowPowerRadio(Model):
         (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
         self.assertEqual(self.said(), ['w1700k.efr32=on'], 'the second loader reads the switch as the first did')
         self.assertEqual(self.register('ENABLE') & self.BIT, 0)
+
+    def test_its_port_is_there_only_at_a_boot_where_it_is_kept_on(self):
+        """The second serial port is disabled in the tree as built, so that no program can talk to
+        the radio; the loader enables it in the tree it hands over where the owner keeps the radio
+        on, and at no other boot. Either loader does."""
+        self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
+        self.assertEqual((self.said(), self.port()), (['w1700k.efr32=off'], []))
+        self.switch('efr32_keep=on\n')
+        self.assertEqual((self.said(), self.port()), (['w1700k.efr32=on'], ['/soc/serial@1fbf0300 status=okay']))
+        (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
+        self.assertEqual((self.said(), self.port()), (['w1700k.efr32=on'], ['/soc/serial@1fbf0300 status=okay']))
+        self.switch('efr32_keep=off\n')
+        self.assertEqual((self.said(), self.port()), (['w1700k.efr32=off'], []))
+        give = (self.model / 'env' / 'efr32_give').read_text()
+        self.assertTrue(give.endswith('; setenv efr32_port'), 'and the mark it goes by is not left behind')
+        sys.path.insert(0, str(ROOT / 'platform'))
+        import fdt
+        from buildlib import DTB
+        if DTB.exists():                                   # the path the loader names is the built tree's
+            tree = fdt.nodes(DTB.read_bytes())
+            self.assertEqual(fdt.string(tree['/__symbols__']['uart2']), '/soc/serial@1fbf0300')
 
     def test_switching_it_off_again_holds_it_from_the_next_boot(self):
         self.registers(DATA=0xffffffff, ENABLE=0, DIRECTION=0)
@@ -852,7 +885,7 @@ class LowPowerRadio(Model):
                         if second:
                             (self.model / 'loaderb').write_bytes(b'FIT:W1700K SDR second ARM loader\nthe second loader\nEND\n')
                         self.registers(**as_found)
-                        self.assertEqual(self.said(), [])
+                        self.assertEqual((self.said(), self.port()), ([], []))
                         self.assertEqual(self.board, name)
                         self.assertEqual({k: self.register(k) for k in as_found}, as_found)
 
