@@ -315,6 +315,55 @@ reads 460800 as it is and reaches no higher. Seen on a unit indoors: a 3D fix
 from four constellations, a position a second, its time equal to the host's
 to the second. Stock's line 14 ("notify") is not driven.
 
+### The low-power radio
+
+Beside its Wi-Fi radios the W1700K carries a Silicon Labs EFR32MG21 (marked
+`MG21 A010HI`: 512 kB of flash, a 10 dBm transmitter), a 2.4 GHz chip for
+Bluetooth LE and IEEE 802.15.4 (Zigbee, Thread) with a printed antenna of its
+own. The stock firmware holds settings for it and no program that uses it.
+Nothing of ours uses it either, and it is held in reset.
+
+- **Its reset** is line 24 of the pin controller, low for reset, and the chip
+  pulls the line high itself: left alone it starts its firmware at power-on.
+  No power switch for it is known, so off is reset.
+- **The loader holds it** at the start of every boot, as soon as it has named
+  the board and before a second loader is started or any root runs
+  (`efr32_off`, after `board_id` in `bootcmd`): line 24 an output, then low, in
+  that order, as for the GPS receiver.
+- **Only on a W1700K.** The XR1710G has no such chip, and what its line 24 does
+  is not known; a unit the loader cannot name may be one. On any board not
+  named `w1700k` the loader leaves the line alone and says nothing of a radio,
+  and `w1700k-efr32` does nothing and says so. (The chip does nothing unasked,
+  so a W1700K that cannot be named loses little by it; the GPS receiver, which
+  tells where the unit is from power-on, is treated the other way.)
+- **An owner's switch that stays** lets it run: `efr32/switch` in durable
+  storage, which the loader reads after it has held the line (`efr32_pass`)
+  and, where it says `efr32_keep=on`, lets the line go again. It tells Linux
+  which it did, `w1700k.efr32=on` or `off` on the kernel command line.
+- **`w1700k-efr32 status`, `on` and `off`**, in the root: `status` says whether
+  it runs now and what start-up does; `on` and `off` last until the unit next
+  starts, and with `--keep` write the switch too. `on` does not drive the
+  line: it makes it an input again and the chip's pull-up ends the reset. A
+  unit whose loader is older than this holds nothing (`start=unheld`): its
+  radio runs from power-on until `off` is said.
+- **Its port** is the SoC's second UART (`serial@1fbf0300`, pin group `uart2`),
+  disabled in our device tree: no program can talk to it, and nothing here
+  changes its firmware.
+
+Seen on a unit (hardware 2.1), with the port enabled in a build made for the
+purpose and booted from RAM: the chip runs a Silicon Labs Bluetooth
+co-processor (BGAPI, stack 6.2.0 build 212) at 115200 baud, which the kernel's
+driver gives on this port when asked for 230400; it says nothing until spoken
+to, answers `system_hello`, and announces itself after every reset, which is
+how line 24 is known to be its reset. With line 25 held low across a reset it
+starts its bootloader instead (Gecko bootloader 2.3.2), so line 25 is the
+bootloader's and is never driven here. The loader's step, run by hand at its
+prompt, left the chip silent through the kernel's start until `on`. A
+Bluetooth sniffer beside the unit heard no advertiser that was there only
+while the chip ran (four rounds of it held and running): left to itself the
+factory firmware does not advertise.
+What comes next is in [the roadmap](../docs/roadmap.md).
+
 ### The paperclip key's slot
 
 The reset button (line 0 of the pin controller, low when pressed; not in the

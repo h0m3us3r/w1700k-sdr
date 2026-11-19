@@ -87,6 +87,23 @@ installation, the first loader and the kernel image.
   `--no-login-key`, and an RSA key handed over by the loader (both pass the
   tests and the loader's model).
 
+### The low-power radio
+
+Decided: the EFR32MG21 (Bluetooth LE, Zigbee, Thread) is held in reset by the
+loader at every boot unless its owner's switch says on (`w1700k-efr32`,
+`platform/README.md`). Nothing talks to it. To take up later:
+
+- **Its port.** The second UART enabled in the device tree, and the driver's
+  baud rate settled (on this port it gives half of what is asked: 230400 for
+  the chip's 115200).
+- **The link handed to the host.** A raw pass-through over ssh, so that the
+  host runs whichever stack it likes (a Bluetooth co-processor host, an
+  OpenThread border router, a Zigbee coordinator) and the unit stays small.
+- **Other firmware in it**, which is what Thread, Zigbee or a standard
+  Bluetooth controller would need. The factory image cannot be read back over
+  the port, only through the debug header on the board: it is saved first.
+  Any of it makes the chip transmit, which is its owner's decision.
+
 ### The GPS receiver
 
 Decided and deferred: the receiver is off by default, switched off by the

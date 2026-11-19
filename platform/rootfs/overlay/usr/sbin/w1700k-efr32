@@ -1,0 +1,97 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# The unit's low-power radio (a Silicon Labs EFR32MG21: Bluetooth LE and Zigbee/Thread at
+# 2.4 GHz), which is off unless its owner turns it on.
+#
+#   w1700k-efr32 status          whether it runs now, and what every start-up does with it
+#   w1700k-efr32 on [--keep]     let it run; with --keep, at every start-up from now on too
+#   w1700k-efr32 off [--keep]    hold it in reset; with --keep, at every start-up too
+#
+# The radio has no power switch that is known: off is its reset line held low (w1700k-efr32-line).
+# The loader holds it so at the start of every boot, before any root runs, and lets it go again
+# only where the owner's switch says on. The switch is a file in durable storage, `efr32/switch`,
+# in the form the loader imports:
+#
+#   efr32_keep=on
+#
+# Linux opens durable storage only to change it. At every boot it is the loader that reads the
+# switch and says what it did on the kernel command line: `w1700k.efr32=on|off`. A loader that
+# says nothing does not hold the radio: it then runs from power-on until `off` is said here, and
+# a switch kept now takes effect once the unit has a loader that reads it.
+#
+# The radio is the W1700K's. On a board the loader named anything else (the XR1710G has no such
+# chip) the line tool does nothing and says so, and so does this, whatever it was asked.
+#
+# `status` prints two lines: `efr32=on|off`, the reset line as it reads now, and
+# `start=on|off|unheld`, what start-up does (`unheld`: the loader of this boot does not hold it).
+# Nothing here talks to the radio or changes its firmware; on only ends its reset.
+set -eu
+LINE=${W1700K_EFR32_LINE:-/usr/sbin/w1700k-efr32-line}
+CMDLINE=${W1700K_EFR32_CMDLINE:-/proc/cmdline}
+RUN=${W1700K_EFR32_RUN:-/run/w1700k-efr32}
+DURABLE_RUN=${W1700K_EFR32_DURABLE_RUN:-/usr/sbin/durable-run}
+SWITCH_DIR=${W1700K_EFR32_DIR:-/durable/efr32}
+
+fail() { echo "w1700k-efr32: $*" >&2; exit 1; }
+usage() { echo "usage: w1700k-efr32 status | on [--keep] | off [--keep]" >&2; exit 2; }
+
+# What the loader of this boot did with the switch: on, off, or unheld when it said nothing.
+loader()
+{
+	said=unheld
+	for word in $(cat "$CMDLINE"); do
+		case $word in
+		w1700k.efr32=on | w1700k.efr32=off) said=${word#*=} ;;
+		esac
+	done
+	echo "$said"
+}
+
+# What start-up does from now on: the switch as kept in this boot, else as the loader read it.
+start()
+{
+	if [ "$(loader)" = unheld ]; then
+		echo unheld
+	elif [ -r "$RUN" ]; then
+		cat "$RUN"
+	else
+		loader
+	fi
+}
+
+keep()
+{
+	written=$("$DURABLE_RUN" sh -c '
+		set -e
+		mkdir -p "$1"
+		printf "efr32_keep=%s\n" "$2" > "$1/switch.part"
+		mv "$1/switch.part" "$1/switch"
+		echo "switch: written"' sh "$SWITCH_DIR" "$1" | sed -n 's/^switch: //p')
+	[ "$written" = written ] || fail "the switch could not be written: start-up stays as it was"
+	echo "$1" > "$RUN.part"
+	mv "$RUN.part" "$RUN"
+	[ "$(loader)" != unheld ] ||
+		echo "w1700k-efr32: kept, but this unit's loader does not read the switch yet: until it is updated the radio runs from power-on" >&2
+}
+
+verb=${1:-}
+case $verb in
+status)
+	[ "$#" -eq 1 ] || usage
+	"$LINE" status
+	echo "start=$(start)"
+	;;
+on | off)
+	case $# in
+	1) kept=0 ;;
+	2) [ "$2" = --keep ] || usage; kept=1 ;;
+	*) usage ;;
+	esac
+	"$LINE" "$verb"
+	[ "$kept" = 0 ] || keep "$verb"
+	echo "start=$(start)"
+	;;
+*)
+	usage
+	;;
+esac
