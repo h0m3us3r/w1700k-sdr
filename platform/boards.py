@@ -28,8 +28,8 @@ the low-power radio). A serial does not tell a W1700K from a
 W1700K2 (one of each kind has been seen, and a W1700K2's begins "W1700K2" as a
 W1700K's made in the 2020s would); the kernel tells them by their parts.
 
-This table is what the loader's environment, w1700k-gps, w1700k-efr32-line and the tests are
-held to.
+This table is what the loader's environment, w1700k-gps-line, w1700k-efr32-line and the tests
+are held to.
 """
 from dataclasses import dataclass
 

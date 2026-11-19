@@ -1,23 +1,27 @@
 // SPDX-License-Identifier: MIT
 /*
- * w1700k-efr32-link: the low-power radio's serial port, joined to standard input and output.
+ * w1700k-port-link: one of the unit's serial ports, joined to standard input and output.
  *
- *   w1700k-efr32-link [--baud N] [--port DEV]
+ *   w1700k-port-link --port DEV [--baud N]
  *
- * Every byte read from standard input goes to the radio and every byte from the radio to
+ * Every byte read from standard input goes to the port and every byte from the port to
  * standard output, as they come and unchanged, until standard input ends. Run over ssh it is
- * the radio's port on the host: `ssh root@unit w1700k-efr32 link`, which is what the host's
- * `w1700k efr32` commands do. Nothing here speaks to the radio or knows its protocol.
+ * the port on the host. Nothing here speaks to what is on the port or knows its protocol.
  *
- * The radio (a Silicon Labs EFR32MG21) is on the SoC's second UART, /dev/ttyS1, 8N1 and no
- * flow control. Its factory firmware talks at 115200 baud, the default here; firmware an owner
- * puts in it may use another speed. On this port the kernel's driver gives half the speed it
- * is asked for (it takes every port's divider to be fed 20 MHz, and this one's is fed 10:
- * measured, the radio's boot message is read at 115200 only when 230400 is asked), so twice
- * the speed wanted is asked: 115200 and 230400 are what the port then reaches.
+ * Two ports are handed over this way, each by its owner's command, which checks that there is
+ * somebody to talk to and names the port and its speed (platform/README.md):
  *
- * The port is there only on a W1700K whose owner keeps the radio on: the loader enables it in
- * the device tree then, and not otherwise (platform/README.md, "The low-power radio").
+ *   w1700k-efr32 link   the low-power radio (a Silicon Labs EFR32MG21) on the SoC's second
+ *                       UART, /dev/ttyS1; its factory firmware talks at 115200 baud
+ *   w1700k-gps link     the GPS receiver (an Airoha AG3352) on the high-speed UART,
+ *                       /dev/ttyS2, which sends at 921600 baud
+ *
+ * Both are 8N1 with no flow control. The speed asked for is the speed on the wire: that takes
+ * our kernel patch 0015, without which the second UART ran at half of 230400 and a quarter of
+ * 115200, and the high-speed one at twice what was asked. 115200 is the default.
+ *
+ * Each port is there only where its owner keeps the thing on it switched on: the loader
+ * enables it in the device tree at such a boot, and not otherwise.
  */
 #define _DEFAULT_SOURCE
 #include <errno.h>
@@ -33,23 +37,19 @@
 
 #include <linux/serial.h>
 
-/* What the driver is asked for to get a speed on this port (above). */
-#ifndef PORT_SPEED_FACTOR
-#define PORT_SPEED_FACTOR 2
-#endif
-
 static int usage(void)
 {
-	fprintf(stderr, "usage: w1700k-efr32-link [--baud 115200|230400] [--port DEV]\n");
+	fprintf(stderr, "usage: w1700k-port-link --port DEV [--baud 115200|230400|460800|921600]\n");
 	return 2;
 }
 
 static speed_t speed_for(long baud)
 {
-	switch (baud * PORT_SPEED_FACTOR) {
+	switch (baud) {
 	case 115200: return B115200;
 	case 230400: return B230400;
 	case 460800: return B460800;
+	case 921600: return B921600;
 	default: return B0;
 	}
 }
@@ -78,7 +78,7 @@ static int put(int fd, const unsigned char *bytes, ssize_t n)
 
 int main(int argc, char **argv)
 {
-	const char *port = "/dev/ttyS1";
+	const char *port = NULL;
 	struct serial_struct serial;
 	struct termios tio;
 	unsigned char buffer[4096];
@@ -99,25 +99,27 @@ int main(int argc, char **argv)
 			return usage();
 		}
 	}
+	if (!port)
+		return usage();
 	speed = speed_for(baud);
 	if (speed == B0) {
-		fprintf(stderr, "w1700k-efr32-link: %ld baud is not one this port reaches (115200, 230400)\n", baud);
+		fprintf(stderr, "w1700k-port-link: %ld baud is not a speed of these ports (115200, 230400, 460800, 921600)\n", baud);
 		return 2;
 	}
 	fd = open(port, O_RDWR | O_NOCTTY | O_NONBLOCK);
 	if (fd < 0) {
-		fprintf(stderr, "w1700k-efr32-link: %s: %s\n", port, strerror(errno));
+		fprintf(stderr, "w1700k-port-link: %s: %s\n", port, strerror(errno));
 		return 1;
 	}
 	/* A port the device tree leaves disabled still has its device file: it is of no type. */
 	if (isatty(fd) && !ioctl(fd, TIOCGSERIAL, &serial) && serial.type == PORT_UNKNOWN) {
-		fprintf(stderr, "w1700k-efr32-link: %s is not there: the loader enables the radio's port on a unit "
-			"whose owner keeps the radio on (w1700k-efr32 on --keep, then restart)\n", port);
+		fprintf(stderr, "w1700k-port-link: %s is not there: the device tree of this boot leaves the port "
+			"disabled\n", port);
 		return 1;
 	}
 	if (isatty(fd)) {
 		if (tcgetattr(fd, &tio) < 0) {
-			fprintf(stderr, "w1700k-efr32-link: %s: %s\n", port, strerror(errno));
+			fprintf(stderr, "w1700k-port-link: %s: %s\n", port, strerror(errno));
 			return 1;
 		}
 		cfmakeraw(&tio);
@@ -128,7 +130,7 @@ int main(int argc, char **argv)
 		cfsetispeed(&tio, speed);
 		cfsetospeed(&tio, speed);
 		if (tcsetattr(fd, TCSANOW, &tio) < 0) {
-			fprintf(stderr, "w1700k-efr32-link: %s cannot be set to %ld baud: %s\n", port, baud, strerror(errno));
+			fprintf(stderr, "w1700k-port-link: %s cannot be set to %ld baud: %s\n", port, baud, strerror(errno));
 			return 1;
 		}
 		tcflush(fd, TCIOFLUSH);
@@ -141,7 +143,7 @@ int main(int argc, char **argv)
 		if (poll(fds, 2, ends ? 200 : -1) < 0) {
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "w1700k-efr32-link: %s\n", strerror(errno));
+			fprintf(stderr, "w1700k-port-link: %s\n", strerror(errno));
 			return 1;
 		}
 		if (fds[1].revents & (POLLIN | POLLERR | POLLHUP)) {
@@ -150,18 +152,18 @@ int main(int argc, char **argv)
 				if (put(STDOUT_FILENO, buffer, n) < 0)
 					return 0;		/* nobody reads any more */
 			} else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
-				fprintf(stderr, "w1700k-efr32-link: %s: %s\n", port, n ? strerror(errno) : "closed");
+				fprintf(stderr, "w1700k-port-link: %s: %s\n", port, n ? strerror(errno) : "closed");
 				return 1;
 			}
 			continue;
 		}
-		if (ends)			/* standard input ended and the radio has said its last */
+		if (ends)			/* standard input ended and the port has said its last */
 			return 0;
 		if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
 			n = read(STDIN_FILENO, buffer, sizeof(buffer));
 			if (n > 0) {
 				if (put(fd, buffer, n) < 0) {
-					fprintf(stderr, "w1700k-efr32-link: %s: %s\n", port, strerror(errno));
+					fprintf(stderr, "w1700k-port-link: %s: %s\n", port, strerror(errno));
 					return 1;
 				}
 			} else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {

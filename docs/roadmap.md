@@ -95,10 +95,6 @@ there only then; `w1700k-efr32 link` hands that port to a host over ssh
 (`platform/README.md`, `host/w1700k/README.md`). Nothing on the unit speaks to
 it. To take up later:
 
-- **The driver's speed on that port.** It gives half of what is asked, so the
-  link tool asks for twice and the port stops at 230400 baud. A driver that
-  knows this port's clock would give 460800, which the usual Thread
-  co-processor images use.
 - **A stack on the unit.** With the factory firmware (a Bluetooth co-processor
   that takes commands over the port) a small client on the unit could scan or
   advertise without anything else installed. A standard Bluetooth host, a
@@ -114,16 +110,15 @@ it. To take up later:
 
 ### The GPS receiver
 
-Decided and deferred: the receiver is off by default, switched off by the
-loader at every boot, and `w1700k-gps on` runs it until the next start
-(`platform/README.md`). Nothing reads it. To take up later:
+Decided: the receiver is off by default, switched off by the loader at every
+boot unless its owner's switch says on, and its serial port is there only
+then; `w1700k-gps link` hands that port to a host over ssh, where
+`w1700k gps pty` makes it a device for gpsd, pygpsclient or any program that
+reads a serial GPS (`platform/README.md`, `host/w1700k/README.md`). Nothing
+on the unit reads it. To take up later:
 
-- **An owner's switch that stays.** A setting in the unit's durable storage,
-  read by the loader like its others, for a receiver that is on from boot.
-- **Reading it.** The port enabled in the device tree, and a small reader on
-  the unit. The driver should take both speeds, the 460800 the receiver uses
-  and the 921600 the stock settings name, so that neither number is a guess;
-  today it reaches 460800 and no higher.
+- **A reader on the unit**, for a unit that should know its own place or time
+  without a host attached.
 - **What it is for.** Telling the units of a fleet apart and saying where each
   is; handing position and time to the host with the samples; time-stamping
   captures. There is no pulse-per-second line to the SoC that we know of.

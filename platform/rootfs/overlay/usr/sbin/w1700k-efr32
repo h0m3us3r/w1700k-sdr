@@ -30,15 +30,17 @@
 # The port (the SoC's second UART) is disabled in the device tree as built, and the
 # loader enables it at a boot where the switch says on. So talking to the radio takes
 # `on --keep` and a restart; `on` alone runs the radio with nobody able to reach it. `link` is
-# the port for a host: `ssh root@unit w1700k-efr32 link` (w1700k-efr32-link, which says what
-# speeds the port has). Nothing here speaks to the radio itself or changes its firmware.
+# the port for a host: `ssh root@unit w1700k-efr32 link` (w1700k-port-link), 8N1 without flow
+# control at 115200 baud, the factory firmware's speed, or at 230400 or 460800. Nothing here
+# speaks to the radio itself or changes its firmware.
 set -eu
 LINE=${W1700K_EFR32_LINE:-/usr/sbin/w1700k-efr32-line}
 CMDLINE=${W1700K_EFR32_CMDLINE:-/proc/cmdline}
 RUN=${W1700K_EFR32_RUN:-/run/w1700k-efr32}
 DURABLE_RUN=${W1700K_EFR32_DURABLE_RUN:-/usr/sbin/durable-run}
 SWITCH_DIR=${W1700K_EFR32_DIR:-/durable/efr32}
-LINK=${W1700K_EFR32_LINK:-/usr/sbin/w1700k-efr32-link}
+LINK=${W1700K_EFR32_LINK:-/usr/sbin/w1700k-port-link}
+PORT=${W1700K_EFR32_PORT:-/dev/ttyS1}
 PORT_STATUS=${W1700K_EFR32_PORT_STATUS:-/proc/device-tree/soc/serial@1fbf0300/status}
 
 fail() { echo "w1700k-efr32: $*" >&2; exit 1; }
@@ -100,15 +102,19 @@ status)
 link)
 	shift
 	case $# in
-	0) ;;
-	2) [ "$1" = --baud ] || usage ;;
+	0) baud=115200 ;;
+	2) [ "$1" = --baud ] || usage; baud=$2 ;;
 	*) usage ;;
+	esac
+	case $baud in
+	115200 | 230400 | 460800) ;;
+	*) fail "$baud baud is not one the radio's port reaches (115200, 230400, 460800)" ;;
 	esac
 	state=$("$LINE" status)
 	[ "$state" = efr32=on ] || fail "the radio is held in reset: nothing would answer (w1700k-efr32 on)"
 	[ "$(port)" = on ] ||
 		fail "the radio's port is not there: the loader enables it where the radio is kept on (w1700k-efr32 on --keep, then restart)"
-	exec "$LINK" "$@"
+	exec "$LINK" --port "$PORT" --baud "$baud"
 	;;
 on | off)
 	case $# in

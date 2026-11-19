@@ -46,6 +46,13 @@
 		};
 	};
 
+	hsuart_pins: hsuart-pins {
+		mux {
+			function = "uart";
+			groups = "hsuart";
+		};
+	};
+
 	mdio_pins: mdio-pins {
 		mux {
 			function = "mdio";
@@ -163,10 +170,24 @@
 	pinctrl-0 = <&uart2_pins>;
 };
 
-/* So that the radio's port is /dev/ttyS1 wherever it is there, whatever else is enabled. */
+/* The W1700K's GPS receiver (an AG3352) is on the high-speed UART. As built the port is
+ * disabled, as the radio's is, and the loader enables it in the tree it hands over only at a
+ * boot where the unit's owner keeps the receiver on (platform/loader: gps_pass, gps_give).
+ * The high-speed UART's divider has twice the clock of the others (patches/0015 goes by the
+ * compatible), and 14745600 is what lets 921600, the receiver's speed, be asked for. */
+&hsuart3 {
+	compatible = "airoha,an7581-hsuart", "airoha,en7523-uart";
+	clock-frequency = <14745600>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&hsuart_pins>;
+};
+
+/* So that the radio's port is /dev/ttyS1 and the receiver's /dev/ttyS2 wherever they are
+ * there, whatever else is enabled. */
 / {
 	aliases {
 		serial1 = &uart2;
+		serial2 = &hsuart3;
 	};
 };
 &snfi {

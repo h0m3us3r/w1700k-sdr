@@ -55,6 +55,17 @@ def board(dtb):
     # loader has only its status to change (platform/loader: efr32_give).
     require('pinctrl-0' in node('uart2') and fdt.string(symbols['uart2']) == '/soc/serial@1fbf0300',
             'DTB: uart2 has no pins, or is not where the loader enables it')
+    # The GPS receiver's port, the same way (gps_give), and named as the high-speed UART it is,
+    # with the clock that lets the receiver's 921600 baud be asked for (patches/0015).
+    require('pinctrl-0' in node('hsuart3') and fdt.string(symbols['hsuart3']) == '/soc/serial@1fbe1000',
+            'DTB: hsuart3 has no pins, or is not where the loader enables it')
+    require(fdt.strings(node('hsuart3')['compatible'])[0] == 'airoha,an7581-hsuart' and
+            fdt.cells(node('hsuart3')['clock-frequency']) == [14745600],
+            'DTB: hsuart3 is not named as the high-speed UART, or cannot be asked for 921600 baud')
+    aliases = tree['/aliases']
+    require(fdt.string(aliases['serial1']) == '/soc/serial@1fbf0300' and
+            fdt.string(aliases['serial2']) == '/soc/serial@1fbe1000',
+            'DTB: the radio\'s port is not ttyS1, or the GPS receiver\'s not ttyS2')
     require(fdt.string(node('gsw_port1')['label']) == 'lan3' and
             fdt.string(node('gsw_port2')['label']) == 'lan4', 'DTB: wrong switch ports')
     for mac, pcs, phy, address, reset in TEN_GIGABIT:

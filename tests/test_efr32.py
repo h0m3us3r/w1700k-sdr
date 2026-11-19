@@ -132,25 +132,26 @@ class Line(unittest.TestCase):
         self.assertIn("DISABLED = ('pcie1', 'npu', 'uart2', ", (ROOT / 'platform/linux/board_check.py').read_text(),
                       'and the build refuses a tree in which it is not')
         named = [path.name for path in overlay.rglob('*') if path.is_file() and b'ttyS1' in path.read_bytes()]
-        self.assertEqual(named, [], 'no script of the root names the port: w1700k-efr32 goes by its link tool')
+        self.assertEqual(named, ['w1700k-efr32'], 'the owner\'s command is all that names the port')
 
 
-LINK_SOURCE = ROOT / 'kernel/w1700k_sdr/efr32_link.c'
+LINK_SOURCE = ROOT / 'kernel/w1700k_sdr/port_link.c'
 
 
 @unittest.skipUnless(shutil.which(CC) and hasattr(os, 'openpty'), 'no C compiler or no pseudo-terminals')
 class LinkTool(unittest.TestCase):
-    """w1700k-efr32-link, with a pseudo-terminal for the radio's port."""
+    """w1700k-port-link, which hands a serial port of the unit to a host (the radio's here; the
+    GPS receiver's the same way, tests/test_gps.py), with a pseudo-terminal for the port."""
 
     @classmethod
     def setUpClass(cls):
         cls.built = tempfile.TemporaryDirectory()
-        cls.program = Path(cls.built.name) / 'w1700k-efr32-link'
+        cls.program = Path(cls.built.name) / 'w1700k-port-link'
         result = subprocess.run([CC, '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', str(LINK_SOURCE), '-o', str(cls.program)],
                                 capture_output=True, text=True)
         if result.returncode:
             cls.built.cleanup()
-            raise AssertionError('efr32_link.c does not compile:\n' + result.stderr)
+            raise AssertionError('port_link.c does not compile:\n' + result.stderr)
 
     @classmethod
     def tearDownClass(cls):
@@ -196,10 +197,12 @@ class LinkTool(unittest.TestCase):
         self.assertEqual(self.from_fd(process.stdout.fileno(), 6), b'\x20\x02\x01\x00\x00\x00')
         self.assertEqual(process.wait(timeout=5), 0)
 
-    def test_the_port_is_set_to_twice_the_speed_wanted_raw_and_without_flow_control(self):
-        """On this port the driver gives half of what it is asked (seen on a unit)."""
+    def test_the_port_is_set_to_the_speed_wanted_raw_and_without_flow_control(self):
+        """The speed asked for is the speed on the wire (kernel patch 0015; before it the radio's
+        port gave half of 230400, and the tool asked for twice)."""
         import termios
-        for baud, asked in (('115200', termios.B230400), ('230400', termios.B460800)):
+        for baud, asked in (('115200', termios.B115200), ('230400', termios.B230400),
+                            ('460800', termios.B460800), ('921600', termios.B921600)):
             with self.subTest(baud=baud):
                 process = self.start('--baud', baud)
                 process.stdin.write(b'x')
@@ -212,11 +215,11 @@ class LinkTool(unittest.TestCase):
                 self.assertEqual(process.wait(timeout=5), 0)
 
     def test_a_speed_the_port_does_not_reach_and_anything_else_is_refused(self):
-        for words, code, said in ((('--baud', '460800'), 2, 'is not one this port reaches (115200, 230400)'),
-                                  (('--baud', '9600'), 2, 'is not one this port reaches'),
-                                  (('--baud', 'fast'), 2, 'usage: w1700k-efr32-link'),
-                                  (('--baud',), 2, 'usage: w1700k-efr32-link'),
-                                  (('now',), 2, 'usage: w1700k-efr32-link')):
+        for words, code, said in ((('--baud', '1000000'), 2, 'is not a speed of these ports (115200, 230400, 460800, 921600)'),
+                                  (('--baud', '9600'), 2, 'is not a speed of these ports'),
+                                  (('--baud', 'fast'), 2, 'usage: w1700k-port-link'),
+                                  (('--baud',), 2, 'usage: w1700k-port-link'),
+                                  (('now',), 2, 'usage: w1700k-port-link')):
             with self.subTest(words=words):
                 result = subprocess.run([str(self.program), '--port', self.port, *words], stdin=subprocess.DEVNULL,
                                         capture_output=True, text=True, timeout=10)
@@ -226,15 +229,20 @@ class LinkTool(unittest.TestCase):
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertIn('/nonexistent/ttyS1', result.stderr)
+        result = subprocess.run([str(self.program), '--baud', '115200'], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2, 'it has no port of its own: the command that calls it names one')
+        self.assertIn('usage: w1700k-port-link', result.stderr)
 
-    def test_it_is_built_for_the_unit_and_knows_nothing_of_the_radios_protocol(self):
-        self.assertIn('efr32_link:w1700k-efr32-link', (ROOT / 'platform/linux/Makefile').read_text())
-        self.assertIn("'w1700k-efr32-link'", (ROOT / 'platform/rootfs/build.py').read_text())
+    def test_it_is_built_for_the_unit_and_knows_nothing_of_what_is_on_a_port(self):
+        self.assertIn('port_link:w1700k-port-link', (ROOT / 'platform/linux/Makefile').read_text())
+        self.assertIn("'w1700k-port-link'", (ROOT / 'platform/rootfs/build.py').read_text())
         text = LINK_SOURCE.read_text()
-        self.assertIn('"/dev/ttyS1"', text)
+        self.assertNotIn('/dev/ttyS', text.split('*/', 1)[1])
+        self.assertIn('PORT=${W1700K_EFR32_PORT:-/dev/ttyS1}', COMMAND.read_text())
         self.assertIn('serial1 = &uart2;', (ROOT / 'platform/linux/dts/an7581-w1700k-sdr.dts').read_text(),
                       'which is the radio\'s port wherever it is there')
-        for word in ('0x20', 'hello', 'bgapi', 'BGAPI'):
+        for word in ('0x20', 'hello', 'bgapi', 'BGAPI', 'NMEA', 'nmea', 'GGA'):
             self.assertNotIn(word, text.split('*/', 1)[1])
 
 
@@ -367,7 +375,19 @@ class Command(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout), (0, 'to the radio\n'), 'standard input and output are the link tool\'s')
         result = self.efr32('link', '--baud', '230400', stdin='')
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(self.calls(), ['status', 'link ', 'status', 'link --baud 230400'], 'the line is read, never driven')
+        self.assertEqual(self.calls(), ['status', 'link --port /dev/ttyS1 --baud 115200',
+                                        'status', 'link --port /dev/ttyS1 --baud 230400'], 'the line is read, never driven')
+
+    def test_link_takes_only_a_speed_the_port_reaches(self):
+        (self.dir / 'level').write_text('on\n')
+        self.port('okay')
+        self.assertEqual(self.efr32('link', '--baud', '460800', stdin='').returncode, 0)
+        for baud in ('921600', '9600', 'fast'):
+            with self.subTest(baud=baud):
+                result = self.efr32('link', '--baud', baud)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"{baud} baud is not one the radio's port reaches (115200, 230400, 460800)", result.stderr)
+        self.assertEqual([call for call in self.calls() if call.startswith('link')], ['link --port /dev/ttyS1 --baud 460800'])
 
     def test_link_says_why_there_is_nobody_to_talk_to(self):
         self.port('okay')

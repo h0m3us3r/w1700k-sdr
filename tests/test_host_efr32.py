@@ -123,8 +123,8 @@ class OnAUnit(unittest.TestCase):
         self.addCleanup(link.close)
         self.assertEqual(efr32.identify(link)['stack'], '6.2.0')
         self.assertEqual(unit.ran, ['/usr/sbin/w1700k-efr32 link --baud 115200'])
-        with self.assertRaisesRegex(ValueError, 'baud: one of 115200, 230400'):
-            efr32.open_link(unit, 460800)
+        with self.assertRaisesRegex(ValueError, 'baud: one of 115200, 230400, 460800'):
+            efr32.open_link(unit, 921600)
         self.assertEqual(len(unit.ran), 1)
 
     @unittest.skipUnless(hasattr(os, 'openpty'), 'no pseudo-terminals')

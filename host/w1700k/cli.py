@@ -35,6 +35,7 @@ from pathlib import Path
 
 from . import config as config_mod
 from . import efr32
+from . import gps
 from .config import REPO
 from .controller import PACKINGS, Controller, serve
 from .radio import RATE_CODE
@@ -101,12 +102,42 @@ def radio_command(config, args):
             # Ended by an interrupt or by being told to end (a service's way), either way cleanly.
             signal.signal(signal.SIGINT, signal.default_int_handler)
             signal.signal(signal.SIGTERM, signal.default_int_handler)
-            efr32.pty(unit, args.baud, announce=lambda path: print(path, flush=True))
+            efr32.pty(unit, args.baud, announce=lambda path: print(path, flush=True), name=args.name)
             return 0
     except KeyboardInterrupt:
         return 0
     except (RuntimeError, ValueError, OSError) as exc:
         print(f'w1700k efr32 {args.radio}: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        unit.close()
+    print(json.dumps(result))
+    return 0
+
+
+def gps_command(config, args):
+    """`w1700k gps ...`: the GPS receiver. No receiver state of ours is involved, so no controller."""
+    unit = Unit(config.unit)
+    try:
+        if args.gps == 'status':
+            result = gps.status(unit)
+        elif args.gps in ('on', 'off'):
+            result = dict(gps.switch(unit, args.gps == 'on', args.keep), port=gps.status(unit).get('port'))
+        elif args.gps == 'check':
+            link = gps.open_link(unit, args.baud)
+            try:
+                result = gps.check(link, args.seconds)
+            finally:
+                link.close()
+        else:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGTERM, signal.default_int_handler)
+            gps.pty(unit, args.baud, announce=lambda path: print(path, flush=True), name=args.name)
+            return 0
+    except KeyboardInterrupt:
+        return 0
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f'w1700k gps {args.gps}: {exc}', file=sys.stderr)
         return 1
     finally:
         unit.close()
@@ -160,6 +191,20 @@ def build_parser():
     q = radio.add_parser('pty', help="the radio's serial port as a terminal device here, until stopped; what a "
                                      'host sends through it may make the unit transmit')
     q.add_argument('--baud', type=int, default=efr32.BAUD, choices=efr32.BAUDS)
+    q.add_argument('--name', type=Path, help='a path to make a link to the device at, for as long as this runs')
+    p = sub.add_parser('gps', help='the GPS receiver: its state, and its serial port on this host')
+    receiver = p.add_subparsers(dest='gps', required=True)
+    receiver.add_parser('status', help='whether it runs, what start-up does, whether its port is there')
+    for name in ('on', 'off'):
+        q = receiver.add_parser(name, help='let it run' if name == 'on' else 'switch it off')
+        q.add_argument('--keep', action='store_true', help='at every start-up from now on too')
+    q = receiver.add_parser('check', help='listen for a few seconds: does it talk, has it a fix (never where)')
+    q.add_argument('--seconds', type=float, default=3.0)
+    q.add_argument('--baud', type=int, default=gps.BAUD, choices=gps.BAUDS)
+    q = receiver.add_parser('pty', help="the receiver's serial port as a terminal device here, until stopped: "
+                                        'for gpsd, pygpsclient or any program that reads a serial GPS')
+    q.add_argument('--baud', type=int, default=gps.BAUD, choices=gps.BAUDS)
+    q.add_argument('--name', type=Path, help='a path to make a link to the device at, for as long as this runs')
     return ap
 
 
@@ -174,6 +219,8 @@ def main(argv=None):
         return 0
     if args.command == 'efr32':
         return radio_command(config, args)
+    if args.command == 'gps':
+        return gps_command(config, args)
     if args.command == 'serve':
         if args.packing:
             config = replace(config, export=replace(config.export, packing=args.packing))
