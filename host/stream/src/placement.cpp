@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -47,6 +48,47 @@ long lowest(const std::string &directory)
     return best;
 }
 
+// Whether `name` is a USB bus as sysfs names its root hub: usb1, usb2, ...
+bool is_bus(const char *name)
+{
+    return !std::strncmp(name, "usb", 3) && name[3] && std::strspn(name + 3, "0123456789") == std::strlen(name + 3);
+}
+
+// The interrupt /proc/interrupts lists under USB bus `bus` ("usb1": "xhci-hcd:usb1"); -1: none.
+long bus_interrupt(const std::string &bus, const std::string &proc)
+{
+    std::ifstream f(proc + "/interrupts");
+    const std::string wanted = ":" + bus;
+    for (std::string line; std::getline(f, line);) {
+        std::istringstream words(line);
+        std::string number, word;
+        words >> number;
+        while (words >> word) {
+            if (word.back() == ',') word.pop_back();
+            if (word.size() <= wanted.size() || word.compare(word.size() - wanted.size(), wanted.size(), wanted)) continue;
+            char *end;
+            const long irq = std::strtol(number.c_str(), &end, 10);
+            if (end != number.c_str() && !std::strcmp(end, ":")) return irq;
+        }
+    }
+    return -1;
+}
+
+// A USB controller that is no PCI device shows no interrupt in sysfs: it is listed under the
+// name of one of the controller's buses, not always the one the adapter is on.
+long controller_interrupt(const std::string &root_hub, const std::string &proc)
+{
+    const size_t slash = root_hub.rfind('/');
+    if (slash == std::string::npos || !is_bus(root_hub.c_str() + slash + 1)) return -1;
+    long irq = bus_interrupt(root_hub.substr(slash + 1), proc);
+    if (DIR *d = irq < 0 ? opendir(root_hub.substr(0, slash).c_str()) : nullptr) {
+        while (dirent *e = irq < 0 ? readdir(d) : nullptr)
+            if (is_bus(e->d_name)) irq = bus_interrupt(e->d_name, proc);
+        closedir(d);
+    }
+    return irq;
+}
+
 }  // namespace
 
 int receive_cpu(const std::string &interface, const std::string &sys, const std::string &proc)
@@ -65,6 +107,7 @@ int receive_cpu(const std::string &interface, const std::string &sys, const std:
         } else {
             const std::string line = first_line(device + "/irq");
             if (!line.empty() && std::atol(line.c_str()) > 0) irq = std::atol(line.c_str());
+            else irq = controller_interrupt(device, proc);
         }
     }
     if (irq < 0) return -1;

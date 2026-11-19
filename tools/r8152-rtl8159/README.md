@@ -66,7 +66,7 @@ sudo init/host/link keep IFACE 10.77.0.10/24 9216
 That gives the interface the stream's address and a jumbo MTU, and spreads its packets over the
 CPUs, now and whenever the adapter appears again (NetworkManager holds them in a connection
 the command makes for the interface, with a hook beside it; see [`init/host/link`](../../init/host/link)).
-All three matter with this adapter:
+All of these matter with this adapter:
 
 - **The MTU.** Plugged in again, the adapter is back at 1500 and drops every stream packet
   without a word. The controller refuses to start a stream the interface would drop.
@@ -77,6 +77,20 @@ All three matter with this adapter:
   steering the IP and UDP work to the others took the misses from 53 datagrams a second to
   between 1 and 5; [`tools/host_rx_trial`](../host_rx_trial) measures each step on your host.
   `w1700k-stream` and `w1700k-spectrum` keep their own threads off that CPU.
+- **A host that sleeps between packets.** A stream at 40 or 80 Msps arrives in clumps, and
+  between them a host can put every CPU to sleep and then enter its deepest, whole-system idle
+  state, which takes it too long to leave for an adapter that holds under a millisecond. On an
+  arm64 tablet (CPU sleep state 1.3 ms to leave) the 16-bit format lost 0.3 to 0.9 % of its
+  slices at 40 Msps and 0.1 to 0.35 % at 80, every one a datagram the adapter missed, while
+  160 and 320 Msps, which keep the host awake, lost next to nothing. Any one CPU kept busy
+  cured it (10 slices of 389,000). `w1700k-stream` therefore asks the kernel to keep the CPUs
+  out of deep idle for as long as datagrams arrive, through `/dev/cpu_dma_latency`, which `link`
+  gives to the user who ran it. With the interrupt moved but without that request: 0.25 % at
+  40 Msps, 0.006 % at 80. With it: none of 1.17 million slices at 40 Msps, none of 2.34 million
+  at 80, and `make sweep` 30 of 30 with none lost. `link` had not moved the interrupt on that
+  host before: a USB controller that is no PCI device shows none in sysfs, and it is now looked
+  up in `/proc/interrupts`. At 320 Msps that took the loss from 0.002 % to 2 slices of 18.8
+  million in two minutes.
 - **What is left** is the host: that one CPU is about 90 % busy with the adapter alone at
   320 Msps, on a machine whose eight cores were all occupied and clocked down to 1.7 GHz by its
   13 W power limit. At 160 Msps and below nothing was lost.
@@ -110,6 +124,8 @@ All three matter with this adapter:
   locked in the morning, is the likely candidate). Every core was 87 to 93 % busy at 2.09 GHz
   throughout (the spectrum server 303 % of a CPU, the stream service 257 %).
 
-Two things not to do while a stream is arriving: change the driver's ring (`ethtool -G`), which
-left the adapter receiving nothing until the interface was taken down and up; and expect the
+Two things not to do while a stream is arriving: change the driver's ring (`ethtool -G`) or its
+receive timer (`ethtool -C`), either of which left the adapter receiving nothing until the
+interface was taken down and up (shortening that timer from 15 us to 1 us changed nothing in any
+case); and expect the
 link back within a second after a unit reboot (it takes the 18 s above).

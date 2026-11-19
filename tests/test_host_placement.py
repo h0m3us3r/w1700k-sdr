@@ -4,6 +4,7 @@
 queue is found from sysfs and procfs, here over made-up trees, and the process keeps off it."""
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,32 @@ class Placement(unittest.TestCase):
         self.interrupt(126, '2')
         self.assertEqual(self.cpu('enx0'), 7)
 
+    def platform_adapter(self):
+        """An adapter on bus 2 of a USB controller that is a platform device: no interrupt in sysfs."""
+        controller = 'platform/soc@0/a600000.usb/xhci-hcd.2.auto'
+        self.interface('enx1', f'{controller}/usb2/2-1/2-1.1/2-1.1:1.0')
+        (self.sys / 'devices' / controller / 'usb1').mkdir()
+        self.interrupt(283, '7')
+        self.interrupt(284, '2')
+
+    def test_a_platform_usb_controllers_interrupt_is_found_by_its_bus(self):
+        self.platform_adapter()
+        (self.proc / 'interrupts').write_text(
+            '            CPU0       CPU1\n'
+            ' 21:          5          0  GICv3  21 Level     usb11-phy\n'
+            '284:          5          0  GICv3 164 Level     dwc3-otg, other:usb21\n'
+            '283:  511885689          0  GICv3 165 Level     xhci-hcd:usb1\n')
+        self.assertEqual(self.cpu('enx1'), 7, 'listed under the controller\'s other bus')
+        (self.proc / 'interrupts').write_text('283:  1  0  GICv3 165 Level  ehci:usb3, xhci-hcd:usb2, more\n'
+                                              '284:  1  0  GICv3 166 Level  xhci-hcd:usb1\n')
+        self.assertEqual(self.cpu('enx1'), 7, 'its own bus first, and one of several on a shared line')
+
+    def test_a_platform_usb_controller_that_lists_none(self):
+        self.platform_adapter()
+        self.assertEqual(self.cpu('enx1'), -1, 'no /proc/interrupts at all')
+        (self.proc / 'interrupts').write_text('283:  1  0  GICv3 165 Level  xhci-hcd:usb3\n')
+        self.assertEqual(self.cpu('enx1'), -1)
+
     def test_an_interface_with_several_queues_is_left_alone(self):
         self.interface('eth0', 'pci0000:00/0000:01:00.0', queues=4)
         (self.sys / 'devices' / 'pci0000:00' / '0000:01:00.0' / 'msi_irqs' / '40').mkdir(parents=True)
@@ -91,6 +118,45 @@ class Placement(unittest.TestCase):
         self.assertEqual([int(c) for c in out.split()], allowed[:-1], 'off it, back on all, off it again')
         out = subprocess.run([self.tool, 'off', '4000'], capture_output=True, text=True, check=True).stdout
         self.assertEqual([int(c) for c in out.split()], allowed, 'a CPU it does not have changes nothing')
+
+
+class Awake(unittest.TestCase):
+    """host/stream/src/awake.cpp: the kernel is asked to keep the CPUs out of deep idle while a
+    stream arrives, through a file that is here an ordinary one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tool = os.path.join(cls.tmp.name, 'awake_check')
+        source = ROOT / 'host' / 'stream' / 'src'
+        subprocess.run([CXX, '-std=c++17', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', f'-I{source}',
+                        str(ROOT / 'tests' / 'awake_check.cpp'), str(source / 'awake.cpp'), '-o', cls.tool],
+                       check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    IDLE, HELD, REFUSED = 0, 1, 2
+
+    def steps(self, device):
+        run = subprocess.run([self.tool, str(device)], capture_output=True, text=True, check=True)
+        return run.stdout.split(), run.stderr
+
+    def test_the_request_is_100_microseconds_held_until_let_go(self):
+        device = Path(self.tmp.name, 'cpu_dma_latency')
+        device.write_bytes(b'')
+        steps, said = self.steps(device)
+        self.assertEqual(steps, [str(self.IDLE), f'1:{self.HELD}', str(self.HELD), str(self.IDLE), str(self.HELD)])
+        self.assertEqual(device.read_bytes(), (100).to_bytes(4, sys.byteorder), 'as the kernel reads it: an s32')
+        self.assertEqual(said, '')
+
+    def test_a_refusal_is_said_once_and_not_asked_again_until_let_go(self):
+        steps, said = self.steps(Path(self.tmp.name, 'none', 'cpu_dma_latency'))
+        self.assertEqual(steps, [str(self.IDLE), f'0:{self.REFUSED}', str(self.REFUSED), str(self.IDLE),
+                                 str(self.REFUSED)])
+        self.assertEqual(said.count('not kept out of deep idle'), 1)
+        self.assertIn('init/host/link keep', said)
 
 
 if __name__ == '__main__':

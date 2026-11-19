@@ -210,6 +210,26 @@ class HostBench(unittest.TestCase):
             self.assertEqual(self.bench.receive_placement('none', str(sys_root), str(proc_root)),
                              {'queues': 0, 'irq': None, 'irq_cpu': None, 'steering': None})
 
+    def test_where_a_platform_usb_controllers_packets_land(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sys_root, proc_root = Path(tmp, 'sys'), Path(tmp, 'proc')
+            controller = sys_root / 'devices' / 'platform' / 'soc@0' / 'a600000.usb' / 'xhci-hcd.2.auto'
+            (controller / 'usb2' / '2-1' / '2-1.1' / '2-1.1:1.0').mkdir(parents=True)
+            (controller / 'usb1').mkdir()
+            net = sys_root / 'class' / 'net' / 'enx1'
+            (net / 'queues' / 'rx-0').mkdir(parents=True)
+            (net / 'device').symlink_to(controller / 'usb2' / '2-1' / '2-1.1' / '2-1.1:1.0')
+            (proc_root / 'irq' / '283').mkdir(parents=True)
+            (proc_root / 'irq' / '283' / 'effective_affinity_list').write_text('7\n')
+            nothing = {'queues': 1, 'irq': None, 'irq_cpu': None, 'steering': None}
+            self.assertEqual(self.bench.receive_placement('enx1', str(sys_root), str(proc_root)), nothing)
+            (proc_root / 'interrupts').write_text('            CPU0       CPU1\n'
+                                                  ' 21:          5          0  GICv3  21 Level     xhci-hcd:usb21\n'
+                                                  '283:  511885689          0  GICv3 165 Level     xhci-hcd:usb1\n')
+            self.assertEqual(self.bench.receive_placement('enx1', str(sys_root), str(proc_root)),
+                             {'queues': 1, 'irq': 283, 'irq_cpu': '7', 'steering': None},
+                             'no interrupt in sysfs: the one listed under a bus of the controller')
+
     def test_the_report_in_words(self):
         samples = [self.sample(), self.sample(lost=4, missed=2), self.sample(slices=0)]
         flowing = samples[:2]
