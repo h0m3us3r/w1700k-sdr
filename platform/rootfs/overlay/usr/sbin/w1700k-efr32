@@ -6,6 +6,7 @@
 #   w1700k-efr32 status          whether it runs now, and what every start-up does with it
 #   w1700k-efr32 on [--keep]     let it run; with --keep, at every start-up from now on too
 #   w1700k-efr32 off [--keep]    hold it in reset; with --keep, at every start-up too
+#   w1700k-efr32 link [--baud N] its serial port on standard input and output, byte for byte
 #
 # The radio has no power switch that is known: off is its reset line held low (w1700k-efr32-line).
 # The loader holds it so at the start of every boot, before any root runs, and lets it go again
@@ -22,18 +23,28 @@
 # The radio is the W1700K's. On a board the loader named anything else (the XR1710G has no such
 # chip) the line tool does nothing and says so, and so does this, whatever it was asked.
 #
-# `status` prints two lines: `efr32=on|off`, the reset line as it reads now, and
-# `start=on|off|unheld`, what start-up does (`unheld`: the loader of this boot does not hold it).
-# Nothing here talks to the radio or changes its firmware; on only ends its reset.
+# `status` prints three lines: `efr32=on|off`, the reset line as it reads now;
+# `start=on|off|unheld`, what start-up does (`unheld`: the loader of this boot does not hold it);
+# and `port=on|off`, whether the radio's serial port is there.
+#
+# The port (the SoC's second UART) is disabled in the device tree as built, and the
+# loader enables it at a boot where the switch says on. So talking to the radio takes
+# `on --keep` and a restart; `on` alone runs the radio with nobody able to reach it. `link` is
+# the port for a host: `ssh root@unit w1700k-efr32 link` (w1700k-port-link), 8N1 without flow
+# control at 115200 baud, the factory firmware's speed, or at 230400 or 460800. Nothing here
+# speaks to the radio itself or changes its firmware.
 set -eu
 LINE=${W1700K_EFR32_LINE:-/usr/sbin/w1700k-efr32-line}
 CMDLINE=${W1700K_EFR32_CMDLINE:-/proc/cmdline}
 RUN=${W1700K_EFR32_RUN:-/run/w1700k-efr32}
 DURABLE_RUN=${W1700K_EFR32_DURABLE_RUN:-/usr/sbin/durable-run}
 SWITCH_DIR=${W1700K_EFR32_DIR:-/durable/efr32}
+LINK=${W1700K_EFR32_LINK:-/usr/sbin/w1700k-port-link}
+PORT=${W1700K_EFR32_PORT:-/dev/ttyS1}
+PORT_STATUS=${W1700K_EFR32_PORT_STATUS:-/proc/device-tree/soc/serial@1fbf0300/status}
 
 fail() { echo "w1700k-efr32: $*" >&2; exit 1; }
-usage() { echo "usage: w1700k-efr32 status | on [--keep] | off [--keep]" >&2; exit 2; }
+usage() { echo "usage: w1700k-efr32 status | on [--keep] | off [--keep] | link [--baud N]" >&2; exit 2; }
 
 # What the loader of this boot did with the switch: on, off, or unheld when it said nothing.
 loader()
@@ -59,6 +70,12 @@ start()
 	fi
 }
 
+# Whether the radio's port is there: the device tree this boot was handed says so.
+port()
+{
+	if [ -r "$PORT_STATUS" ] && [ "$(tr -d '\000' < "$PORT_STATUS")" = okay ]; then echo on; else echo off; fi
+}
+
 keep()
 {
 	written=$("$DURABLE_RUN" sh -c '
@@ -80,6 +97,24 @@ status)
 	[ "$#" -eq 1 ] || usage
 	"$LINE" status
 	echo "start=$(start)"
+	echo "port=$(port)"
+	;;
+link)
+	shift
+	case $# in
+	0) baud=115200 ;;
+	2) [ "$1" = --baud ] || usage; baud=$2 ;;
+	*) usage ;;
+	esac
+	case $baud in
+	115200 | 230400 | 460800) ;;
+	*) fail "$baud baud is not one the radio's port reaches (115200, 230400, 460800)" ;;
+	esac
+	state=$("$LINE" status)
+	[ "$state" = efr32=on ] || fail "the radio is held in reset: nothing would answer (w1700k-efr32 on)"
+	[ "$(port)" = on ] ||
+		fail "the radio's port is not there: the loader enables it where the radio is kept on (w1700k-efr32 on --keep, then restart)"
+	exec "$LINK" --port "$PORT" --baud "$baud"
 	;;
 on | off)
 	case $# in

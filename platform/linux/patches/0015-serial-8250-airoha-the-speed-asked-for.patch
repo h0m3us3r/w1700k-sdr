@@ -1,0 +1,101 @@
+SPDX-License-Identifier: GPL-2.0-only
+Subject: [PATCH] serial: 8250: airoha: the speed asked for, on both kinds of port
+
+The Airoha UART's speed is set by its own registers (XINCLKDR, XYD) with the
+16550's divisor latch at 1, and en7523_set_uart_baud_rate() writes all three.
+serial8250_do_set_termios() then wrote the latch again, with the divisor it
+had worked out from the port's clock-frequency. The SoC include gives UART2
+and the high-speed UART 7372800 there, so that 460800 can be asked for, and
+the divisor is then 460800 over the speed: UART2 ran at half of 230400 and
+at a quarter of 115200, and was right only at 460800. [measured on a W1700K:
+the EFR32 on UART2, whose firmware talks 115200, answered only when 230400
+was asked for.] Leave the latch at 1 on these ports.
+
+The high-speed UART's divider has twice the clock of the others, so every
+speed came out doubled there: the W1700K's GPS receiver, which sends at
+921600, was read by asking for 460800. Name that port by its own compatible,
+"airoha,an7581-hsuart", and halve x for it. A board gives it a
+clock-frequency of 14745600 for 921600 to be allowed.
+
+Both follow the driver proposed for mainline ("serial: 8250: Add Airoha SoC
+UART and HSUART support", v2, July 2026): its get_divisor() returns 1 and it
+halves x on the HSUART. Its 128-byte FIFO for that port is not taken here:
+nothing of ours has measured it.
+
+[measured on a W1700K with this patch, by timing transmissions of two
+lengths: 115200, 230400 and 460800 on UART2 and 115200, 460800 and 921600 on
+the high-speed UART are each within 1 % of what was asked; the EFR32 answers
+at 115200 asked and at no other speed, and the GPS receiver is read at
+921600 asked and at no other.]
+
+--- a/drivers/tty/serial/8250/8250_en7523.c
++++ b/drivers/tty/serial/8250/8250_en7523.c
+@@ -13,6 +13,7 @@
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
++#include <linux/property.h>
+ #include <linux/serial_8250.h>
+ #include <linux/serial_reg.h>
+ #include <linux/console.h>
+@@ -46,6 +47,13 @@
+  * the space takes time and in practise only a few rates are of interest.
+  * With some value combinations not working a tested subset is used giving
+  * a usable range from 110 to 460800 baud.
++ *
++ * The high-speed UART ("airoha,an7581-hsuart") is the same but for its
++ * clock, which is twice the others': the same registers give twice the
++ * speed there, so x is halved for it.
++ *
++ * [BRDH,BRDL] is the 16550's divisor latch, and the rest of the 8250 code
++ * must leave it at 1 (see serial8250_do_set_termios()).
+  */
+ 
+ #define CLOCK_DIV_TAB_ELEMS 3
+@@ -61,6 +69,7 @@
+ int en7523_set_uart_baud_rate (struct uart_port *port, unsigned int baud)
+ {
+ 	struct uart_8250_port *up = up_to_u8250p(port);
++	bool hs = port->dev && device_is_compatible(port->dev, "airoha,an7581-hsuart");
+ 	unsigned int xyd_x, nom, denom;
+ 	int i;
+ 
+@@ -79,6 +88,8 @@
+ 		denom = (XINDIV_CLOCK/40) / clock_div_tab[i];
+ 		nom = (baud * (XYD_Y/40));
+ 		xyd_x = ((nom/denom) << 4);
++		if (hs)
++			xyd_x >>= 1;
+ 		if (xyd_x < XYD_Y) break;
+ 	}
+ 	if (i >= CLOCK_DIV_TAB_ELEMS)
+--- a/drivers/tty/serial/8250/8250_of.c
++++ b/drivers/tty/serial/8250/8250_of.c
+@@ -391,6 +391,7 @@
+ 	{ .compatible = "nuvoton,wpcm450-uart", .data = (void *)PORT_NPCM, },
+ 	{ .compatible = "nuvoton,npcm750-uart", .data = (void *)PORT_NPCM, },
+ 	{ .compatible = "airoha,en7523-uart", .data = (void *)PORT_AIROHA, },
++	{ .compatible = "airoha,an7581-hsuart", .data = (void *)PORT_AIROHA, },
+ 	{ /* end of list */ },
+ };
+ MODULE_DEVICE_TABLE(of, of_platform_serial_table);
+--- a/drivers/tty/serial/8250/8250_port.c
++++ b/drivers/tty/serial/8250/8250_port.c
+@@ -2785,8 +2785,16 @@
+ 
+ #ifdef CONFIG_SERIAL_8250_AIROHA
+ 	/* Airoha SoCs have custom registers for baud rate settings */
+-	if (port->type == PORT_AIROHA)
++	if (port->type == PORT_AIROHA) {
+ 		en7523_set_uart_baud_rate(port, baud);
++		/*
++		 * The speed set there is with the divisor latch at 1. The
++		 * divisor worked out above from the port's nominal clock
++		 * would divide it again: half the speed asked for at 230400
++		 * and a quarter at 115200, where that clock allows 460800.
++		 */
++		quot = 1;
++	}
+ #endif
+ 
+ 	/*

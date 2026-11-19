@@ -291,7 +291,7 @@ on the XR1710G that line is a port LED.
 
 The W1700K carries an Airoha AG3352 GNSS receiver, which the stock firmware
 used to report where the unit is for 6 GHz power control. Nothing of ours
-uses it, and it is held off.
+uses it, and it is off unless the unit's owner turns it on.
 
 - **Its power** is line 43 of the pin controller, high for on. The board pulls
   the line high, so left alone the receiver runs from power-on and sends a
@@ -301,19 +301,65 @@ uses it, and it is held off.
   line 43 an output and then sets it low, in that order, since a level written
   to a line that is not yet an output is lost on this chip. So every root has
   the receiver off without having to remember to.
-- **`w1700k-gps on`, `off` and `status`**, in the root, drive and read the same
-  line. `on` lasts until the unit next starts. On a board the loader names as
-  one without a receiver (the XR1710G) it does nothing, and says so.
-- **Its data** comes out of the SoC's high-speed UART (`serial@1fbe1000`, pin
-  group `hsuart`), which is disabled in our device tree: no program can open
-  it. Where a unit is stays with its owner.
+- **An owner's switch that stays** turns it on: `gps/switch` in durable
+  storage, which the loader reads after it has switched the receiver off
+  (`gps_pass`) and, where it says `gps_keep=on` on a unit it has named a
+  W1700K, drives the line high again. It tells Linux which it did,
+  `w1700k.gps=on` or `off` on the kernel command line.
+- **`w1700k-gps status`, `on` and `off`**, in the root: `status` says whether
+  it runs now (`gps=`), what start-up does (`start=`) and whether its port is
+  there (`port=`); `on` and `off` drive the same line (`w1700k-gps-line`) and
+  last until the unit next starts, and with `--keep` write the switch too. On
+  a board the loader names as one without a receiver (the XR1710G) it does
+  nothing, and says so. A unit whose loader is older than this reads no
+  switch: its receiver is off at every start-up whatever is kept.
+- **Its port** is the SoC's high-speed UART (`serial@1fbe1000`, pin group
+  `hsuart`, `/dev/ttyS2`). It is disabled in the device tree as built, as the
+  radio's is, and the loader enables it in the tree it hands over
+  (`gps_give`, in `system_start`) at a boot where the owner's switch says on,
+  and at no other: hearing the receiver takes `w1700k-gps on --keep` and a
+  restart.
+- **`w1700k-gps link`** is that port on standard input and output, byte for
+  byte (`w1700k-port-link`), for a host to run over ssh; the host's
+  `w1700k gps check` and `w1700k gps pty` are built on it
+  ([`host/w1700k`](../host/w1700k/README.md#the-gps-receiver)), and the pty is
+  what gpsd, pygpsclient or any program that reads a serial GPS opens. The
+  port is 8N1 without flow control at 921600 baud, the receiver's speed, or
+  at 115200, 230400 or 460800 for a receiver its owner has told to use
+  another.
+- **Where a unit is stays with its owner.** Nothing on the unit reads what the
+  receiver says, stores it or uses it, and it leaves the unit only through
+  the owner's own ssh session. It is not a trust input: nothing a unit
+  accepts is judged by GPS time or place.
 
-What is known of it, for when it is taken up
-([the roadmap](../docs/roadmap.md)): it talks NMEA at 460800 baud, though the
-stock firmware's own settings say 921600; the kernel's driver for the port
-reads 460800 as it is and reaches no higher. Seen on a unit indoors: a 3D fix
-from four constellations, a position a second, its time equal to the host's
-to the second. Stock's line 14 ("notify") is not driven.
+Seen on a unit (hardware 2.1): the receiver sends NMEA 0183 at 921600 baud,
+as the stock firmware's settings say (GGA, GLL, GSA, GSV for four
+constellations, RMC, VTG, ZDA, GST and Airoha's own EPE and `PAIR` lines), a
+position a second, a 3D fix indoors about a minute after a restart, its
+time equal to the host's to the second. Asked for 460800 or 230400 the port
+reads nothing that is a sentence. Stock's line 14 ("notify") is not driven.
+
+#### The speed of these two ports
+
+The kernel's driver for the Airoha UARTs, as OpenWrt carries it, did not give
+either port the speed it was asked for, and our patch 0015 is what makes the
+speeds above true:
+
+- **The second UART** (the radio's) ran at half of 230400 and a quarter of
+  115200, and was right only at 460800. The driver sets the port's own speed
+  registers with the 16550's divisor latch at 1, and the generic 8250 code
+  then wrote the latch again with a divisor worked out from the port's
+  nominal clock. On these ports the latch now stays at 1.
+- **The high-speed UART** (the receiver's) ran at twice what was asked: its
+  divider has twice the clock of the others'. The board's tree names it by
+  its own compatible (`airoha,an7581-hsuart`) and the driver halves for it.
+
+Both are what the driver proposed for mainline Linux does. Measured on a unit
+with the patch, by timing transmissions of two lengths: 115200, 230400 and
+460800 on the radio's port and 115200, 460800 and 921600 on the receiver's
+each come out within 1 % of what was asked, which is what the timing
+resolves; the radio's factory firmware answers when 115200 is asked for and
+at no other speed, and the receiver is read at 921600 and at no other.
 
 ### The low-power radio
 
@@ -346,14 +392,24 @@ Nothing of ours uses it either, and it is held in reset.
   line: it makes it an input again and the chip's pull-up ends the reset. A
   unit whose loader is older than this holds nothing (`start=unheld`): its
   radio runs from power-on until `off` is said.
-- **Its port** is the SoC's second UART (`serial@1fbf0300`, pin group `uart2`),
-  disabled in our device tree: no program can talk to it, and nothing here
-  changes its firmware.
+- **Its port** is the SoC's second UART (`serial@1fbf0300`, pin group `uart2`,
+  `/dev/ttyS1`). It is disabled in the device tree as built, so by default its
+  pads stay plain GPIO and no program can talk to the radio. The loader
+  enables it in the tree it hands over (`efr32_give`, in `system_start`) at a
+  boot where the owner's switch says on, and at no other: talking to the radio
+  takes `w1700k-efr32 on --keep` and a restart. `status` says `port=on` then.
+- **`w1700k-efr32 link`** is that port on standard input and output, byte for
+  byte (`w1700k-port-link`), for a host to run over ssh; the host's
+  `w1700k efr32 identify` and `w1700k efr32 pty` are built on it
+  ([`host/w1700k`](../host/w1700k/README.md#the-low-power-radio)). The port is
+  8N1 without flow control at 115200 baud, the factory firmware's speed, or at
+  230400 or 460800 ([the speed of these two
+  ports](#the-speed-of-these-two-ports)). Nothing on the unit speaks the
+  radio's protocol, and nothing here changes its firmware.
 
-Seen on a unit (hardware 2.1), with the port enabled in a build made for the
-purpose and booted from RAM: the chip runs a Silicon Labs Bluetooth
-co-processor (BGAPI, stack 6.2.0 build 212) at 115200 baud, which the kernel's
-driver gives on this port when asked for 230400; it says nothing until spoken
+Seen on a unit (hardware 2.1), first with the port enabled in a build made for
+the purpose and booted from RAM: the chip runs a Silicon Labs Bluetooth
+co-processor (BGAPI, stack 6.2.0 build 212) at 115200 baud; it says nothing until spoken
 to, answers `system_hello`, and announces itself after every reset, which is
 how line 24 is known to be its reset. With line 25 held low across a reset it
 starts its bootloader instead (Gecko bootloader 2.3.2), so line 25 is the

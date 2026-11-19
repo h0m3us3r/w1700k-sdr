@@ -17,7 +17,7 @@
  * environment; w1700k-efr32 is what the owner uses, and calls this).
  *
  * `off` drives the line low and lets it go; this pin controller leaves a line as it was last
- * driven when its holder lets go, which is what `off` relies on (as w1700k-gps does). `on` does
+ * driven when its holder lets go, which is what `off` relies on (as w1700k-gps-line does). `on` does
  * not drive it high: it makes the line an input again, as the board had it, and the chip's own
  * pull-up ends the reset. `status` reads the line as it is, without driving it.
  *

@@ -39,6 +39,20 @@
 &en7581_pinctrl {
 	gpio-ranges = <&en7581_pinctrl 0 13 50>;
 
+	uart2_pins: uart2-pins {
+		mux {
+			function = "uart";
+			groups = "uart2";
+		};
+	};
+
+	hsuart_pins: hsuart-pins {
+		mux {
+			function = "uart";
+			groups = "hsuart";
+		};
+	};
+
 	mdio_pins: mdio-pins {
 		mux {
 			function = "mdio";
@@ -146,6 +160,36 @@
 /* The ATF, NPU firmware and QDMA reservations of the SoC include stay; the
  * Wi-Fi-only NPU pools are left out. Auxiliary UARTs stay disabled.
  */
+
+/* The W1700K's low-power radio (an EFR32MG21) is on UART2. As built the port is disabled, so
+ * that its pads stay plain GPIO and no program can open it; the loader enables it in the tree
+ * it hands over, on a W1700K whose owner keeps the radio on (`efr32_give` in its environment).
+ */
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2_pins>;
+};
+
+/* The W1700K's GPS receiver (an AG3352) is on the high-speed UART. As built the port is
+ * disabled, as the radio's is, and the loader enables it in the tree it hands over only at a
+ * boot where the unit's owner keeps the receiver on (platform/loader: gps_pass, gps_give).
+ * The high-speed UART's divider has twice the clock of the others (patches/0015 goes by the
+ * compatible), and 14745600 is what lets 921600, the receiver's speed, be asked for. */
+&hsuart3 {
+	compatible = "airoha,an7581-hsuart", "airoha,en7523-uart";
+	clock-frequency = <14745600>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&hsuart_pins>;
+};
+
+/* So that the radio's port is /dev/ttyS1 and the receiver's /dev/ttyS2 wherever they are
+ * there, whatever else is enabled. */
+/ {
+	aliases {
+		serial1 = &uart2;
+		serial2 = &hsuart3;
+	};
+};
 &snfi {
 	status = "okay";
 };

@@ -54,8 +54,9 @@
 
 /* UART1 (AN7581_UART1_BASE), Linux ttyS0, 115200 8N1, on the dedicated
  * uart1_txd/uart1_rxd pads. The reference board tree also enables UART2 (the
- * low-power radio, below) and HSUART3 (the GPS receiver, platform/README.md);
- * ours leaves both disabled. */
+ * low-power radio, below) and HSUART3 (the GPS receiver, 921600 8N1 [measured],
+ * platform/README.md); ours leaves both disabled as built, and the loader
+ * enables each at a boot where the unit's owner keeps what is on it switched on. */
 #define W1700K_CONSOLE_BAUD             115200u
 
 /* ======================================================================== */
@@ -66,8 +67,8 @@
  * photograph]; Bluetooth LE and 802.15.4, 10 dBm, a printed antenna of its
  * own. On UART2 (AN7581 `serial@1fbf0300`, pads gpio35 and gpio42), no flow
  * control, 115200 8N1. [measured, one unit, hardware 2.1: a BGAPI Bluetooth
- * NCP, stack 6.2.0 build 212, answers there; the kernel's Airoha 8250 driver
- * gives 115200 on this port when asked for 230400.] */
+ * NCP, stack 6.2.0 build 212, answers there. Before our kernel patch 0015 the
+ * Airoha 8250 driver gave 115200 on this port only when asked for 230400.] */
 #define W1700K_EFR32_BAUD               115200u
 /* RESETn, low for reset; the chip pulls it high. [measured: a pulse brings its
  * boot event; held by the loader it stays silent through the kernel's start.] */

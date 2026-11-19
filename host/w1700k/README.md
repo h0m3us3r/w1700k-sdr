@@ -176,6 +176,87 @@ analog filter. Defaults, all set by every load:
 - Nothing transmits: our firmware runs no transmit calibration and keeps the MAC's transmit
   path disabled.
 
+## The low-power radio
+
+The W1700K carries a second radio, a Silicon Labs EFR32MG21 for Bluetooth LE
+and Zigbee/Thread, which the unit holds in reset unless its owner turns it on
+([`platform`](../../platform/README.md#the-low-power-radio); a guide to it and
+the GPS receiver: [docs/ble-zigbee-and-gps.md](../../docs/ble-zigbee-and-gps.md)). `w1700k efr32`
+is that radio from the host. It involves no receiver state and starts no
+controller.
+
+| | |
+|---|---|
+| `efr32 status` | whether it runs (`efr32`), what start-up does (`start`), whether its port is there (`port`) |
+| `efr32 on [--keep]`, `efr32 off [--keep]` | let it run or hold it in reset, until the unit next starts; with `--keep`, at every start-up too |
+| `efr32 identify` | ask the radio what firmware it runs |
+| `efr32 pty [--baud N] [--name PATH]` | its serial port as a terminal device on this host, until stopped |
+
+The port is there only at a boot where the radio is kept on, so the first time
+is `w1700k efr32 on --keep`, a restart of the unit, then `identify`:
+
+```
+$ host/bin/w1700k efr32 identify
+{"firmware": "bgapi", "stack": "6.2.0", "build": 212, ...}
+```
+
+- **`identify`** sends the two commands of Silicon Labs' BGAPI that every
+  Bluetooth co-processor image answers and that make it do nothing else
+  (`system_hello`, `system_get_version`). The factory firmware is such an
+  image. Other firmware will not answer, and that is said.
+- **`pty`** prints a device path (`/dev/pts/N`) and stays: that device is the
+  radio's port, at 115200 baud (the factory firmware's), 230400 or 460800, 8N1
+  without flow control, carried over ssh. Point a Bluetooth host stack, a
+  flasher or a terminal at it. The link adds a few milliseconds each way.
+  With `--name PATH` it makes a link to the device at that path for as long as
+  it runs and prints that instead: a name that stays the same from run to run.
+- **What goes through the port is the user's doing.** A host that tells the
+  radio to advertise, scan or connect makes the unit transmit at 2.4 GHz, up to
+  10 dBm, beside its own 2.4 GHz antennas. Nothing here does that.
+
+## The GPS receiver
+
+The W1700K carries a GPS receiver (an Airoha AG3352), which the unit keeps
+switched off unless its owner turns it on
+([`platform`](../../platform/README.md#the-gps-receiver)). `w1700k gps` is
+that receiver from the host. It involves no receiver state of ours and starts
+no controller.
+
+| | |
+|---|---|
+| `gps status` | whether it runs (`gps`), what start-up does (`start`), whether its port is there (`port`) |
+| `gps on [--keep]`, `gps off [--keep]` | switch it on or off, until the unit next starts; with `--keep`, at every start-up too |
+| `gps check [--seconds N]` | listen: does it talk, and has it a fix |
+| `gps pty [--baud N] [--name PATH]` | its serial port as a terminal device on this host, until stopped |
+
+The port is there only at a boot where the receiver is kept on, so the first
+time is `w1700k gps on --keep`, a restart of the unit, then `check`:
+
+```
+$ host/bin/w1700k gps check
+{"sentences": {"GGA": 3, "GSA": 12, "GSV": 16, "RMC": 3, ...}, "bad": 0, "fix": "3d", "satellites": 7}
+```
+
+- **`check`** reads what the receiver sends for a few seconds and says what
+  kinds of sentence came, how many lines were not sentences, whether there is
+  a fix and from how many satellites. It never says where: the position is
+  not looked at. It writes nothing to the receiver.
+- **`pty`** prints a device path and stays: that device is the receiver's
+  port, NMEA 0183 at 921600 baud, carried over ssh, and what is written to it
+  goes to the receiver. Any program that reads a serial GPS opens it as one.
+  With `--name PATH` the device has a name that stays:
+
+  ```
+  $ host/bin/w1700k gps pty --name ~/w1700k-gps &
+  $ gpsd -N -n ~/w1700k-gps           # or: pygpsclient, with ~/w1700k-gps as its user-defined port
+  ```
+
+  Seen with PyGPSClient, the name as its user-defined port at 921600: a 3D
+  fix and every sentence parsed. gpsd has not been run against it.
+- **Where the unit is, is its owner's to know.** Nothing in this package or on
+  the unit stores or uses what the receiver says; it goes where the owner's
+  programs take it.
+
 ## `w1700k serve`
 
 One JSON object per line on stdin; one reply per request `{"id":N,"ok":true,"state":STATE}` or

@@ -90,32 +90,35 @@ installation, the first loader and the kernel image.
 ### The low-power radio
 
 Decided: the EFR32MG21 (Bluetooth LE, Zigbee, Thread) is held in reset by the
-loader at every boot unless its owner's switch says on (`w1700k-efr32`,
-`platform/README.md`). Nothing talks to it. To take up later:
+loader at every boot unless its owner's switch says on, and its serial port is
+there only then; `w1700k-efr32 link` hands that port to a host over ssh
+(`platform/README.md`, `host/w1700k/README.md`). Nothing on the unit speaks to
+it. To take up later:
 
-- **Its port.** The second UART enabled in the device tree, and the driver's
-  baud rate settled (on this port it gives half of what is asked: 230400 for
-  the chip's 115200).
-- **The link handed to the host.** A raw pass-through over ssh, so that the
-  host runs whichever stack it likes (a Bluetooth co-processor host, an
-  OpenThread border router, a Zigbee coordinator) and the unit stays small.
+- **A stack on the unit.** With the factory firmware (a Bluetooth co-processor
+  that takes commands over the port) a small client on the unit could scan or
+  advertise without anything else installed. A standard Bluetooth host, a
+  Thread border router or a Zigbee coordinator on the unit needs other firmware
+  in the radio and far more in the root (shared libraries, IPv6, a message
+  bus); on the host they need only the link.
 - **Other firmware in it**, which is what Thread, Zigbee or a standard
   Bluetooth controller would need. The factory image cannot be read back over
   the port, only through the debug header on the board: it is saved first.
-  Any of it makes the chip transmit, which is its owner's decision.
+- **Transmitting.** Anything that makes the radio advertise, scan actively or
+  connect transmits at 2.4 GHz beside the unit's own 2.4 GHz antennas: its
+  owner's decision each time, and the 2.4 GHz band's captures will show it.
 
 ### The GPS receiver
 
-Decided and deferred: the receiver is off by default, switched off by the
-loader at every boot, and `w1700k-gps on` runs it until the next start
-(`platform/README.md`). Nothing reads it. To take up later:
+Decided: the receiver is off by default, switched off by the loader at every
+boot unless its owner's switch says on, and its serial port is there only
+then; `w1700k-gps link` hands that port to a host over ssh, where
+`w1700k gps pty` makes it a device for gpsd, pygpsclient or any program that
+reads a serial GPS (`platform/README.md`, `host/w1700k/README.md`). Nothing
+on the unit reads it. To take up later:
 
-- **An owner's switch that stays.** A setting in the unit's durable storage,
-  read by the loader like its others, for a receiver that is on from boot.
-- **Reading it.** The port enabled in the device tree, and a small reader on
-  the unit. The driver should take both speeds, the 460800 the receiver uses
-  and the 921600 the stock settings name, so that neither number is a guess;
-  today it reaches 460800 and no higher.
+- **A reader on the unit**, for a unit that should know its own place or time
+  without a host attached.
 - **What it is for.** Telling the units of a fleet apart and saying where each
   is; handing position and time to the host with the samples; time-stamping
   captures. There is no pulse-per-second line to the SoC that we know of.

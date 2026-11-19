@@ -111,6 +111,29 @@ without a console ([the paperclip key](init/README.md#the-paperclip-key)):
 hold it and the LED shows what letting go would do, five seconds to switch
 the key off or on, ten for a new key (`init/key`), fifteen to erase it.
 
+## Bluetooth/Zigbee radio and GPS receiver
+
+The W1700K also carries a Silicon Labs EFR32MG21 (Bluetooth LE, Zigbee,
+Thread) and an Airoha AG3352 GPS receiver. Both are off at every start-up
+unless you turn them on, and nothing on the unit uses them. Turned on, each
+one's serial port is handed to your host over ssh, where it is a serial
+device for gpsd, pygpsclient, a Bluetooth host stack or a flasher
+(details in [docs/ble-zigbee-and-gps.md](docs/ble-zigbee-and-gps.md)).
+
+```sh
+host/bin/w1700k gps on --keep                   # then restart the unit: the port comes with the next start
+host/bin/w1700k gps check                       # does it talk, has it a fix (never where)
+host/bin/w1700k gps pty --name ~/w1700k-gps     # the receiver as a serial device, until stopped
+
+host/bin/w1700k efr32 on --keep                 # the radio, the same way
+host/bin/w1700k efr32 identify                  # what firmware it runs
+host/bin/w1700k efr32 pty --name ~/w1700k-efr32
+```
+
+Where the unit is, is yours to know: nothing reads or stores what the receiver
+says. What you send through the radio's port can make the unit transmit at
+2.4 GHz; nothing in this repository does.
+
 ## Screenshots
 
 ![The web UI at 2.4 GHz](docs/images/ui-2g4.png)
@@ -142,7 +165,7 @@ between them, in 1.22 kHz bins.*
 | [`host/soapy/`](host/soapy/README.md) | The SoapySDR module (`driver=w1700k`): the receiver in GNU Radio and other SoapySDR programs |
 | [`init/`](init/README.md) | Installation from stock, updates, recovery, return to stock |
 | [`include/hw/`](include/hw/README.md) | Register reference: every known MT7996, A-die and AN7581 register, as C headers |
-| [`docs/`](docs/) | [Architecture](docs/architecture.md), [the front LED](docs/led.md), [roadmap](docs/roadmap.md) |
+| [`docs/`](docs/) | [Architecture](docs/architecture.md), [the front LED](docs/led.md), [the Bluetooth/Zigbee radio and the GPS receiver](docs/ble-zigbee-and-gps.md), [roadmap](docs/roadmap.md) |
 | `tests/`, `tools/` | The test suite and its report page (`tools/test_report.py`), the on-unit sweep of the stream modes (`tools/unit_sweep.py`), a trial of the host's receive settings (`tools/host_rx_trial`), a benchmark of what the host takes in (`tools/host_bench.py`), and the driver and notes for a USB adapter on the stream link ([`tools/r8152-rtl8159`](tools/r8152-rtl8159/README.md)) |
 
 ## Getting started

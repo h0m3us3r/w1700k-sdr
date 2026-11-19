@@ -1,0 +1,136 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# The unit's GPS receiver (an Airoha AG3352), which is off unless its owner turns it on.
+#
+#   w1700k-gps status          whether it runs now, and what every start-up does with it
+#   w1700k-gps on [--keep]     let it run; with --keep, at every start-up from now on too
+#   w1700k-gps off [--keep]    switch it off; with --keep, at every start-up too
+#   w1700k-gps link [--baud N] its serial port on standard input and output, byte for byte
+#
+# The receiver's power is one line of the pin controller (w1700k-gps-line), and the board pulls
+# it on: left alone the receiver runs from power-on and sends where the unit is every second.
+# The loader switches it off at the start of every boot, before any root runs, and on again
+# only where the owner's switch says on. The switch is a file in durable storage, `gps/switch`,
+# in the form the loader imports:
+#
+#   gps_keep=on
+#
+# Linux opens durable storage only to change it. At every boot it is the loader that reads the
+# switch and says what it did on the kernel command line: `w1700k.gps=on|off`. A loader that
+# says nothing switches the receiver off and reads no switch: a switch kept now takes effect
+# once the unit has a loader that reads it.
+#
+# The receiver is the W1700K's. On a board the loader named as one without it (the XR1710G) the
+# line tool does nothing and says so, and so does this, whatever it was asked.
+#
+# `status` prints three lines: `gps=on|off`, the power line as it reads now; `start=on|off`,
+# what start-up does; and `port=on|off`, whether the receiver's serial port is there.
+#
+# The port (the SoC's high-speed UART) is disabled in the device tree as built, and the loader
+# enables it at a boot where the switch says on. So hearing the receiver takes `on --keep` and
+# a restart; `on` alone runs it with nobody able to hear it. `link` is the port for a host:
+# `ssh root@unit w1700k-gps link` (w1700k-port-link), 8N1 without flow control at 921600 baud,
+# the receiver's speed as the factory set it, or at 115200, 230400 or 460800 for a receiver
+# its owner has told to use another.
+#
+# What the receiver says is NMEA 0183: the position, the time, the satellites. Nothing on the
+# unit reads it, stores it or uses it; where a unit is stays with its owner, and goes only
+# where the owner's own ssh session takes it.
+set -eu
+LINE=${W1700K_GPS_LINE:-/usr/sbin/w1700k-gps-line}
+CMDLINE=${W1700K_GPS_CMDLINE:-/proc/cmdline}
+RUN=${W1700K_GPS_RUN:-/run/w1700k-gps}
+DURABLE_RUN=${W1700K_GPS_DURABLE_RUN:-/usr/sbin/durable-run}
+SWITCH_DIR=${W1700K_GPS_DIR:-/durable/gps}
+LINK=${W1700K_GPS_LINK:-/usr/sbin/w1700k-port-link}
+PORT=${W1700K_GPS_PORT:-/dev/ttyS2}
+PORT_STATUS=${W1700K_GPS_PORT_STATUS:-/proc/device-tree/soc/serial@1fbe1000/status}
+
+fail() { echo "w1700k-gps: $*" >&2; exit 1; }
+usage() { echo "usage: w1700k-gps status | on [--keep] | off [--keep] | link [--baud N]" >&2; exit 2; }
+
+# What the loader of this boot did with the switch: on or off, or unread when it said nothing.
+loader()
+{
+	said=unread
+	for word in $(cat "$CMDLINE"); do
+		case $word in
+		w1700k.gps=on | w1700k.gps=off) said=${word#*=} ;;
+		esac
+	done
+	echo "$said"
+}
+
+# What start-up does from now on: the switch as kept in this boot, else as the loader read it.
+# A loader that reads no switch switches the receiver off, whatever is kept.
+start()
+{
+	if [ "$(loader)" = unread ]; then
+		echo off
+	elif [ -r "$RUN" ]; then
+		cat "$RUN"
+	else
+		loader
+	fi
+}
+
+# Whether the receiver's port is there: the device tree this boot was handed says so.
+port()
+{
+	if [ -r "$PORT_STATUS" ] && [ "$(tr -d '\000' < "$PORT_STATUS")" = okay ]; then echo on; else echo off; fi
+}
+
+keep()
+{
+	written=$("$DURABLE_RUN" sh -c '
+		set -e
+		mkdir -p "$1"
+		printf "gps_keep=%s\n" "$2" > "$1/switch.part"
+		mv "$1/switch.part" "$1/switch"
+		echo "switch: written"' sh "$SWITCH_DIR" "$1" | sed -n 's/^switch: //p')
+	[ "$written" = written ] || fail "the switch could not be written: start-up stays as it was"
+	echo "$1" > "$RUN.part"
+	mv "$RUN.part" "$RUN"
+	[ "$(loader)" != unread ] ||
+		echo "w1700k-gps: kept, but this unit's loader does not read the switch yet: until it is updated the receiver is off at every start-up" >&2
+}
+
+verb=${1:-}
+case $verb in
+status)
+	[ "$#" -eq 1 ] || usage
+	"$LINE" status
+	echo "start=$(start)"
+	echo "port=$(port)"
+	;;
+link)
+	shift
+	case $# in
+	0) baud=921600 ;;
+	2) [ "$1" = --baud ] || usage; baud=$2 ;;
+	*) usage ;;
+	esac
+	case $baud in
+	115200 | 230400 | 460800 | 921600) ;;
+	*) fail "$baud baud is not one the receiver's port reaches (115200, 230400, 460800, 921600)" ;;
+	esac
+	state=$("$LINE" status)
+	[ "$state" = gps=on ] || fail "the receiver is switched off: nothing would be heard (w1700k-gps on)"
+	[ "$(port)" = on ] ||
+		fail "the receiver's port is not there: the loader enables it where the receiver is kept on (w1700k-gps on --keep, then restart)"
+	exec "$LINK" --port "$PORT" --baud "$baud"
+	;;
+on | off)
+	case $# in
+	1) kept=0 ;;
+	2) [ "$2" = --keep ] || usage; kept=1 ;;
+	*) usage ;;
+	esac
+	"$LINE" "$verb"
+	[ "$kept" = 0 ] || keep "$verb"
+	echo "start=$(start)"
+	;;
+*)
+	usage
+	;;
+esac
