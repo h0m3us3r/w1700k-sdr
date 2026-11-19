@@ -271,11 +271,6 @@ class Streaming(ControllerTest):
         self.assertEqual((state['rf']['agc'], state['rf']['lna'], state['rf']['lpf']), (False, 3, 6))
         self.ctl.tune(5_500_000_000)                        # the LO moves under it, as under any stream
         self.assertTrue(self.dev.streaming)
-        with self.assertRaisesRegex(ControlError, 'two-channel stream is running'):
-            self.ctl.configure(1, sample_rate=40_000_000)
-        with self.assertRaisesRegex(ControlError, 'two-channel stream is running'):
-            self.ctl.configure(2)
-        self.assertTrue(self.dev.streaming, 'and it runs on')
         self.ctl.stop()
         self.assertEqual(self.ctl.state()['stream']['channels'], 1)
         self.assertEqual(self.ctl.state()['rf']['lna'], 3, 'the gain set by hand stays')
@@ -284,6 +279,52 @@ class Streaming(ControllerTest):
         self.assertEqual((self.dev.radio_commands, self.dev.stream_paths), ([('stream', (0,))], 0),
                          'the command as it always was')
         self.assertEqual(self.ctl.state()['stream']['packing'], 'raw')
+
+    def test_two_channels_stay_two_through_another_sample_rate_or_band(self):
+        """The stream is stopped, the rate or the band changed, and the stream started again as it
+        was: of two channels, packed for what they now cost, the service told again."""
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=80_000_000)
+        self.dev.link_mbps = 5000
+        self.ctl.start(channels=2)
+        self.dev.radio_commands.clear()
+        self.ctl.configure(1, sample_rate=40_000_000)
+        state = self.ctl.state()
+        self.assertEqual((state['stream']['running'], state['stream']['channels'], state['stream']['sample_rate'],
+                          state['stream']['packing']), (True, 2, 40_000_000, 'raw'))
+        self.assertEqual(self.commands(), ['rate', 'capture', 'select', 'stream'])
+        self.assertEqual((self.dev.radio_commands[-1], self.dev.stream_paths), (('stream', (0,)), 2), 'raw, of two paths')
+        self.dev.radio_commands.clear()
+        self.ctl.configure(2, sample_rate=160_000_000)          # another band, at a rate two channels can have
+        state = self.ctl.state()
+        self.assertEqual((state['radio']['band'], state['stream']['running'], state['stream']['channels'],
+                          state['stream']['sample_rate'], state['stream']['packing']),
+                         (2, True, 2, 160_000_000, 'split'))
+        self.assertEqual(self.dev.stream_paths, 2)
+        self.dev.radio_commands.clear()
+        self.ctl.configure(1)                                   # back, at the rate that band has: the same way
+        state = self.ctl.state()
+        self.assertEqual((state['radio']['band'], state['stream']['channels'], state['stream']['sample_rate']),
+                         (1, 2, 40_000_000))
+        self.assertEqual(self.commands(), ['select', 'stream'], 'started again on the other band, not switched under way')
+        self.assertTrue(self.dev.streaming)
+
+    def test_a_rate_or_band_two_channels_cannot_have_is_refused_and_the_stream_runs_on(self):
+        """Refused before anything is stopped: two channels go up to 160 Msps each."""
+        self.loaded(1)
+        self.ctl.configure(1, sample_rate=80_000_000)
+        self.dev.link_mbps = 5000
+        self.ctl.start(channels=2)
+        self.dev.radio_commands.clear()
+        for change in (dict(band=1, sample_rate=320_000_000), dict(band=2), dict(band=0, sample_rate=320_000_000)):
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(ControlError, 'two channels are streamed up to 160 Msps each'):
+                    self.ctl.configure(**change)
+        state = self.ctl.state()
+        self.assertEqual((state['radio']['band'], state['stream']['running'], state['stream']['channels'],
+                          state['stream']['sample_rate']), (1, True, 2, 80_000_000))
+        self.assertEqual(self.dev.radio_commands, [], 'nothing was asked of the radio')
+        self.assertTrue(self.dev.streaming)
 
     def test_two_channels_at_160_msps_are_split_on_a_5_gbit_link_as_320_msps_is(self):
         self.loaded(1)

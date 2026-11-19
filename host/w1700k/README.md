@@ -259,8 +259,10 @@ two capture paths, sampled at the same instants, each at the band's sample rate.
 - **Gain.** Under the AGC each chain's gain steps by itself, and with it the ratio and the phase
   between the channels. A two-channel stream therefore fixes one gain on both chains (LNA 2,
   LPF 5) unless one was set by hand, says so, and a `stop` gives the AGC back.
-- **While it runs** the LO may be tuned and the gain and filter set; another band or sample rate
-  is refused until it is stopped.
+- **While it runs** the LO may be tuned and the gain and filter set. Another sample rate or band
+  stops the stream, makes the change and starts it again as two channels, packed for what they
+  then cost; a rate or band two channels cannot have (above 160 Msps each) is refused before
+  anything is stopped, and the stream runs on.
 - **The readers.** `w1700k-stream` on this host is told first (`export.service`) and lays every
   slot out by channel ([`../stream`](../stream/README.md#two-channels)); the state says
   `stream.channels`. The channels are sample-aligned (measured on all three bands: no

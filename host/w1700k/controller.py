@@ -754,18 +754,21 @@ class Controller:
             return
         old = self.bands[b]
         manual = self.packing_manual
-        if running and self.channels == 2 and (b != self.band or cfg.rate_code != old.rate_code):
-            raise Refused('a two-channel stream is running: stop it before another band or sample rate')
         if running:
-            needed = self._packing_at(cfg.sample_rate, manual)      # refused before anything changes
+            # refused before anything changes: what the stream's channels cost at that rate (two
+            # channels have a highest rate of their own), and a packing for it
+            needed = self._packing_at(self._stream_rate(cfg, self.channels), manual)
         if cfg.rate_code == old.rate_code and b in self.bands_ready:
             # the band's rate unchanged: switch the capture (mid-stream when the running packing
             # carries that rate, else restarted with the packing it needs), then the LO alone if it
             # moved
             if b != self.band:
-                # a stream chosen automatically keeps a packing that still fits; one set by hand is that one
-                if running and (running == needed or not manual and running not in REDUCED and running != SPLIT
-                                and packing_fits(running, cfg.sample_rate, self._link(), self.config.export.piece)):
+                # a stream chosen automatically keeps a packing that still fits; one set by hand is that one.
+                # Two channels are started again on the other band (the switch on a running ring is
+                # tried with one capture path only), and stay two.
+                if running and self.channels == 1 and (
+                        running == needed or not manual and running not in REDUCED and running != SPLIT
+                        and packing_fits(running, cfg.sample_rate, self._link(), self.config.export.piece)):
                     self._switch_mid_stream(b)
                 else:
                     if running:
