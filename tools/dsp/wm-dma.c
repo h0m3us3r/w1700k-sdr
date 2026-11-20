@@ -2,16 +2,16 @@
 /* MEM_DMA TX0 -> RX0, one outstanding descriptor, bounded polling.
  * No payload loads/stores on the WM. Caller owns idle MEM_DMA and ULM1.
  * Uses existing ROM prefetch allocation; leaves queues stopped on exit.
- * Results at 0x00910a00. Return 0 on verified descriptor completions,
+ * Results at 0x00934a00. Return 0 on verified descriptor completions,
  * 1 bad arguments, 2 busy, 3 timeout, 4 RX descriptor error, 5 stop timeout.
  * Content/guard validation belongs to the caller, after completion.
  */
 #include <stdint.h>
 #define REG(o) (*(volatile uint32_t *)(0x58000000u+(o)))
-#define TX ((volatile uint32_t *)0x00910800)
-#define RX ((volatile uint32_t *)0x00910900)
+#define TX ((volatile uint32_t *)0x00934800)
+#define RX ((volatile uint32_t *)0x00934900)
 struct result { uint32_t completed, sum, minimum, maximum, total, tx, rx, irq, error; };
-#define OUT ((volatile struct result *)0x00910a00)
+#define OUT ((volatile struct result *)0x00934a00)
 #define TIMEOUT 7200000u
 static inline uint32_t cycles(void) { uint32_t v; __asm__ volatile("rdcycle %0":"=r"(v)); return v; }
 static inline void fence(void) { __asm__ volatile("fence iorw, iorw":::"memory"); }
@@ -24,7 +24,7 @@ uint32_t dma_trial(uint32_t source, uint32_t dest, uint32_t bytes, uint32_t reps
     /* Explicit endpoint extents: scratch source, or either stopped ICAP
      * path-0 page. DTCM destination stays inside the raw-IQ reservation. */
     if (!(bytes>=16 && bytes<=8192 && !(bytes&15) && reps && reps<=4096 &&
-          (source==0x00912000 || (source==0x00464000 && bytes<=4096) ||
+          (source==0x00936000 || (source==0x00464000 && bytes<=4096) ||
            (source==0x00466000 && bytes<=4096) || source==0xe0400000) &&
           dest>=0x8620d000 && dest<=0x8620f000-bytes && !(dest&15))) return 1;
     cfg=REG(0x208);
@@ -35,8 +35,8 @@ uint32_t dma_trial(uint32_t source, uint32_t dest, uint32_t bytes, uint32_t reps
         RX[4*i]=dest; RX[4*i+1]=bytes<<16; RX[4*i+2]=RX[4*i+3]=0;
     }
     fence();
-    REG(0x300)=0x00910800; REG(0x304)=8; REG(0x308)=0;
-    REG(0x500)=0x00910900; REG(0x504)=8; REG(0x508)=0;
+    REG(0x300)=0x00934800; REG(0x304)=8; REG(0x308)=0;
+    REG(0x500)=0x00934900; REG(0x504)=8; REG(0x508)=0;
     REG(0x20c)=1; REG(0x280)=1;
     REG(0x508)=7;
     REG(0x208)=(cfg&~10u)|5u;

@@ -47,7 +47,7 @@ SECTIONS {
                         '-mabi=ilp32', '-O2', '-ffreestanding', '-fno-builtin', '-nostdlib',
                         '-mno-relax', '-msmall-data-limit=0', '-fno-pic', '-Wall', '-Wextra', '-Werror',
                         '-c', str(HERE/(stem+'.c')), '-o', str(wm_obj)], check=True)
-        subprocess.run([tools['ld.lld'], '-Ttext=0x00910000', '-e', entry, '--no-relax',
+        subprocess.run([tools['ld.lld'], '-Ttext=0x00934000', '-e', entry, '--no-relax',
                         '-o', str(wm_elf), str(wm_obj)], check=True)
         subprocess.run([tools['llvm-objcopy'], '-O', 'binary', '-j', '.text', str(wm_elf), str(wm_raw)], check=True)
         assert 0 < wm_raw.stat().st_size <= 2048

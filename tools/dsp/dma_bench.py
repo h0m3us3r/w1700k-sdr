@@ -18,11 +18,11 @@ FIELDS = 'completed sum minimum maximum total tx rx irq error'.split()
 
 def helper(w, source, dest, size, reps):
     before = w.traps()
-    result = w.call(0x00910000, source, dest, size, reps, timeout=10)
+    result = w.call(0x00934000, source, dest, size, reps, timeout=10)
     healthy(w)
     if w.traps() != before:
         raise RuntimeError('WM DMA helper trapped')
-    stats = dict(zip(FIELDS, read(w, 0x00910a00, len(FIELDS))))
+    stats = dict(zip(FIELDS, read(w, 0x00934a00, len(FIELDS))))
     emit(event='dma_cycles', source=hex(source), dest=hex(dest), bytes=size, repeats=reps,
          return_code=result, stats=stats)
     if result or stats['error'] or stats['completed'] != reps or stats['irq']:
@@ -43,16 +43,16 @@ def main():
     results = []
     with Wm(Unit(config.load(args.config).unit)) as w:
         ready(w)
-        write(w, 0x00910000, unpack(code))
-        if packed(read(w, 0x00910000, len(code)//4)) != code:
+        write(w, 0x00934000, unpack(code))
+        if packed(read(w, 0x00934000, len(code)//4)) != code:
             raise RuntimeError('helper readback mismatch')
         try:
             for size in (64, 256, 1024, 4096, 8192):
                 for seed in (0x13579bdf, 0xcafebabe):
                     pattern = [(seed ^ (i*0x9e3779b9)) & 0xffffffff for i in range(size//4)]
-                    write(w, 0x00912000, pattern)
+                    write(w, 0x00936000, pattern)
                     write(w, 0x8620cffc, [0x5a5a5a5a] + [0xa5a5a5a5]*(size//4) + [0x96969696])
-                    stats = helper(w, 0x00912000, 0x8620d000, size, 128)
+                    stats = helper(w, 0x00936000, 0x8620d000, size, 128)
                     got = read(w, 0x8620d000, size//4)
                     guards = [read(w, 0x8620cffc, 1)[0], read(w, 0x8620d000+size, 1)[0]]
                     if got != pattern or guards != [0x5a5a5a5a, 0x96969696]:

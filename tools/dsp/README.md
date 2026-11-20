@@ -52,12 +52,17 @@ at a time; polling and shutdown have bounded timeouts.
 
 | MCU address | Reservation |
 | --- | --- |
-| `0x00910000..0x009107ff` | WM helper code |
-| `0x00910800`, `0x00910900`, `0x00910a00` | TX ring, RX ring, result counters |
-| `0x00912000` | Known-pattern source |
+| `0x00934000..0x009347ff` | WM helper code |
+| `0x00934800`, `0x00934900`, `0x00934a00` | TX ring, RX ring, result counters |
+| `0x00936000` | Known-pattern source |
 | `0x00464000`, `0x00466000` | Stopped capture-window pages |
 | `0xe0400000` | Stopped capture-pool source |
 | `0x8620d000..0x8620efff` | DSP0 destination |
+
+The three ULM1 rows lie in the top of ULM1 that our own WM leaves unused
+(`MT7996_WM_ULM1_TOP_FREE_BASE` in `include/hw/mt7996/mcu_map.h`, `0x00933000..0x00937fff`),
+above the stream producer. The patch SRAM at `0x00910000` is not the place: the WM's packers
+keep packed-chunk buffers there and rewrite them for as long as a packed stream runs.
 
 The caller owns idle MEM_DMA and these reservations. The helper leaves queues
 stopped; reload normal firmware before another receiver uses them. Validation

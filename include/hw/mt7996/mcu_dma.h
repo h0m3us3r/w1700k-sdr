@@ -238,10 +238,12 @@
 #define MT7996_MEM_DMA_WM_TX0_ADAPTER     0x0222c928u
 #define MT7996_MEM_DMA_WM_RX1_ADAPTER     0x0222c978u
 
-/* Measured on W1700K2 / MT7996 (2026-10-14), own firmware, capture stopped:
- * TX0 -> RX0 moves 8 KiB from ICAP pool 0xe0400000 to DSP0 DTCM 0x8620d000
- * in ~8.7 us at WM 720 MHz, without a CPU payload copy. Two stopped window
- * pages at 0x00464000 / 0x00466000 also work (2 x 4 KiB, ~9.5 us total).
+/* Measured on W1700K2 / MT7996 (2026-10-14, and again on a second unit
+ * 2026-11-16), own firmware, capture stopped: TX0 -> RX0 moves 8 KiB from
+ * ICAP pool 0xe0400000 to DSP0 DTCM 0x8620d000 in 7.2 us at WM 720 MHz,
+ * without a CPU payload copy. Two stopped window pages at 0x00464000 /
+ * 0x00466000 also work (2 x 4 KiB, 7.9 us total), and 8 KiB of a pattern in
+ * ULM1 takes 8.8 us. [measured]
  * tools/dsp/wm-dma.c contains the transfer implementation and its README
  * documents setup, ownership, validation and limits.
  *

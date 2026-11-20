@@ -29,7 +29,7 @@ def main():
     if not 0 < len(code) <= 2048:
         p.error('WM helper must fit before the DMA descriptor reservation')
     code += bytes(-len(code) % 4)
-    n, dtcm, scratch = 2048, 0x86200000, 0x00910000
+    n, dtcm, scratch = 2048, 0x86200000, 0x00934000
     cr0, grant = 0x80023090, 0x88009004
     # Only documented route / capture configuration words.
     changes = [(0x88009004, 0xff000000), (0x8800900c, 0),
