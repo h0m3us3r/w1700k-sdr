@@ -240,6 +240,8 @@ How to read it:
   it is, and what is there all the time, the same, is noise to it.
 - A firmware set built before the DSP image existed has none: the command then says so, and
   nothing is touched. `make -C firmware`, then `w1700k load`.
+- A stream of two channels is refused: its chunks hold two chains' samples in turn, and the
+  radio reads a chunk as one chain's.
 
 Measured on a unit: the stream lost no slice with it on at 40, 160 and 320 Msps; its shares
 agreed within 0.04 in every bin (0.02 on average) with the same rule worked out on the host from

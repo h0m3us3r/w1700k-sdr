@@ -639,6 +639,10 @@ class Controller:
         self._require_loaded()
         if not self.packing:
             raise Refused('occupancy is measured beside a stream: start one')
+        if self.channels != 1:
+            # The DSP reads a chunk as one chain's samples in time order; a two-channel stream's
+            # chunks hold two chains, two samples of each in turn (iq_format.h).
+            raise Refused('occupancy reads a stream of one channel: this one has two')
         if not 0 < seconds <= 600:
             raise ValueError('occupancy: up to 600 seconds')
         cfg, session = self.bands[self.band], self._session()
