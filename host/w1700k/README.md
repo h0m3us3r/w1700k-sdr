@@ -64,6 +64,7 @@ holds for an address).
 | `gain --agc` / `gain --lna 0..4 --lpf 0..9` | AGC or forced gain |
 | `filter 20\|40\|80\|160\|320` | analog filter of the active band, at any sample rate |
 | `trim 0..31` | filter RC trim |
+| `occupancy [--seconds S] [--per-second N] [--threshold DB] [--keep]` | what is in the air around the LO, measured on the radio beside the running stream (below) |
 | `serve` | the JSON control protocol below |
 | `push [--from DIR] [--to DIR]` | development: copy a fresh driver and the clients to `/tmp/w1700k` |
 | `fw` | development: our WM's and WA's status blocks (`wm.py`) |
@@ -176,6 +177,72 @@ analog filter. Defaults, all set by every load:
 - Nothing transmits: our firmware runs no transmit calibration and keeps the MAC's transmit
   path disabled.
 
+## Occupancy
+
+`w1700k occupancy` says what is in the air around the active band's LO while a stream runs: for
+each 64th of the sample rate, how strong it was and in what share of the time something was
+there. The radio works it out itself: one of the MT7996's DSP cores is handed a chunk of the
+stream now and then and keeps the account ([`firmware/README.md`](../../firmware/README.md),
+"Occupancy"). The stream goes on untouched, and no consumer on the host is needed.
+
+```sh
+w1700k band 1 --rate 160 --lo 5180M && w1700k start
+w1700k occupancy --seconds 2
+```
+
+On a unit, in a quiet hour (the `hz` values are the LO the synthesizer's grid gives):
+
+```json
+{"report": 13, "snapshots": 200, "snapshots_since_on": 200, "bin_hz": 2500000.0, "peak_dbfs": 0.0, "gain_span_db": 34.2, "learned_from": 37, "dsp_ms": 0.373,
+ "bins": [{"hz": 5099999995, "in_band": false, "mean_dbfs": -80.5, "max_dbfs": -63.1, "noise_dbfs": -87.4, "busy": 0.145, "strong": 0.005},
+          ...
+          {"hz": 5174999995, "in_band": true, "mean_dbfs": -28.9, "max_dbfs": -16.8, "noise_dbfs": -35.3, "busy": 0.21, "strong": 0.21},
+          ...],
+ "wifi": [{"channel": 36, "mhz": 5180, "busy": 0.21, "strong": 0.21, "max_dbfs": -16.8},
+          {"channel": 40, "mhz": 5200, "busy": 0.14, "strong": 0.12, "max_dbfs": -22.3}]}
+```
+
+| option | default | |
+|---|---|---|
+| `--seconds S` | 1 | how long the report covers |
+| `--per-second N` | 100 | snapshots a second, about; beside a 160 Msps stream the radio gets to about 68, beside 320 Msps to about 40, and the report then takes that much longer |
+| `--threshold DB` | 6 | a bin is busy when it is this far above its noise in that snapshot |
+| `--keep` | | leave it running; the next `occupancy` then answers with the next report |
+
+How to read it:
+
+- A snapshot is one 8 KiB chunk of the stream, 2048 samples: 51 us at 40 Msps, 6.4 us at
+  320 Msps. `busy` is the share of the snapshots in which the bin was above the threshold, so it
+  is a share of the time for anything longer than a snapshot.
+- `busy` is energy, and near a strong transmitter its skirts make bins all over the span busy
+  while it sends. `strong` is the share in which the bin was busy and within 20 dB of the
+  strongest busy bin of that snapshot: where transmissions sit. `wifi` gives both for each 20 MHz
+  Wi-Fi channel, as its busiest bin has them.
+- Levels are dBFS (0: a tone that fills the converter) and as sampled. With the AGC on, the
+  receiver's gain moves with what is in the air (`gain_span_db`: how far the noise moved over the
+  report), so a level is not a field strength; `busy` and `strong` do not depend on the gain.
+  With a fixed gain (`w1700k gain --lna .. --lpf ..`) levels compare across snapshots.
+- The samples come at twice the channel filter's width, so only the middle half of the bins is
+  inside the filter (`in_band`); the outer ones show the filter's skirts, and at low gain their
+  noise is under the converter's last bit, so little there means anything. `wifi` lists the
+  channels that lie inside the filter whole: at 160 Msps that is an 80 MHz span.
+- The noise is found by the radio, not set: `noise_dbfs` is what it took each bin's noise to be.
+  Its shape over the bins is what the quiet moments share: the radio keeps the first 64
+  snapshots after being turned on (they are in the first report, which therefore takes that long
+  at the least) and takes the shape from the largest group among them that are alike but for the
+  gain: `learned_from` of the 64. Under 8, the band was hardly ever quiet over this span: the
+  report says so in `note`, its shares are not to be trusted, and with `--keep` the radio goes on
+  looking, 64 snapshots at a time. Seen at 2.4 GHz in a flat with many networks: 30 of 64 quiet
+  over 40 MHz, 3 to 6 over 160 MHz; a narrower span sees more quiet.
+- What it cannot see: a signal that fills more than seven eighths of the span reads weaker than
+  it is, and what is there all the time, the same, is noise to it.
+- A firmware set built before the DSP image existed has none: the command then says so, and
+  nothing is touched. `make -C firmware`, then `w1700k load`.
+
+Measured on a unit: the stream lost no slice with it on at 40, 160 and 320 Msps; its shares
+agreed within 0.04 in every bin (0.02 on average) with the same rule worked out on the host from
+every chunk of the same six seconds; and on 6 GHz with nothing in the air no bin was busy.
+
 ## The low-power radio
 
 The W1700K carries a second radio, a Silicon Labs EFR32MG21 for Bluetooth LE
@@ -274,6 +341,7 @@ immediately; other requests run one at a time in order.
 | `{"id":7,"op":"gain","agc":true}` / `{"id":7,"op":"gain","lna":2,"lpf":9}` | |
 | `{"id":8,"op":"filter","mhz":80}` | the active band's filter by hand; the filters stop following the sample rate |
 | `{"id":9,"op":"filter_follow","on":true}` | every band's filter follows its sample rate (the default), or stays as it is |
+| `{"id":10,"op":"occupancy","seconds":1,"per_second":100,"threshold_db":6,"keep":false}` | one occupancy report of the running stream, in the reply's `occupancy`; every field optional |
 
 Events: `{"event":"state","state":STATE}` on every change, `{"event":"progress","text":...,
 "fraction":0.4}` during a load, `{"event":"log","level":"info|warn|error","text":...}`; a

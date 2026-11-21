@@ -88,6 +88,11 @@ class Images(unittest.TestCase):
         self.assertEqual((cram, cram_feature), (own.WM_CRAM, 0x01))
         self.assertLessEqual(cram + len(cram_plain), own.WM_CRAM_LIMIT)
 
+    def test_the_set_in_download_order(self):
+        self.assertEqual([(role, name, flags) for role, (name, _, flags) in self.images.items()],
+                         [('wm', 'w1700k_wm.bin', ()), ('dsp', 'w1700k_dsp.bin', ('--dsp',)),
+                          ('wa', 'w1700k_wa.bin', ('--wa',))])
+
     def test_wa(self):
         """The entry region, then the stream packer where the producer raises the WA into it."""
         name, data, flags = self.images['wa']

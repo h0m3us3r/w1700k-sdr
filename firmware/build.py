@@ -5,7 +5,8 @@
     python3 build.py [--out build]
 
 Containers, in download order: our ROM patch (only our hooks, rom_patch/patch.py), our WM (the
-radio code, the stream producer) and our WA (the stream packer), own.py. No MediaTek byte.
+radio code, the stream producer), our DSP image (spectrum occupancy) and our WA (the stream
+packer), own.py. No MediaTek byte.
 """
 import argparse
 import hashlib
@@ -19,7 +20,7 @@ sys.path.insert(0, str(HERE))
 import own                                     # noqa: E402
 from rom_patch import patch                    # noqa: E402
 
-SCHEMA = 3
+SCHEMA = 4
 
 
 def _entry(role, name, data, flags=()):

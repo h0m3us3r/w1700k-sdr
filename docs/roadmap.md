@@ -23,7 +23,8 @@ installation, the first loader and the kernel image.
 
 1. **Our code on the MT7996.** The ROM does not authenticate the patch's hook
    table; a hook that makes the RAM-image CRC check pass lets our WM and WA
-   load. A third hook counts the DSP as started, so no DSP image is needed.
+   load. A third hook counts the DSP as started, so none of MediaTek's DSP
+   image is needed.
 2. **Discovery.** A minimal WM of ours could replay register state captured
    from MediaTek's initialisation, and a radio warmed by MediaTek's firmware
    received; a power-cycled one received once the ROM patch's radio init and
@@ -156,18 +157,23 @@ on the unit reads it. To take up later:
 
 ### Processing on the chip
 
-- **The DSP cores.** Three RISC-V cores, one per band, sit idle under our
-  firmware. A memory-to-memory DMA path into a core's data memory was found
-  by a contributor and reproduces here (8 KiB in 8.8 us); posted from the
-  host it ran beside a raw 80 Msps stream with no slice lost. With a packed
-  stream its descriptors and source were in memory the WM's packers rewrite
-  (`include/hw/mt7996/mcu_map.h`), so that case is open: the rings need a
-  place of their own, and the transfers a driver inside the producer.
-- **What the cores are for.** Not the stream itself: the path carries
+- **The DSP cores.** Three RISC-V cores, one per band. A memory-to-memory
+  DMA path into a core's data memory was found by a contributor
+  (`tools/dsp/`), and core 0 now uses it: beside a stream it takes the
+  spectrum of a chunk now and then and keeps account of what is in the air
+  (`firmware/README.md`, "Occupancy"; `w1700k occupancy`). Cores 1 and 2
+  run the same program and are asked nothing yet.
+- **The other two radios at once.** A stream captures one band. A second
+  capture engine can take a snapshot of another band into the SYSRAM window
+  while the stream runs, and the DMA path reaches cores 1 and 2 from there:
+  done by hand from the host on a unit, all three radios' spectra right and
+  the stream whole. In the firmware it would give occupancy on all three
+  bands at once.
+- **What else the cores are for.** Not the stream itself: the path carries
   0.9 GB/s against the 1.28 of 320 Msps, and a core has four clock cycles a
   sample at 160 Msps. A share of the chunks, one way, is enough for a
-  detector: an occupancy map per band, a squelch or trigger for a capture, a
-  faster level meter for the shift of the split packing.
+  detector: a squelch or trigger for a capture, a faster level meter for
+  the shift of the split packing.
 
 ### Understanding the radio
 

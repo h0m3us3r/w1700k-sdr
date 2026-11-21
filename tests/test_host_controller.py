@@ -66,7 +66,7 @@ class Load(ControllerTest):
         self.ctl.load(1)
         self.assertEqual(self.unit.module_replacements, 1)
         self.assertEqual(self.dev.downloads, [('acquire',), ('--reset',), ('acquire',), ('rom',), ('w1700k_rom_patch.bin',),
-                                              ('w1700k_wm.bin',), ('w1700k_wa.bin', '--wa')])
+                                              ('w1700k_wm.bin',), ('w1700k_dsp.bin', '--dsp'), ('w1700k_wa.bin', '--wa')])
         self.assertEqual(self.dev.eeprom(), self.config.eeprom.read_bytes()[:7680])
         self.assertEqual(self.dev.radio_commands, STOCK_LOAD)
         ops = self.dev.rf_ops
@@ -98,7 +98,7 @@ class Load(ControllerTest):
         pushes = [c for c in self.unit.log if isinstance(c, str) and c.startswith('push /tmp/w1700k-fw/')]
         self.ctl.load(0)
         again = [c for c in self.unit.log if isinstance(c, str) and c.startswith('push /tmp/w1700k-fw/')]
-        self.assertEqual(len(pushes), 3)
+        self.assertEqual(len(pushes), 4)
         self.assertEqual(again, pushes)
         self.assertEqual(self.unit.module_replacements, 2)
 
@@ -138,7 +138,7 @@ class Load(ControllerTest):
         ctl = Controller(replace(self.config, unknown_rom=True), emit=self.events.append, unit=self.unit)
         ctl.load()
         self.assertEqual(self.dev.downloads[3:], [('rom',), ('w1700k_rom_patch.bin',), ('w1700k_wm.bin',),
-                                                  ('w1700k_wa.bin', '--wa')])
+                                                  ('w1700k_dsp.bin', '--dsp'), ('w1700k_wa.bin', '--wa')])
         self.assertTrue(any('ROM is not one our firmware is written for' in line and 'unknown_rom' in line
                             for line in self.logs()), self.logs())
 

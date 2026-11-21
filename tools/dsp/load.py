@@ -30,10 +30,12 @@ def main():
     dsp = firmware.Image('dsp', args.container, len(data), hashlib.sha256(data).hexdigest(), ('--dsp',))
     normal = firmware.load(cfg.firmware_dir)
     base = normal.containers
+    # The set's own DSP image (occupancy) gives way to the test image for this load.
+    base = tuple(c for c in base if c.role != 'dsp')
     images = base[:2] + (dsp,) + base[2:]
     emit(event='load_research_firmware', dsp_bytes=len(data), dsp_sha256=dsp.sha256)
-    # Scope the experimental fourth container to this process. The production
-    # manifest and its strict three-role validation remain unchanged.
+    # Scope the test container to this process. The production manifest and
+    # its strict validation remain unchanged.
     original = firmware.load
     controller = Controller(cfg, emit=lambda event: emit(**event), unit=unit)
     firmware.load = lambda directory: firmware.Firmware(images, normal.rom)

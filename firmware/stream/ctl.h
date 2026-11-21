@@ -45,6 +45,7 @@
 
 #include "adie_spi.h"
 #include "guard.h"
+#include "occ.h"
 #include "../radio/rfctl.h"
 
 struct ctl {
@@ -62,6 +63,7 @@ struct ctl {
 	/* An A-die transaction under way (ctl_adie): CTL_SPI_*, when that began, and the channel's
 	 * status word and busy bit. `word`: what an op of two transactions keeps between them. */
 	uint32_t spi, spi_from, spi_status, spi_busy, word;
+	struct occ occ;			/* occupancy beside the stream (occ.h), a step once in 1024 idle calls */
 };
 #define CTL_SPI_SEMA	1u	/* waiting for the semaphore */
 #define CTL_SPI_BUSY	2u	/* started, the semaphore held */
@@ -157,6 +159,7 @@ static inline void ctl_settle(struct ctl *c)
 		R32(ADIE_SEMA_REL_MCU) = ADIE_SEMA_REL_VAL;
 	}
 	c->spi = 0;
+	occ_settle(&c->occ);
 }
 
 /* The VCO band search (as the WM firmware does it, mt7977.h): 10 steps, each a measurement
@@ -427,6 +430,7 @@ static void ctl_step(struct ctl *c)
 			R32(MT7996_PROBE_CTL_CALLS) = c->calls;
 			R32(MT7996_PROBE_CTL_SEEN) = v;
 			ctl_rate(c);
+			occ_step(&c->occ, c->chunk);
 		}
 		if (v == c->req || !v)
 			return;
@@ -511,6 +515,7 @@ static void ctl_init(struct ctl *c)
 	c->sub = 0;
 	c->rate_chunk = 0;
 	c->rate_at = rdcycle64();
+	occ_init(&c->occ);
 	if (R32(MT7996_PROBE_CTL_ACK) != c->req) {
 		R32(MT7996_PROBE_CTL_STATUS) = MT7996_PROBE_CTL_NOT_RUN;
 		asm volatile("fence" ::: "memory");

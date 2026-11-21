@@ -1,12 +1,13 @@
 # MT7996 firmware
 
-Our firmware for the MT7996: a ROM patch, a WM image and a WA image, built from this directory
-with no MediaTek file. `make -C firmware` writes them to `firmware/build/`:
+Our firmware for the MT7996: a ROM patch, a WM image, a DSP image and a WA image, built from this
+directory with no MediaTek file. `make -C firmware` writes them to `firmware/build/`:
 
 | file | role | what it is |
 |---|---|---|
 | `w1700k_rom_patch.bin` | patch | only our three ROM hooks, no MediaTek body (`rom_patch/`) |
 | `w1700k_wm.bin` | wm | our WM: the radio bring-up and band set-up, the stream producer, RF control (`wm/`, `radio/`, `stream/`) |
+| `w1700k_dsp.bin` | dsp | the spectrum occupancy program, on each of the three DSP cores (`dsp/`) |
 | `w1700k_wa.bin` | wa | our WA: the stream packer (`wa/`, `stream/`) |
 | `firmware.json` | | role, file, size, sha256 and download flags of each, in download order |
 
@@ -15,7 +16,7 @@ Requirements: Python 3.10+, `clang` with the RISC-V target, `ld.lld`, `llvm-objc
 
 The MT7996's three processor types (WM, WA, DSP) are RISC-V (Andes). The ROM authenticates
 neither the patch's hook table nor, behind our CRC hook, the RAM images, so our code runs from
-the patch onward. No DSP image is loaded.
+the patch onward.
 
 ## ROM patch (`rom_patch/`)
 
@@ -31,7 +32,8 @@ into ROM after it; the build refuses an object with relocations and re-decodes i
   128 banks with ICAP at position 0, so the capture engine owns pool bytes 0..1 MiB (MCU
   `0xe0400000`..`0xe04fffff`). Our WM's bring-up makes the ROM call it hooks.
 - `hook-start-mask.S` at ROM `0x00838d6c`: the ROM starts no core until the WM, the WA and the
-  DSP have each had a FW_START; the hook counts the DSP as started, so no DSP image is needed.
+  DSP have each had a FW_START; the hook counts the DSP as started, so a set without a DSP image
+  starts too (ours has one).
 
 None of MediaTek's 26 ROM redirects is in it, and none of the eFuse "recovery" their 2025 and
 later patches run. It loads on parts with unprovisioned security fuses.
@@ -125,6 +127,52 @@ such a revision and at that radio's risk.
   which the producer relays to the WA): the cores have no cycles left to measure a chunk's
   level, and the SoC sees the level in the chunks between. `tests/test_firmware_kernels.py`
   runs this code and `pack.S` from their machine code against the format's model.
+
+## Occupancy (`dsp/`, `stream/occ.h`)
+
+What is in the air around the LO, worked out on the radio itself beside a stream, from samples
+that never leave the chip for it. The host asks with `w1700k occupancy`
+([`host/w1700k/README.md`](../host/w1700k/README.md), "Occupancy").
+
+- `stream/occ.h`, in the WM: now and then the chunk the producer published last is copied from
+  the capture ring into DSP core 0's memory by MEM_DMA, the DMA engine beside the one that carries
+  the stream (8 KiB in 7 us, no CPU touching a sample), and the core is asked for its spectrum.
+  It is a step at a time, and a step is taken once in 1024 idle calls of the control interpreter:
+  the producer's loop is not touched and no step waits. The host turns it on and reads the reports
+  in the mailbox page (`0x0090b000`, `include/hw/mt7996/probe_page.h`). The copy path was found
+  by a contributor, whose test harness for it is in [`tools/dsp/`](../tools/dsp/README.md).
+- `dsp/occ.c`, on the core (RV32IMAF, 640 MHz): the chunk's mean off, 32 Hann-windowed 64-point
+  transforms averaged into 64 bins, and per bin the sum, the largest, how often the bin was busy
+  (more than a threshold above its noise in that snapshot) and how often strong (busy, and within
+  20 dB of the snapshot's strongest busy bin: a transmission, not another's skirts). The noise is
+  found, not set: a shape over the bins times a level a snapshot, because the receiver's AGC
+  moves the noise by tens of dB from one chunk to the next. The level is the 8th smallest bin
+  against the shape. The shape is what the quiet snapshots share: the first 64 are kept, grouped
+  into those that are each other at another gain, and the largest group's median is the shape
+  (it then follows every quiet snapshot). The file's head says why each part is there, what was
+  tried before, and what the program cannot see.
+- `dsp/start.S`: the core's start (memory windows, stack, trap record). The image is the same
+  on all three cores; the other two run it and are asked nothing.
+
+Measured on a unit (hardware 2.1): one snapshot costs the core 0.37 ms, and learning the shape
+9 ms once. Beside a stream it takes about 100 snapshots a second at 40 Msps, 68 at 160 Msps
+(every chunk packed) and 40 at 320 Msps (split), and the stream is none the worse: no slice lost,
+and the producer at most 4 chunks behind the capture at 160 Msps and 8 at 320 with it on, 3 and 8
+with it off. Its busy shares at 2.4 GHz were within 0.04 in every bin (0.02 on average) of the
+same rule worked out on the host from every chunk of the same six seconds, 600 snapshots against
+117,200 chunks, and the shape it learned within 0.7 dB of the host's. On the 6 GHz radio with
+nothing in the air all 64 learning snapshots were the quiet group and no bin was busy in 300.
+Over 160 MHz of a crowded 2.4 GHz band only 3 to 6 of 64 were quiet: the report says so.
+
+A DSP core's memory must not be touched while the core is held in reset: the radio's bus hangs
+until a power cycle (`include/hw/mt7996/dsp.h`). The WM reads the cores' enable and reset words
+first, and a set loaded without the DSP image leaves them in reset: occupancy then says so and
+touches nothing (also seen on the unit).
+
+`tests/test_firmware_occ.py` runs both halves on the host: the program on bands it makes up,
+whose truth it therefore knows (gain jumping 20 dB between chunks, a filter's shape, a converter's
+offset, a tone a third of the time, a transmitter with skirts, a band too crowded to learn from),
+and the WM's steps against a model of the engine and the core.
 
 ## The WA (`wa/`)
 

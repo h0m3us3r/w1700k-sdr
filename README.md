@@ -27,6 +27,7 @@ register against a trace of MediaTek's own firmware, and takes its commands
 | Bands | 2.4 GHz (MT7976), 5 GHz and 6 GHz (two MT7977s); switching bands is a register write inside a running stream |
 | Tuning | No channels: the LO is any Hz a band's synthesizer locks at (unit A: 2.081–2.748, 4.647–7.509 and 4.707–7.576 GHz), on its grid of 2.98 Hz (2.4 GHz) or 11.9–14.3 Hz steps; retuned mid-stream (about 1 ms) |
 | Front end | AGC or manual LNA/baseband gain; analog filter 20–320 MHz |
+| Occupancy | `w1700k occupancy`: what is in the air around the LO, per 64th of the sample rate and per Wi-Fi channel (how strong, what share of the time), worked out on one of the radio's own DSP cores beside the running stream, which loses nothing for it |
 | Transport | the radio DMAs into a 1 GiB ring in SoC DRAM; the kernel sends every 8 KiB slice as one UDP datagram, zero-copy, on the 10 GbE port; at 320 Msps half the slices are packed to 28 bits per sample pair on the radio's own cores to fit the link (lossless, automatic) |
 | Slower links | the stream's packing follows the link's speed: every slice packed to 28 bits (lossless) carries 160 Msps on 5 Gbit/s, and 320 Msps fits it at 14 bits per sample pair, the radio and the SoC each requantising part; below that the SoC requantises to 16, 14, 8 or 7 bits per sample pair with a scale per slice (up to 160 Msps), and can send in datagrams small enough for a 1500-byte MTU; see the table below |
 | Host | `w1700k-stream` receives the export and serves the IQ stream to every consumer on the host (shared memory, complex int16, gap-tagged), with an optional correction ("flatten") of the decimation's roll-off applied to the samples themselves; `w1700k-spectrum`: 262,144-point FFT at 100 frames/s over every sample, browser UI, live controls; `sdr-recv` records the stream; a SoapySDR module (`driver=w1700k`) gives it to GNU Radio and other SoapySDR programs |
@@ -157,7 +158,7 @@ between them, in 1.22 kHz bins.*
 | --- | --- |
 | [`platform/`](platform/README.md) | What runs on the SoC: our U-Boot, Linux 6.18 with board patches, a read-only BusyBox root |
 | [`kernel/w1700k_sdr/`](kernel/w1700k_sdr/README.md) | The MT7996 driver (firmware download, the DMA ring, the 10 GbE export, the firmware's command mailbox, the status LED) and its unit-side clients |
-| [`firmware/`](firmware/README.md) | Our MT7996 firmware: the ROM patch, the WM (radio bring-up and band set-up, streams, RF control) and the WA (packer) |
+| [`firmware/`](firmware/README.md) | Our MT7996 firmware: the ROM patch, the WM (radio bring-up and band set-up, streams, RF control), the WA (packer) and the DSP image (spectrum occupancy) |
 | [`host/w1700k/`](host/w1700k/README.md) | Host control: firmware load, streaming, RF control as firmware commands; `w1700k serve` for the web UI |
 | [`host/stream/`](host/stream/README.md) | `w1700k-stream`, the host's one receiver of the export: the IQ stream in shared memory for every consumer, and the roll-off correction |
 | [`host/spectrum/`](host/spectrum/README.md) | The spectrum/waterfall web server |
