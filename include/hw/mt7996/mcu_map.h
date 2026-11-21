@@ -70,6 +70,17 @@
 #define MT7996_WM_ULM1_FREE_BASE          0x00910000u
 #define MT7996_WM_ULM1_FREE_SIZE          0x00006000u	/* to 0x00915fff */
 /* WM region-0 code (vendor 2026 release and test mode): 0x00916400..0x00937d0f. */
+/* The top of ULM1 under our own WM, which is smaller than the vendor's: its
+ * code links from 0x00916400 with its limit at 0x00930000, the stream
+ * producer has 0x00930000..0x00932fff (firmware/own.py), and nothing of ours
+ * is put above that. Research helpers that need code, descriptor rings or a
+ * test pattern in MCU memory go here (tools/dsp). Seen on a unit: a helper at
+ * 0x00934000..0x00934aff and a pattern at 0x00936000..0x00937fff stayed
+ * byte-identical through every stream mode of the 2.4 GHz band, each
+ * packing included. Not free under the vendor's WM, whose code it is.
+ * [measured] */
+#define MT7996_WM_ULM1_TOP_FREE_BASE      0x00933000u
+#define MT7996_WM_ULM1_TOP_FREE_SIZE      0x00005000u	/* to 0x00937fff */
 
 /* ULM2: the WM's DLM window (mdlmb = 0x02200001): ROM/WM shared data,
  * descriptor rings, network buffers. Off-limits for our data. */
