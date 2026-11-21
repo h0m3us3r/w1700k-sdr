@@ -17,6 +17,10 @@
                                     analog filter of the active band, MHz, set by hand; auto:
                                     every band's filter follows its sample rate again (the default)
     w1700k trim 0..31               filter RC trim of the active band
+    w1700k occupancy [--seconds S] [--per-second N] [--threshold DB] [--keep]
+                                    what is in the air around the LO, from the radio's own DSP
+                                    core beside the stream that runs: per bin and per Wi-Fi
+                                    channel, how strong and what share of the time (occupancy.py)
     w1700k serve [--packing P]      JSON requests on stdin, replies and events on stdout
     w1700k push [--from DIR] [--to DIR]
                                     development: copy a fresh driver and clients to the unit
@@ -36,6 +40,7 @@ from pathlib import Path
 from . import config as config_mod
 from . import efr32
 from . import gps
+from . import occupancy
 from .config import REPO
 from .controller import PACKINGS, Controller, serve
 from .radio import RATE_CODE
@@ -173,6 +178,13 @@ def build_parser():
                    help='MHz, set by hand; auto: follow the sample rate')
     p = sub.add_parser('trim', help='filter RC trim of the active band')
     p.add_argument('code', type=int, choices=range(32))
+    p = sub.add_parser('occupancy', help="spectrum occupancy around the LO, measured by the radio's DSP core "
+                                         'beside the running stream')
+    p.add_argument('--seconds', type=float, default=occupancy.SECONDS, help='how long a report covers')
+    p.add_argument('--per-second', type=int, default=occupancy.PER_SECOND, help='snapshots a second, about')
+    p.add_argument('--threshold', type=float, default=occupancy.THRESHOLD_DB,
+                   help='dB above the noise floor from which a bin is busy')
+    p.add_argument('--keep', action='store_true', help='leave it running afterwards')
     p = sub.add_parser('serve', help='JSON control protocol on stdin/stdout')
     p.add_argument('--packing', choices=PACKINGS,
                    help="set every stream's packing by hand (as export.packing in the configuration)")
@@ -266,6 +278,8 @@ def run_command(controller, args):
             controller.filter(int(args.mhz))
     elif command == 'trim':
         controller.trim(args.code)
+    elif command == 'occupancy':
+        return controller.occupancy(args.seconds, args.per_second, args.threshold, args.keep)
     elif command == 'fw':
         w = controller._wm()
         show = lambda st, plain: {k: v if k in plain else f'{v:#010x}' for k, v in st.items()}

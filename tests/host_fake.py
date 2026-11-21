@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'host'))
 
-from w1700k import radio, rf, stream, wm  # noqa: E402
+from w1700k import occupancy, radio, rf, stream, wm  # noqa: E402
 from w1700k.config import Config, ExportConfig, UnitConfig  # noqa: E402
 from w1700k.unit import OUT, StepResult, UnitError  # noqa: E402
 
@@ -104,6 +104,10 @@ class FakeDevice:
         self.calls = []                   # (fn, args) our WM was asked to call
         self.mtu = 9216
         self.link_mbps = 10000            # eth1's negotiated speed; None: not reported
+        self.dsp_loaded = False           # the set's DSP image was downloaded: core 0 runs the occupancy program
+        self.occupancy_failure = None     # the state occupancy ends in when turned on (occupancy.FAILURES)
+        self.occupancy_report = None      # a report's words; None: one made up from its number
+        self.occupancy_reports = True     # False: turned on, it runs and no report comes
 
     @property
     def streaming(self):
@@ -126,6 +130,7 @@ class FakeDevice:
         state (sx_status)."""
         self.mem, self.wm_up, self.wa_up = {}, False, False
         self.stream_packing, self.route_armed, self.icap_band = None, False, None
+        self.dsp_loaded = False
 
     def ready(self, band=1):
         """The radio as a load leaves it: up, every band set up with its capture path, ICAP
@@ -168,6 +173,28 @@ class FakeDevice:
             self._start_wa()
         elif addr == wm.RADIO_REQ and value != self.st('radio_ack') and not self.stream_packing:
             self._radio()
+        elif addr == occupancy.PERIOD:
+            self._occupancy(value)
+
+    def _occupancy(self, period):
+        """What the stream producer makes of the occupancy period (firmware/stream/occ.h): off; or,
+        beside a stream, running and a report in the page at once; or the reason it cannot."""
+        if not period or not self.streaming:
+            self.mem[occupancy.STATE] = occupancy.OFF
+            return
+        if not self.dsp_loaded or self.occupancy_failure:
+            self.mem[occupancy.STATE] = self.occupancy_failure or 2
+            return
+        self.mem[occupancy.STATE] = occupancy.RUNNING
+        if not self.occupancy_reports:
+            return
+        every = self.mem.get(occupancy.EVERY, 0) or 1
+        number = self.mem.get(occupancy.SEQ, 0) // 2 + 1
+        words = self.occupancy_report or occupancy_words(number, every)
+        for i, w in enumerate(words):
+            self.mem[occupancy.REPORT + 4 * i] = w
+        self.mem[occupancy.SNAPSHOTS] = self.mem.get(occupancy.SNAPSHOTS, 0) + every
+        self.mem[occupancy.SEQ] = 2 * number
 
     def read(self, addr):
         if self.wm_up and addr == wm.STATUS:
@@ -651,20 +678,37 @@ class FakeUnit:
             if argv[2] not in self.files or file == d.download_failure:
                 line = {'at': 'download', 'ok': False, 'phase_name': 'WAIT_DOWNLOAD', 'errno': 'Timer expired'}
                 return StepResult(1, (json.dumps(line) + '\n').encode(), b'', b'')
+            if '--dsp' in flags:
+                d.dsp_loaded = True
             if '--wa' in flags:                           # the last FW_START: the ROM starts our WM
                 d.boot_wm()
             return StepResult(0, b'{"at":"download","ok":true}\n', b'', b'')
         raise AssertionError(f'unexpected client {argv}')
 
 
-FILES = {'patch': 'w1700k_rom_patch.bin', 'wm': 'w1700k_wm.bin', 'wa': 'w1700k_wa.bin'}
+def occupancy_words(number, snapshots, busy_bins=(40, 41, 42), share=0.5, skirts=()):
+    """An occupancy report's words (firmware/dsp/occ_layout.h struct occ_report): noise of 100 a
+    bin, and in `busy_bins` (in the program's order: bin k at k * fs / 64) a signal 20 dB over it
+    in `share` of the snapshots; `skirts`: bins busy with it but not strong."""
+    mean = [100.0 + (10000.0 * share if k in busy_bins else 0.0) for k in range(occupancy.BINS)]
+    most = [10000.0 if k in busy_bins else 130.0 for k in range(occupancy.BINS)]
+    strong = [round(snapshots * share) if k in busy_bins else 0 for k in range(occupancy.BINS)]
+    busy = [round(snapshots * share) if k in skirts else n for k, n in enumerate(strong)]
+    raw = (struct.pack('<IIIIIffI', number, snapshots, 4000, 233600, number * snapshots, 90.0, 900.0, 21) +
+           struct.pack(f'<{occupancy.BINS}f', *mean) + struct.pack(f'<{occupancy.BINS}f', *most) +
+           struct.pack(f'<{occupancy.BINS}I', *busy) + struct.pack(f'<{occupancy.BINS}f', *([100.0] * occupancy.BINS)) +
+           struct.pack(f'<{occupancy.BINS}I', *strong))
+    return list(struct.unpack(f'<{occupancy.REPORT_WORDS}I', raw))
+
+
+FILES = {'patch': 'w1700k_rom_patch.bin', 'wm': 'w1700k_wm.bin', 'dsp': 'w1700k_dsp.bin', 'wa': 'w1700k_wa.bin'}
 
 
 ROM_BASE, ROM = 0x00800000, bytes(range(256)) * 256           # the fake radio's boot ROM: 64 KiB
 
 
 def make_firmware(directory):
-    """A schema 3 firmware.json set (firmware/build.py) with small stand-in images, written for the
+    """A schema 4 firmware.json set (firmware/build.py) with small stand-in images, written for the
     fake radio's ROM."""
     directory = Path(directory)
     containers = []
@@ -672,8 +716,8 @@ def make_firmware(directory):
         data = role.encode() * 64
         (directory / name).write_bytes(data)
         containers.append({'role': role, 'file': name, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
-                           'flags': ['--wa'] if role == 'wa' else []})
-    manifest = {'schema': 3, 'rom': {'base': ROM_BASE, 'size': len(ROM), 'sha256': [hashlib.sha256(ROM).hexdigest()]},
+                           'flags': [f'--{role}'] if role in ('dsp', 'wa') else []})
+    manifest = {'schema': 4, 'rom': {'base': ROM_BASE, 'size': len(ROM), 'sha256': [hashlib.sha256(ROM).hexdigest()]},
                 'containers': containers}
     (directory / 'firmware.json').write_text(json.dumps(manifest))
     return manifest

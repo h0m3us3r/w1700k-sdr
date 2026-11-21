@@ -88,6 +88,46 @@
 #define   MT7996_PROBE_HOOK_RESULT_NOT_REACHED 0xffffffffu
 
 /* ------------------------------------------------------------------------
+ * 0x0090b000: Occupancy (firmware/stream/occ.h, firmware/dsp/occ.c)
+ *
+ * While a stream runs and PERIOD is not 0, our WM has DSP core 0 take the
+ * spectrum of a chunk of the stream now and then and keep account of it; every
+ * EVERY snapshots the core's report is brought here. The host writes the
+ * first three words (EVERY and THRESHOLD before PERIOD) and reads the rest;
+ * our WM clears PERIOD when it starts, so nothing runs that was not asked for.
+ *
+ * A report is read between two reads of SEQ: it is whole when both are the
+ * same even number, and new when that number is not the last one's.
+ * ------------------------------------------------------------------------ */
+#define MT7996_PROBE_OCC_BASE             0x0090b000u
+/* Host: the least number of chunks from one snapshot to the next (the firmware
+ * takes it as that give or take half); 0: off. */
+#define MT7996_PROBE_OCC_PERIOD           (MT7996_PROBE_OCC_BASE + 0x00u)
+/* Host: snapshots to a report (0 as 1). */
+#define MT7996_PROBE_OCC_EVERY            (MT7996_PROBE_OCC_BASE + 0x04u)
+/* Host: a bin is busy above this many times the noise floor; a float's bits. */
+#define MT7996_PROBE_OCC_THRESHOLD        (MT7996_PROBE_OCC_BASE + 0x08u)
+#define MT7996_PROBE_OCC_STATE            (MT7996_PROBE_OCC_BASE + 0x10u)
+#define   MT7996_PROBE_OCC_ST_OFF         0u
+#define   MT7996_PROBE_OCC_ST_RUNNING     1u
+/* What ended it, until PERIOD is written 0 and set again: */
+#define   MT7996_PROBE_OCC_ST_NO_DSP      2u	/* core 0 is in reset, or does not run our program */
+#define   MT7996_PROBE_OCC_ST_DMA_BUSY    3u	/* MEM_DMA was not idle */
+#define   MT7996_PROBE_OCC_ST_DMA_FAILED  4u	/* a copy did not finish, or not at its length */
+#define   MT7996_PROBE_OCC_ST_DSP_SILENT  5u	/* the core did not answer */
+#define MT7996_PROBE_OCC_SNAPSHOTS        (MT7996_PROBE_OCC_BASE + 0x14u)	/* since it was turned on */
+#define MT7996_PROBE_OCC_SEQ              (MT7996_PROBE_OCC_BASE + 0x18u)	/* 2 * reports; odd while one is written */
+/* The report: firmware/dsp/occ_layout.h struct occ_report, 8 words and then
+ * each bin's mean power (float), largest power (float), busy count, noise
+ * (float) and strong count. */
+#define MT7996_PROBE_OCC_REPORT           (MT7996_PROBE_OCC_BASE + 0x40u)
+#define MT7996_PROBE_OCC_REPORT_WORDS     328u	/* to 0x0090b560 */
+/* MEM_DMA's descriptor rings for the copies, 8 descriptors each. */
+#define MT7996_PROBE_OCC_TX_RING          (MT7996_PROBE_OCC_BASE + 0x800u)
+#define MT7996_PROBE_OCC_RX_RING          (MT7996_PROBE_OCC_BASE + 0x880u)
+#define MT7996_PROBE_OCC_END              (MT7996_PROBE_OCC_BASE + 0x900u)
+
+/* ------------------------------------------------------------------------
  * 0x0090f000: the stream producer's done word and results
  * ------------------------------------------------------------------------ */
 /* Done word, 16 bytes below the results: {magic, count or status}. */

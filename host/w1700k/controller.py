@@ -46,7 +46,7 @@ import sys
 import threading
 import time
 
-from . import config, firmware, rf, wm
+from . import config, firmware, occupancy, rf, wm
 from .config import local_link_for
 from dataclasses import replace
 
@@ -378,6 +378,12 @@ class Controller:
         self._require_loaded()
         return rf.set_trim(self._session(), self.band, code)
 
+    def occupancy(self, seconds=occupancy.SECONDS, per_second=occupancy.PER_SECOND,
+                  threshold_db=occupancy.THRESHOLD_DB, keep=False):
+        """One occupancy report of the stream that runs: what the radio's DSP core saw in `seconds`
+        of it, at about `per_second` snapshots a second (occupancy.py). keep: leave it running."""
+        return self.run(None, self._occupancy, seconds, per_second, threshold_db, keep)
+
     def rf_status(self):
         self._require_loaded()
         out = rf.status(self._session(), self.band)
@@ -529,6 +535,30 @@ class Controller:
         if self.filter_follows_rate and self.rf[b]['filter_mhz'] != want:
             rf.set_filter(self._session(), b, want)
             self.rf[b]['filter_mhz'] = want
+
+    def _occupancy(self, seconds, per_second, threshold_db, keep):
+        self._require_loaded()
+        if not self.packing:
+            raise Refused('occupancy is measured beside a stream: start one')
+        if not 0 < seconds <= 600:
+            raise ValueError('occupancy: up to 600 seconds')
+        cfg, session = self.bands[self.band], self._session()
+        every = max(1, round(seconds * per_second))
+        if every > 0xFFFF:
+            raise ValueError('occupancy: at most 65535 snapshots a report')
+        last = occupancy.head(session)['seq']
+        occupancy.on(session, occupancy.period_for(cfg.sample_rate, per_second), every, threshold_db)
+        try:
+            # A report takes as long as its snapshots take, and beside a 320 Msps stream the
+            # firmware gets to fewer of them a second than were asked for.
+            _, words = occupancy.wait(session, last, timeout=4 * seconds + 5)
+        except occupancy.OccupancyError as exc:
+            raise Refused(str(exc))     # nothing is wrong with the receiver: the stream goes on
+        finally:
+            if not keep:
+                occupancy.off(session)
+        result = occupancy.decode(words, cfg.sample_rate, self.rf[self.band]['lo_hz'])
+        return dict(result, wifi=occupancy.wifi_channels(result))
 
     def _command(self, op, *args, timeout=COMMAND_TIMEOUT):
         """One radio command on our WM; raises ControlError with the firmware's reason."""
@@ -815,6 +845,13 @@ def handle(controller, request):
         controller.filter(_require(request, 'mhz', int))
     elif op == 'filter_follow':
         controller.filter_follow(_require(request, 'on', bool))
+    elif op == 'occupancy':
+        seconds, per_second = _require(request, 'seconds', (int, float), True), _require(request, 'per_second', int, True)
+        threshold = _require(request, 'threshold_db', (int, float), True)
+        return {'occupancy': controller.occupancy(occupancy.SECONDS if seconds is None else seconds,
+                                                  occupancy.PER_SECOND if per_second is None else per_second,
+                                                  occupancy.THRESHOLD_DB if threshold is None else threshold,
+                                                  bool(request.get('keep')))}
     else:
         raise ValueError(f'unknown op {op!r}')
     return {}

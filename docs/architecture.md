@@ -15,7 +15,8 @@ receiver controls. The MT7996 runs only our firmware.
 | AN7581 | Linux kernel and root filesystem | minimal musl/BusyBox system; 10 GbE |
 | AN7581 | `w1700k_sdr` kernel module | owns the MT7996: firmware download, the DRAM stream ring, the zero-copy UDP export, the firmware's command mailbox |
 | AN7581 | `mt7996-*` clients | small static programs the host drives over ssh |
-| MT7996 ROM patch | our hooks | firmware loading, the SYSRAM pool layout (1 MiB for capture), no DSP image |
+| MT7996 ROM patch | our hooks | firmware loading, the SYSRAM pool layout (1 MiB for capture), a start without MediaTek's DSP image |
+| MT7996 DSP cores | our occupancy program | core 0 takes the spectrum of chunks of the stream and keeps account of what is in the air |
 | MT7996 WM MCU | our WM | brings the radio up from cold; sets each band's LO, sample rate, filter and capture path on command; runs the stream producer |
 | MT7996 WA MCU | our WA | packs its share of chunks to 28 bits per sample pair |
 | Host (x86 Linux) | `w1700k` | load, configure, stream, RF control: commands to our firmware |

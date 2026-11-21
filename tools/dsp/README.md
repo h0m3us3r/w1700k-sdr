@@ -99,6 +99,9 @@ five sizes (64–8192 bytes), two patterns, 1,280 transfers total. The capture t
 compare every received word and both destination guards; they do not save RF data.
 Timing conversions assume WM at 720 MHz.
 
+The firmware set has a DSP image of its own since (spectrum occupancy, `firmware/dsp/`); `load.py` loads
+the test image in its place for that one load, and the closing `w1700k load` brings ours back.
+
 Everything is loaded into RAM. Use the normal downloader: directly accessing TCM
 while DSP reset is held previously hung the radio bus and required a power cycle.
 Reload before replacing a helper at an already-executed address, because of WM

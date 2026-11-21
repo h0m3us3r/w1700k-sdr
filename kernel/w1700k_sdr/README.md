@@ -141,6 +141,7 @@ mt7996-download $D --reset                       # clean MCU state
 mt7996-probe $D 0x00901000 4 --acquire           # ownership again after the reset
 mt7996-download $D w1700k_rom_patch.bin --i-understand
 mt7996-download $D w1700k_wm.bin --i-understand
+mt7996-download $D w1700k_dsp.bin --i-understand --dsp
 mt7996-download $D w1700k_wa.bin --i-understand --wa
 mt7996-probe $D 0x0090f300 4                     # word0 0x4d57574f ("OWWM"): our WM's status block
 ```

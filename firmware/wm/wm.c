@@ -175,6 +175,11 @@ void wm_main(void)
 	ST(WM_RADIO_EE) = (uint32_t)(uintptr_t)radio_ee;
 	ST(WM_RF_BUILD) = (uint32_t)(uintptr_t)rfctl_build;
 	ST(WM_UNLOCK) = 0;	/* locked at every start: the guard is lifted by the host, for a load at a time */
+	/* Occupancy (stream/occ.h) is off until a host turns it on: the page holds whatever it held. */
+	R32(MT7996_PROBE_OCC_PERIOD) = 0;
+	R32(MT7996_PROBE_OCC_STATE) = MT7996_PROBE_OCC_ST_OFF;
+	R32(MT7996_PROBE_OCC_SNAPSHOTS) = 0;
+	R32(MT7996_PROBE_OCC_SEQ) = 0;
 	ST(WM_DENIED) = 0;
 	ST(WM_RADIO_STATE) = 0;
 	ST(WM_RADIO_ACK) = ST(WM_RADIO_REQ);

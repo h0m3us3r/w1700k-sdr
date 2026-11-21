@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: MIT
 """Our firmware set built by `make -C firmware`, described by its firmware.json: the ROM patch, the
-WM and the WA, in download order, and the ROM they are written for."""
+WM, the DSP image and the WA, in download order, and the ROM they are written for."""
 import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA = 3
-ROLES = ('patch', 'wm', 'wa')
+SCHEMA = 4
+ROLES = ('patch', 'wm', 'dsp', 'wa')
 
 
 class FirmwareError(RuntimeError):
