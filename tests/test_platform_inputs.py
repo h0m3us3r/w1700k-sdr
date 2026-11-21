@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""What the platform build is made from is what is pinned (platform/sources.json): a source
-checkout kept between builds, and the host tools built from a pinned source."""
+"""What the platform build is made from is what is pinned (platform/sources.json): an archive
+from whichever of its addresses gives the pinned file, a source checkout kept between builds, and
+the host tools built from a pinned source."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -67,6 +68,74 @@ class KeptCheckout(unittest.TestCase):
         self.assertNotEqual(pinned, self.commit)
         self.checkout()
         self.assertIn('false', (self.kept / 'Makefile').read_text())
+
+
+class Download(unittest.TestCase):
+    """An archive comes from the first of its addresses that gives the pinned file."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+        patch = mock.patch.object(fetch, 'DOWNLOADS', self.dir / 'downloads')
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.good, self.other = b'the release' * 100, b'something else under its name'
+        self.sha256 = buildlib.sha256_file(self.put('site/u-boot.tar.bz2', self.good))
+        self.cached = self.dir / 'downloads/u-boot.tar.bz2'
+
+    def put(self, name, data):
+        path = self.dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def url(self, name):
+        return (self.dir / name).as_uri()
+
+    def fetch(self, *urls):
+        with mock.patch('builtins.print'):
+            return fetch.download(urls[0], self.sha256, mirrors=urls[1:])
+
+    def test_the_first_address_when_it_answers(self):
+        self.put('mirror/u-boot.tar.bz2', self.other)       # never asked
+        self.assertEqual(self.fetch(self.url('site/u-boot.tar.bz2'), self.url('mirror/u-boot.tar.bz2')), self.cached)
+        self.assertEqual(self.cached.read_bytes(), self.good)
+
+    def test_a_mirror_when_the_first_is_gone(self):
+        """As when ftp.denx.de stopped answering (issue 37)."""
+        self.assertEqual(self.fetch(self.url('gone/u-boot.tar.bz2'), self.url('site/u-boot.tar.bz2')), self.cached)
+        self.assertEqual(self.cached.read_bytes(), self.good)
+
+    def test_an_address_with_another_file_under_the_name_is_passed_over(self):
+        self.put('mirror/u-boot.tar.bz2', self.other)
+        self.fetch(self.url('mirror/u-boot.tar.bz2'), self.url('site/u-boot.tar.bz2'))
+        self.assertEqual(self.cached.read_bytes(), self.good)
+
+    def test_when_none_gives_it_each_is_named_and_where_a_copy_may_be_put(self):
+        self.put('mirror/u-boot.tar.bz2', self.other)
+        with self.assertRaises(buildlib.BuildError) as raised:
+            self.fetch(self.url('gone/u-boot.tar.bz2'), self.url('mirror/u-boot.tar.bz2'))
+        text = str(raised.exception)
+        self.assertIn('gone/u-boot.tar.bz2: ', text)
+        self.assertIn('mirror/u-boot.tar.bz2: its SHA-256 ', text)
+        self.assertIn(f'put it at {self.cached}', text)
+        self.assertIn(self.sha256, text)
+        self.assertFalse(list((self.dir / 'downloads').iterdir()), 'nothing half-fetched is left')
+
+    def test_a_copy_put_there_by_hand_is_taken_if_it_is_the_pinned_file(self):
+        self.put('downloads/u-boot.tar.bz2', self.good)
+        self.assertEqual(self.fetch(self.url('gone/u-boot.tar.bz2')), self.cached)
+        self.cached.write_bytes(self.other)
+        with self.assertRaisesRegex(buildlib.BuildError, 'is not the pinned'):
+            self.fetch(self.url('gone/u-boot.tar.bz2'))
+        self.assertFalse(self.cached.exists(), 'and removed if it is not')
+
+    def test_every_archive_in_the_pins_names_https_addresses(self):
+        pins = buildlib.sources()
+        for name in ('linux', 'u-boot'):
+            for address in (pins[name]['url'], *pins[name].get('mirrors', ())):
+                self.assertTrue(address.startswith('https://') and address.endswith(pins[name]['url'].rsplit('/', 1)[1]),
+                                f'{name}: {address}')
 
 
 class Mkimage(unittest.TestCase):

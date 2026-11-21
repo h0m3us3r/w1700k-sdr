@@ -5,7 +5,7 @@
     platform/fetch.py [buildroot|openwrt|linux|u-boot ...]   # default: all
 
 Archives are checked against their SHA-256 and git checkouts against their
-commit. Everything is cached under platform/build/downloads and platform/build/src,
+commit. An archive may name mirrors, tried in order after its first address. Everything is cached under platform/build/downloads and platform/build/src,
 so a second run does nothing.
 
 W1700K_OPENWRT_GIT overrides the OpenWrt repository URL (for example a local
@@ -24,22 +24,41 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from buildlib import (DOWNLOADS, SRC, BuildError, main_guard, output, require, run,
                       sha256_file, sources)
 
+DOWNLOAD_TIMEOUT = 30       # seconds for a site to answer, and between two pieces of its answer
 
-def download(url, sha256, name=None):
-    """Fetch `url` into the download cache once and return the verified file."""
+
+def download(url, sha256, name=None, mirrors=()):
+    """Fetch `url` into the download cache once and return the verified file.
+
+    `mirrors`: other places that keep the same file, tried in order when the one before does not
+    give it. Whichever answers, the file is held to its SHA-256, so a mirror is trusted with
+    nothing; and so is a file put into the cache by hand.
+    """
     target = DOWNLOADS / (name or url.rsplit('/', 1)[1])
     if not target.is_file():
         DOWNLOADS.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + '.part')
-        print(f'fetch: downloading {url}')
-        try:
-            with urllib.request.urlopen(url, timeout=120) as response, \
-                    partial.open('wb') as stream:
-                shutil.copyfileobj(response, stream)
-        except OSError as error:
-            partial.unlink(missing_ok=True)
-            raise BuildError(f'cannot download {url}: {error}') from None
-        partial.replace(target)
+        failures = []
+        for source in (url, *mirrors):
+            print(f'fetch: downloading {source}')
+            try:
+                with urllib.request.urlopen(source, timeout=DOWNLOAD_TIMEOUT) as response, \
+                        partial.open('wb') as stream:
+                    shutil.copyfileobj(response, stream)
+            except OSError as error:
+                partial.unlink(missing_ok=True)
+                failures.append(f'{source}: {error}')
+                continue
+            actual = sha256_file(partial)
+            if actual == sha256:
+                partial.replace(target)
+                break
+            partial.unlink()
+            failures.append(f'{source}: its SHA-256 {actual} is not the pinned one')
+        else:
+            raise BuildError(f'cannot download {target.name}:\n  ' + '\n  '.join(failures) +
+                             f'\nA copy from anywhere else will do: put it at {target}, where it is held to '
+                             f'its pinned SHA-256 {sha256} like any download')
     actual = sha256_file(target)
     if actual != sha256:
         target.unlink()
@@ -118,12 +137,12 @@ def openwrt():
 
 def linux_archive():
     pin = sources()['linux']
-    return download(pin['url'], pin['sha256'])
+    return download(pin['url'], pin['sha256'], mirrors=pin.get('mirrors', ()))
 
 
 def uboot_archive():
     pin = sources()['u-boot']
-    return download(pin['url'], pin['sha256'])
+    return download(pin['url'], pin['sha256'], mirrors=pin.get('mirrors', ()))
 
 
 FETCHERS = {'buildroot': buildroot, 'openwrt': openwrt, 'linux': linux_archive,

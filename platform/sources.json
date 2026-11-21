@@ -24,7 +24,12 @@
   },
   "u-boot": {
     "version": "2026.07",
-    "url": "https://ftp.denx.de/pub/u-boot/u-boot-2026.07.tar.bz2",
+    "url": "https://sources.buildroot.net/uboot/u-boot-2026.07.tar.bz2",
+    "mirrors": [
+      "https://sources.openwrt.org/u-boot-2026.07.tar.bz2",
+      "https://web.archive.org/web/20260917180922id_/https://ftp.denx.de/pub/u-boot/u-boot-2026.07.tar.bz2",
+      "https://ftp.denx.de/pub/u-boot/u-boot-2026.07.tar.bz2"
+    ],
     "sha256": "78e8bfc382fe388f9b55aa1daf8c563522a037779b5d4c349d1415e381f1243e"
   },
   "rtl8261n": {
