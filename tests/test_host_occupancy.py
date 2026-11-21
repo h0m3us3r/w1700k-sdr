@@ -223,6 +223,15 @@ class Command(unittest.TestCase):
             self.ctl.occupancy()
         self.assertNotIn(occupancy.PERIOD, self.dev.mem)
 
+    def test_a_stream_of_two_channels_is_refused_and_nothing_is_written(self):
+        """Its chunks hold two chains' samples in turn, which the DSP would read as one."""
+        self.ctl.configure(0, sample_rate=40_000_000)
+        self.ctl.start(channels=2)
+        with self.assertRaisesRegex(Refused, 'one channel'):
+            self.ctl.occupancy()
+        self.assertNotIn(occupancy.PERIOD, self.dev.mem)
+        self.assertTrue(self.ctl.state()['stream']['running'])
+
     def test_a_set_without_the_dsp_image_is_said_and_is_not_the_receivers_error(self):
         self.ctl.start()
         self.dev.dsp_loaded = False

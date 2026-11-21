@@ -25,6 +25,7 @@ register against a trace of MediaTek's own firmware, and takes its commands
 | --- | --- |
 | Sample rates | 40, 80, 160 or 320 Msps of 14-bit complex IQ on every band, independent of the LO and the filter; on band 2 also 640/2 (every other sample of 640 Msps: flat to ±155 MHz, but signals 160–320 MHz away fold in) |
 | Bands | 2.4 GHz (MT7976), 5 GHz and 6 GHz (two MT7977s); switching bands is a register write inside a running stream |
+| Channels | One, or two at once: chains 0 and 1 of a band sampled at the same instants, up to 160 Msps each (`w1700k start --channels 2`); every consumer reads both together |
 | Tuning | No channels: the LO is any Hz a band's synthesizer locks at (unit A: 2.081–2.748, 4.647–7.509 and 4.707–7.576 GHz), on its grid of 2.98 Hz (2.4 GHz) or 11.9–14.3 Hz steps; retuned mid-stream (about 1 ms) |
 | Front end | AGC or manual LNA/baseband gain; analog filter 20–320 MHz |
 | Occupancy | `w1700k occupancy`: what is in the air around the LO, per 64th of the sample rate and per Wi-Fi channel (how strong, what share of the time), worked out on one of the radio's own DSP cores beside the running stream, which loses nothing for it |

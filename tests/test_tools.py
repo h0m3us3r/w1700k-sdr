@@ -108,6 +108,16 @@ class SweepModes(unittest.TestCase):
                          [('6 GHz at 320 Msps, captured at 640', 'every other sample kept', 2, 320_000_000,
                            640_000_000, None)])
 
+    def test_two_channels_on_every_band_where_twice_the_rate_fits_the_link(self):
+        import unit_sweep
+        fits = unit_sweep.two_channel_modes(5000, None)
+        self.assertEqual([(m[2], m[3], m[5], m[6]) for m in fits],
+                         [(b, r * 10**6, None, 2) for b in (0, 1, 2) for r in (40, 80, 160)])
+        self.assertEqual(fits[0][0], '2.4 GHz, two channels at 40 Msps')
+        slow = {m[3]: m[5] for m in unit_sweep.two_channel_modes(2500, None) if m[2] == 1}
+        self.assertEqual(slow, {40_000_000: None, 80_000_000: None, 160_000_000: unit_sweep.REFUSED},
+                         '2 x 160 Msps is 320 Msps to a link, which 2.5 Gbit/s does not carry')
+
     def test_the_other_packings_are_those_the_link_carries(self):
         by_hand = {}
         for _, _, band, rate, _, packing in self.modes(5000):

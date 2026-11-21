@@ -124,6 +124,7 @@ void SpectrumSettings::validate() const
         throw std::runtime_error("unknown FFT window " + window);
     if (!(rate >= 1 && rate <= 100)) throw std::runtime_error("FFT rate must be 1..100 frames per second");
     if (averaging > 100000) throw std::runtime_error("averaging must be at most 100000 blocks");
+    if (channel > kBothChannels) throw std::runtime_error("channel must be 0, 1 or 2 (both)");
 }
 
 // The plan of one FFT size, in place (a worker's block then stays in 2 MiB at the largest size,
@@ -183,6 +184,9 @@ struct SpectrumEngine::Job {
     std::shared_ptr<const Transform> transform;
     Tuning tuning;
     bool peak = false, remove_dc = false;
+    // Sample times in a slot of the run, and where the channel shown begins in a slot: a
+    // two-channel run's slots are channel 0's samples, then channel 1's (w1700k_stream.h).
+    unsigned per = kSliceSamples, channel = 0;
 };
 
 struct SpectrumEngine::Worker {
@@ -374,6 +378,10 @@ void SpectrumEngine::schedule()
     std::shared_ptr<const Transform> t;
     Segment current;
     std::deque<Segment> upcoming;
+    // Sample positions count a run's sample times: `per` of them to a slot, 2048 of a one-channel
+    // run and 1024 of a two-channel one, whose frames are of the one channel shown.
+    uint64_t per = kSliceSamples;
+    unsigned channels = 1;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         current = history_.front();
@@ -398,6 +406,8 @@ void SpectrumEngine::schedule()
         const uint64_t r = position.run, newest = position.newest;
         if (r != run) {
             run = r;
+            channels = position.channels == 2 ? 2 : 1;
+            per = kSliceSamples / channels;
             frontier = next = 0;
         }
         if (version != applied || !t) {
@@ -405,7 +415,7 @@ void SpectrumEngine::schedule()
             active = s;
             applied = version;
             replan = true;
-            next = std::max(next, frontier * kSliceSamples);
+            next = std::max(next, frontier * per);
         }
 
         uint64_t lost = 0, skipped = 0, dropped = 0, retuned = 0;
@@ -413,7 +423,7 @@ void SpectrumEngine::schedule()
         if (newest > frontier + capacity / 2) {  // far behind (planning a new size): what was there is gone
             skipped += newest - capacity / 4 - frontier;
             frontier = newest - capacity / 4;
-            next = std::max(next, frontier * kSliceSamples);
+            next = std::max(next, frontier * per);
         }
         while (frontier < newest) {
             const uint64_t tag = view->tag(frontier);
@@ -430,7 +440,7 @@ void SpectrumEngine::schedule()
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (;;) {
-                while (!upcoming.empty() && !after(upcoming.front().run, upcoming.front().from, run, next / kSliceSamples)) {
+                while (!upcoming.empty() && !after(upcoming.front().run, upcoming.front().from, run, next / per)) {
                     current = upcoming.front();
                     upcoming.pop_front();
                     replan = true;
@@ -444,11 +454,11 @@ void SpectrumEngine::schedule()
                     replan = false;
                 }
                 const uint64_t end = next + frame_pairs;
-                if (end > frontier * kSliceSamples) break;
+                if (end > frontier * per) break;
                 if (!upcoming.empty() &&
-                    !after(upcoming.front().run, upcoming.front().from, run, (end - 1) / kSliceSamples)) {
+                    !after(upcoming.front().run, upcoming.front().from, run, (end - 1) / per)) {
                     ++retuned;  // spans a change: resume where it takes effect
-                    next = upcoming.front().from * kSliceSamples;
+                    next = upcoming.front().from * per;
                     continue;
                 }
                 if (!current.valid) {
@@ -461,18 +471,26 @@ void SpectrumEngine::schedule()
                         else if (jobs_.size() >= workers_.size()) share = std::max(1.0 / blocks, share * kShareEase);
                         use = std::clamp(unsigned(std::lround(blocks * share)), 1u, blocks);
                     }
-                    Job job;
-                    job.view = view;
-                    job.sequence = sequence++;
-                    job.run = run;
-                    job.first = next;
-                    job.stride = use == blocks ? stride : use > 1 ? (frame_pairs - active.size) / (use - 1) : 0;
-                    job.blocks = use;
-                    job.transform = t;
-                    job.tuning = current.tuning;
-                    job.peak = active.peak;
-                    job.remove_dc = active.remove_dc;
-                    jobs_.push_back(std::move(job));
+                    // One job a channel shown, over the same samples: with both, channel 0's
+                    // frame and then channel 1's, which go out in that order (finish()).
+                    const bool both = channels == 2 && active.channel == SpectrumSettings::kBothChannels;
+                    const unsigned first_channel = both || channels != 2 ? 0 : std::min(active.channel, 1u);
+                    for (unsigned c = first_channel; c <= (both ? 1u : first_channel); ++c) {
+                        Job job;
+                        job.view = view;
+                        job.sequence = sequence++;
+                        job.run = run;
+                        job.first = next;
+                        job.stride = use == blocks ? stride : use > 1 ? (frame_pairs - active.size) / (use - 1) : 0;
+                        job.blocks = use;
+                        job.transform = t;
+                        job.tuning = current.tuning;
+                        job.peak = active.peak;
+                        job.remove_dc = active.remove_dc;
+                        job.per = unsigned(per);
+                        job.channel = c;
+                        jobs_.push_back(std::move(job));
+                    }
                     queued = true;
                 } else {
                     dropped += frame_pairs;
@@ -520,7 +538,7 @@ void SpectrumEngine::work(Worker &w)
         uint64_t missing = 0;
         for (unsigned b = 0; b < job.blocks; ++b) {
             const uint64_t position = job.first + b * job.stride;
-            const uint64_t s0 = position / kSliceSamples, s1 = (position + n - 1) / kSliceSamples;
+            const uint64_t s0 = position / job.per, s1 = (position + n - 1) / job.per;
             auto present = [&] {
                 for (uint64_t s = s0; s <= s1; ++s)
                     if (!StreamView::holds_samples(job.view->tag(s), job.run, s)) return false;
@@ -534,8 +552,8 @@ void SpectrumEngine::work(Worker &w)
             auto each = [&](auto fn) {
                 uint64_t p = position;
                 for (unsigned k = 0; k < n;) {
-                    const int16_t *iq = job.view->slice(p / kSliceSamples);
-                    unsigned offset = unsigned(p % kSliceSamples), m = std::min(n - k, kSliceSamples - offset);
+                    const int16_t *iq = job.view->slice(p / job.per) + 2 * size_t(job.channel) * job.per;
+                    unsigned offset = unsigned(p % job.per), m = std::min(n - k, job.per - offset);
                     for (unsigned j = 0; j < m; ++j) fn(k + j, float(iq[2 * (offset + j)]), float(iq[2 * (offset + j) + 1]));
                     k += m;
                     p += m;
@@ -583,6 +601,7 @@ void SpectrumEngine::work(Worker &w)
             frame->sample_rate = job.tuning.sample_rate;
             frame->blocks = used;
             frame->peak = job.peak;
+            frame->channel = job.channel;
             frame->power.resize(n);
             // I + jQ is RF minus LO (a carrier below the LO has a negative frequency): display
             // bin i is RF offset (i - n/2) * rate / n, FFT bin (i - n/2) mod n: the two halves

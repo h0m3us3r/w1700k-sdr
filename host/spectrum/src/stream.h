@@ -71,6 +71,7 @@ public:
 
     struct Position {
         uint64_t run = 0, newest = 0;  // run: a run identifier (StreamView::run_id), 0: none
+        unsigned channels = 1;         // the run's: 2 lays each slot out by channel (w1700k_stream.h)
     };
     Position position() const;
 
@@ -87,6 +88,9 @@ public:
     // Control, kept here and written again into a restarted service.
     void restart_run();
     void set_radio(double sample_rate, double capture_rate, double filter_hz);
+    // The channels of the stream that is running, as the controller reports them: written again
+    // into a restarted service, which was told of them only once, by whoever started the stream.
+    void set_channels(unsigned channels);
     void set_flatten(bool on);
     bool flatten() const;
 
@@ -98,4 +102,5 @@ private:
     std::shared_ptr<const StreamView> view_;
     uint64_t epoch_ = 0;
     uint64_t flatten_ = 0, sample_rate_ = 0, capture_rate_ = 0, filter_hz_ = 0;
+    uint64_t channels_ = 0;  // 0: not known here, the word is left as it is
 };

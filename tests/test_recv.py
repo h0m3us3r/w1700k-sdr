@@ -12,8 +12,9 @@ import tempfile
 import time
 import unittest
 
-from stream_shm import ready as stream_ready
-from test_stream import BINARY as STREAM_BINARY, MAGIC, STREAM, build_problem, free_udp_port, noise_words, pack, unpacked
+from stream_shm import Shm, ready as stream_ready
+from test_stream import (BINARY as STREAM_BINARY, MAGIC, STREAM, build_problem, free_udp_port, noise_words, pack,
+                         two_channels, unpacked)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RECV = os.path.join(ROOT, "host", "recv")
@@ -81,7 +82,7 @@ class SdrRecvTest(unittest.TestCase):
             else:
                 self.send(s, struct.pack("<2048I", *words[s]))
         report = self.finish(process)
-        self.assertEqual((report["run"], report["first_slice"], report["slices"]), (1, 0, 1199))
+        self.assertEqual((report["run"], report["channels"], report["first_slice"], report["slices"]), (1, 1, 0, 1199))
         self.assertEqual((report["events"], report["lost"], report["lost_examples"], report["overruns"]),
                          (1, 1, [30], 0))
         self.assertEqual(report["ended"], "idle")
@@ -90,6 +91,41 @@ class SdrRecvTest(unittest.TestCase):
         expected = b"".join(
             b"\x00" * 8192 if s == 30 else struct.pack("<4096h", *(v for iq in unpacked(words[s]) for v in iq))
             for s in range(1200) if s != 20)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), expected)
+
+    def test_a_run_of_two_channels_is_recorded_a_sample_time_at_a_time(self):
+        """Whoever starts the stream says two channels first (radio_channels). The recording then
+        holds, per sample time, channel 0's I and Q and channel 1's; a lost slice is zeros in
+        both, and the report and PATH.json say what the file is."""
+        shm = Shm(self.name)
+        self.addCleanup(shm.close)
+        shm.set("radio_channels", 2)
+        time.sleep(0.3)
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory)
+        path = os.path.join(directory, "two.ci16")
+        process = self.recorder("--out", path, "--capacity-mib", "64", "--seconds", "30")
+        words = {s: noise_words(s) for s in range(1200)}
+        for s in range(1200):
+            if s == 20:
+                self.send(s, b"\x00" * 64)                                   # a firmware event
+            elif s == 30:
+                continue                                                     # lost
+            else:
+                self.send(s, struct.pack("<2048I", *words[s]))
+        report = self.finish(process)
+        self.assertEqual((report["run"], report["channels"], report["slices"], report["samples"]), (1, 2, 1199, 1199 * 1024))
+        self.assertEqual((report["events"], report["lost"], report["lost_examples"]), (1, 1, [30]))
+        self.assertIn("two channels", report["format"])
+        with open(path + ".json") as f:
+            self.assertEqual(json.load(f)["channels"], 2)
+
+        def frames(w):
+            c0, c1 = two_channels(w)
+            return struct.pack("<4096h", *(v for a, b in zip(c0, c1) for v in (*a, *b)))
+
+        expected = b"".join(b"\x00" * 8192 if s == 30 else frames(words[s]) for s in range(1200) if s != 20)
         with open(path, "rb") as f:
             self.assertEqual(f.read(), expected)
 
@@ -126,7 +162,7 @@ class NotTheServicesRing(unittest.TestCase):
         self.addCleanup(os.unlink, self.path)
         try:
             os.ftruncate(fd, size)
-            head = struct.pack("<IIIIQQQQQ", 0x4D525453, 1, 4096, 2048, slices, tags, samples, size, os.getpid())
+            head = struct.pack("<IIIIQQQQQ", 0x4D525453, 2, 4096, 2048, slices, tags, samples, size, os.getpid())
             os.pwrite(fd, head, 0)
             os.pwrite(fd, struct.pack("<Q", time.clock_gettime_ns(time.CLOCK_MONOTONIC)), 56)
             os.pwrite(fd, struct.pack("<QQQ", 0, 1, 64), 128)

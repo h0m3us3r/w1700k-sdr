@@ -88,6 +88,35 @@ class RadioCode(unittest.TestCase):
         cls.steps = cls.load('steps')
         cls.commands = cls.load('commands')
 
+    def arm(self, paths):
+        """(the arm's writes, the disarm's): [(address, value)] each, in order."""
+        out = subprocess.run([str(self.binary), 'arm', paths], capture_output=True, text=True, check=True).stdout
+        before, _, after = out.partition('disarm\n')
+        parse = lambda text: [(int(a, 16), int(v, 16)) for op, a, v in (line.split() for line in text.splitlines())
+                              if op == 'W']
+        self.assertEqual(len(out.splitlines()) - 1, len(parse(before)) + len(parse(after)), 'writes, and nothing else')
+        return parse(before), parse(after)
+
+    def test_a_stream_of_two_paths_is_armed_as_one_is_but_for_the_packer(self):
+        """ICAP0's 64 -> 128 packer makes a beat four sample times of path 0; with it off a beat is
+        two sample times of each of the band's two capture paths (iq_format.h). That one word is
+        all that differs, the route's hazardous grants are driven by neither, and a disarm leaves
+        the packer off either way."""
+        ROUTE, CR10 = 0x88009000, 0x80023000 + 0x90 + 4 * 10
+        one, one_off = self.arm('one')
+        two, two_off = self.arm('two')
+        self.assertEqual(dict(one)[CR10], 1 << 16)
+        self.assertEqual(dict(two)[CR10], 0)
+        self.assertEqual([w for w in one if w[0] != CR10], [w for w in two if w[0] != CR10])
+        self.assertEqual(one_off, two_off)
+        self.assertEqual(dict(one_off)[CR10], 0)
+        for writes in (one, two, one_off, two_off):
+            grants = {a: v for a, v in writes if a in (ROUTE + 0x00, ROUTE + 0x08)}
+            self.assertFalse(any(grants.values()), 'cap_route.h HAZARD: +0x00 and +0x08 are never driven')
+            self.assertFalse(any(v & 0x00ffffff for a, v in writes if a == ROUTE + 0x04),
+                             'nor the low 24 bits of +0x04')
+        self.assertEqual(one[-1][0], CR10, 'the packer is set last, once ICAP0 is stopped over the ring')
+
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
@@ -256,6 +285,89 @@ class RadioCode(unittest.TestCase):
             self.assertTrue(frac and all(f & 1 == 0 for f in frac), (band, hz))
             self.assertEqual(p['lo'] | p['lo_hi'] << 32, radio.actual_lo(band, hz), (band, hz))
 
+    def hold_op(self, band, hz):
+        return (rf.RF_HOLD | band << 8, hz & 0xFFFFFFFF, hz >> 32)
+
+    def tune_op(self, band, hz):
+        return (rf.RF_TUNE | band << 8, hz & 0xFFFFFFFF, hz >> 32)
+
+    def test_hold_moves_the_frequency_words_alone(self):
+        """A HOLD's program: the INT word, the FRAC word with its load bit (the two a TUNE to the same
+        LO writes), the settling time, a TUNE's four health reads and the frequency note. Nothing of
+        the lock: no preset, no band search, no lock step. No outcome is judged in the unit (the
+        status word's flag is a full lock's)."""
+        for band, sx, at, to in ((0, 0, 2_442_000_000, 2_450_000_000), (1, 4, 5_250_000_000, 5_262_500_000),
+                                 (2, 4, 6_105_000_000, 6_089_000_000)):
+            tune, hold, there = self.rfctl(self.tune_op(band, at), self.hold_op(band, to), self.tune_op(band, to))
+            self.assertEqual(hold['res'], 0, band)
+            ops = [tuple(o) for o in hold['ops']]
+            words = {r: [o[2] for o in there['ops'] if o[0] == rf.AW and o[1] == rf.reg(band, sx, r)][-1]
+                     for r in (0xA4B, 0xA4A)}
+            self.assertEqual(ops[:2], [rf.aw(rf.reg(band, sx, 0xA4B), words[0xA4B]),
+                                       rf.aw(rf.reg(band, sx, 0xA4A), words[0xA4A])], band)
+            self.assertTrue(ops[1][2] >> 31, 'the load bit: without it the words are not taken')
+            self.assertEqual(ops[2], rf.delay(500))
+            self.assertEqual(hold['count'], 8)
+            self.assertEqual((hold['out'], hold['check']), (3, 0xFFFFFFFF))
+            self.assertEqual(ops[3:5], [rf.ar(rf.reg(band, sx, 0xCA4)), rf.ar(rf.reg(band, sx, 0xCD1))])
+            self.assertEqual(ops[3:7], [tuple(o) for o in there['ops'][there['out']:there['out'] + 4]],
+                             'the health reads of a TUNE')
+            self.assertEqual((ops[7][0], ops[7][2]), (rf.AW, to // 1000))
+            self.assertEqual(hold['lo'] | hold['lo_hi'] << 32, radio.actual_lo(band, to))
+
+    def test_hold_reaches_only_from_the_lock(self):
+        """Refused with no lock to keep, farther than the measured reach from where the band last
+        locked (however many HOLDs came between: the reach is the lock's, not the last LO's), outside
+        the band's range, and on an MT7977 where the target has other presets than the lock's."""
+        m = 1_000_000
+        self.assertEqual(self.rfctl(self.hold_op(1, 5250 * m))[0]['res'], CTL_BAD_ARG, 'never locked')
+        res = [p['res'] for p in self.rfctl(
+            self.tune_op(1, 5250 * m), self.hold_op(1, 5266 * m), self.hold_op(1, 5234 * m),
+            self.hold_op(1, 5267 * m), self.hold_op(1, 5233 * m), self.hold_op(2, 5250 * m),
+            self.hold_op(1, 5260 * m), self.hold_op(1, 5266 * m),            # 16 from the lock, 6 from the LO
+            self.hold_op(1, 5270 * m),                                         # 10 from the LO, 20 from the lock
+            self.tune_op(1, 5270 * m), self.hold_op(1, 5280 * m),
+            # a lock's LO is the one its words gave, a few Hz off the one asked: the reach allows for it
+            self.tune_op(1, 5530 * m), self.hold_op(1, 5546 * m), self.hold_op(1, 5546 * m + 2000))]
+        self.assertEqual(res, [0, 0, 0, CTL_BAD_ARG, CTL_BAD_ARG, CTL_BAD_ARG, 0, 0, CTL_BAD_ARG, 0, 0,
+                               0, 0, CTL_BAD_ARG])
+        self.assertNotEqual(radio.actual_lo(1, 5530 * m), 5530 * m, 'the case is one off the grid')
+        low = rf.LO_RANGE[0][0]
+        res = [p['res'] for p in self.rfctl(self.tune_op(0, low + 4 * m), self.hold_op(0, low), self.hold_op(0, low - m),
+                                            # the MT7976 uses more of its tuning range for a move: 12 MHz there
+                                            self.tune_op(0, 2442 * m), self.hold_op(0, 2454 * m), self.hold_op(0, 2430 * m),
+                                            self.hold_op(0, 2455 * m), self.hold_op(0, 2429 * m))]
+        self.assertEqual(res, [0, 0, CTL_BAD_ARG, 0, 0, 0, CTL_BAD_ARG, CTL_BAD_ARG])
+        self.assertEqual(rf.HOLD_REACH_HZ, {0: 12 * m, 1: 16 * m, 2: 16 * m}, 'the host says what the unit does')
+
+    def test_hold_stays_on_the_locks_ratio(self):
+        """An MT7977's VCO runs at 8/5 of the LO below 5926 MHz and 4/3 of it from there: a HOLD does
+        not cross (the same LO is another VCO frequency), and on either side its words are the
+        ratio's. Preset Groups and RCD ranges it does cross: they are steps of 80 MHz and more."""
+        m = 1_000_000
+        for band in (1, 2):
+            res = [p['res'] for p in self.rfctl(
+                self.tune_op(band, 5920 * m), self.hold_op(band, 5925 * m), self.hold_op(band, 5926 * m),
+                self.tune_op(band, 5930 * m), self.hold_op(band, 5926 * m), self.hold_op(band, 5925 * m),
+                self.tune_op(band, 5250 * m), self.hold_op(band, 5260 * m),       # Group 1 to Group 2
+                self.tune_op(band, 5530 * m), self.hold_op(band, 5540 * m))]      # RCD range 0 to 1
+            self.assertEqual(res, [0, 0, CTL_BAD_ARG, 0, 0, CTL_BAD_ARG, 0, 0, 0, 0], band)
+
+    def test_rephase_switches_one_chain_and_nothing_else(self):
+        """The chain's blocks to software control, receiving, off, and back to the D-die's: the
+        order measured to start its LO path again. No transmit block is named, no other chain or
+        die touched; a chain the band does not have is refused."""
+        for band, chain in ((0, 1), (1, 1), (2, 4), (1, 0)):
+            p = self.rfctl((rf.RF_REPHASE | band << 8, chain, 0))[0]
+            self.assertEqual(p['res'], 0)
+            ovr, en = rf.reg(band, chain, 0x011), rf.reg(band, chain, 0x010)
+            self.assertEqual([tuple(o) for o in p['ops']],
+                             [rf.aw(ovr, 0x80000000), rf.aw(en, 0x0003fbcb), rf.delay(1000), rf.aw(en, 0), rf.aw(ovr, 0)])
+            self.assertFalse(0x0003fbcb & 0x31f80004, 'no transmit block, no transmit detector')
+        refused = self.rfctl((rf.RF_REPHASE, 4, 0), (rf.RF_REPHASE | 1 << 8, 4, 0), (rf.RF_REPHASE | 2 << 8, 5, 0),
+                             (rf.RF_REPHASE | 3 << 8, 0, 0))
+        self.assertEqual([p['res'] for p in refused], [CTL_BAD_ARG] * 4)
+
     def test_programs(self):
         """Gain, filter, trim, status, locks and band switch as rf.py built them."""
         csd = lambda band, chain: 0x83000000 + (band << 20) + (chain << 16) + 0xC4    # noqa: E731
@@ -275,7 +387,7 @@ class RadioCode(unittest.TestCase):
         sx = [rf.ar(rf.reg(2, 4, r)) for r in (0xA4B, 0xA4A, 0xA40, 0xCA4)]
         self.assertEqual(ops(status), sx + [rf.ar(rf.reg(2, 0, 0xBC8))] +
                          [rf.ar(rf.reg(2, k, 0x100)) for k in range(5)] + [rf.r32(csd(2, c)) for c in range(5)])
-        self.assertEqual(ops(locks), [rf.ar(rf.reg(b, 0 if b == 0 else 4, 0xCA4)) for b in range(3)])
+        self.assertEqual(ops(locks), [rf.ar(rf.reg(b, 0 if b == 0 else 4, r)) for r in (0xCA4, 0xCD1) for b in range(3)])
         self.assertEqual(ops(band), [rf.r32(0x800230B4)] + [rf.w32(a, 2) for a in (0x800230B0, 0x800240B0, 0x800250B0)]
                          + [rf.r32(0x800230B4)])
         for p in (trim, status, locks, band):
@@ -324,7 +436,7 @@ class RadioCode(unittest.TestCase):
                  ((rf.RF_TRIM, 31, 0), 0), ((rf.RF_TRIM, 32, 0), CTL_BAD_ARG),
                  ((rf.RF_FILTER, 10, 0), CTL_BAD_ARG), ((rf.RF_FILTER, 640, 0), CTL_BAD_ARG),
                  ((rf.RF_STATUS | 3 << 8, 0, 0), CTL_BAD_ARG), ((rf.RF_BAND | 3 << 8, 0, 0), CTL_BAD_ARG),
-                 ((0, 0, 0), CTL_BAD_ARG), ((rf.RF_BAND + 1, 0, 0), CTL_BAD_ARG)]
+                 ((0, 0, 0), CTL_BAD_ARG), ((99, 0, 0), CTL_BAD_ARG)]
         cases += [((rf.RF_FILTER, mhz, 0), 0) for mhz in rf.FILTER_CODE]
         results = self.rfctl(*(op for op, _ in cases))
         self.assertEqual([p['res'] for p in results], [want for _, want in cases])

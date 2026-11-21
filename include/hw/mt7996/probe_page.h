@@ -362,9 +362,33 @@
  *           also sets the RC trim; refused there before the bring-up
  *   TRIM    b = RC trim code 0..31 (adie.h ADIE_RCTRIM), every chain
  *   STATUS  the band's synthesizer, filter and gain words
- *   LOCKS   every band's synthesizer status (RF_A_BAND ignored)
+ *   LOCKS   every band's synthesizer status, then every band's tuning-voltage
+ *           reading (sx.h ADIE_SX_VTMON) (RF_A_BAND ignored)
  *   BAND    the captured band: ICAPCR8 of the three ICAPs = RF_A_BAND, on
  *           a running ring
+ *   HOLD    b, c as TUNE: the LO moved by the synthesizer's frequency words
+ *           alone, its lock kept as it is. A TUNE locks the synthesizer
+ *           again, and each lock leaves the chains' LOs at random in one of
+ *           two phases half a turn apart from each other; a HOLD leaves
+ *           them as they are (to a degree or two, measured over 16 MHz).
+ *           Refused (BAD_ARG) unless the target is within RF_HOLD_REACH_MHZ
+ *           (band 0: RF_HOLD_REACH_MT7976_MHZ) of where the band last
+ *           locked and, on an MT7977, on the same
+ *           side of its ratio split (mt7977.h MT7977_FW_SPLIT_MHZ). The four
+ *           health words are read as after a TUNE, too early to judge by:
+ *           after a large move the loop takes tens of milliseconds, the
+ *           status flag reading too low or too high and the tuning-voltage
+ *           reading on its way until then (30 ms after 16 MHz, under 5 ms
+ *           up to 8 MHz [measured]). Read LOCKS until the flag is clear,
+ *           then hold the tuning voltage to its window (sx.h ADIE_SX_VTMON)
+ *   REPHASE b = chain: the chain's blocks handed to software (rfmodes.h
+ *           ADIE_CHAIN_OVR), set receiving, switched off and handed back.
+ *           The half turn between two chains' LOs is each chain's own: it
+ *           falls anew, at random, whenever a chain's blocks are switched
+ *           (about every other time on one unit's three radios; one time
+ *           in five on another unit's two MT7977s [measured]), as it
+ *           does at a new lock. This is the least that switches them: the
+ *           synthesizer and the other chains are left alone
  * res: MT7996_PROBE_CTL_OK; RF_UNLOCKED (TUNE); or a failure code | the
  * failing op of the expansion << 8 (MT7996_PROBE_CTL_STATUS_*), with BAD_OP
  * when our WM has not published its builder and BAD_ARG when it refuses
@@ -379,6 +403,15 @@
 #define   MT7996_PROBE_CTL_RF_STATUS      5u
 #define   MT7996_PROBE_CTL_RF_LOCKS       6u
 #define   MT7996_PROBE_CTL_RF_BAND        7u
+#define   MT7996_PROBE_CTL_RF_HOLD        8u
+#define   MT7996_PROBE_CTL_RF_REPHASE     9u
+/* How far from its last lock a HOLD moves the LO. On the MT7977s the phase between the chains
+ * stayed within a few degrees over 16 MHz either way and the settled tuning-voltage reading
+ * within 5..26 of its window 3..28 (4900..7100 MHz); the MT7976 uses more of the window for the
+ * same move (4..27 over 16 MHz at 2390..2480 MHz, 7..26 over 12) and at the bottom of its range
+ * follows 8 MHz but not 12. [measured, one unit] */
+#define   MT7996_PROBE_CTL_RF_HOLD_REACH_MHZ 16u
+#define   MT7996_PROBE_CTL_RF_HOLD_REACH_MT7976_MHZ 12u
 #define   MT7996_PROBE_CTL_RF_GAIN_AGC    0xffffffffu
 /*
  * The RF block, after the CTL mailbox: the report of the last RF op. Every
@@ -396,7 +429,7 @@
  *     TRIM    every chain's ADIE_RCTRIM as written
  *     STATUS  SX INT, FRAC, CFG and status, the frequency note, every
  *             chain's ADIE_RX_BW, then every chain's RXGAIN
- *     LOCKS   the SX status of bands 0, 1 and 2
+ *     LOCKS   the SX status of bands 0, 1 and 2, then their ADIE_SX_VTMON
  *     BAND    ICAP0 CR9 before, 0 three times (the CR8 writes), CR9 after
  */
 #define MT7996_PROBE_CTL_RF_BASE          0x0090fe40u

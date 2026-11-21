@@ -25,5 +25,8 @@ every slice, 2048 samples each (int16 I then int16 Q): a lost slice as zeros, so
 stays true, and a firmware event (no samples, no sample time) left out. PATH.json and the last
 stdout line say what was kept: the run, its first slice, slices, samples, events, losses and
 overruns (slots the ring overwrote before they were read, also zeros) with the first 64 of each,
-the slices the correction produced, and why it stopped. The export's own integrity (spare bits,
+the slices the correction produced, and why it stopped. A run of two channels
+(`w1700k start --channels 2`) is recorded a sample time at a time: channel 0's I and Q, then
+channel 1's, 1024 sample times to a slice, a lost slice as zeros in both; `channels` in
+PATH.json says which a file is, and `samples` then counts sample times. The export's own integrity (spare bits,
 data repeated a capture-ring lap later) is checked by the service, which counts it.

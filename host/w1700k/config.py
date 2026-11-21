@@ -9,7 +9,7 @@
      "raw_access": false,
      "export": {"interface": "eth1", "src_ip": "10.77.0.1", "dst_ip": "10.77.0.10",
                 "dst_mac": null, "port": 7700, "ports": 8, "link_mbps": null, "packing": null,
-                "piece": null}}
+                "piece": null, "service": "/w1700k-stream"}}
 
 unit.bin_dir and unit.module point at the installed clients and driver (production rootfs);
 after `w1700k push` set them to /tmp/w1700k and /tmp/w1700k/w1700k_sdr.ko. export.dst_mac null
@@ -19,7 +19,8 @@ than its Ethernet side links at); null: the negotiated speed. export.packing ("r
 "full", "split", or "16", "14", "8", "7" bits per I/Q pair) sets every stream's packing by hand; null:
 chosen from the sample rate and the link. export.piece sends each slice as datagrams of at most
 that many of its bytes (1456 fits a 1500-byte MTU) for a path without jumbo frames; null: one
-datagram per slice. unknown_rom true loads our firmware onto a radio whose boot ROM is not the one
+datagram per slice. export.service names w1700k-stream's shared memory on this host, which is told
+how many channels a stream has before it starts; null where the stream goes to another host. unknown_rom true loads our firmware onto a radio whose boot ROM is not the one
 it is written for (radio.py: a load reads the ROM first and refuses any other): for studying a new
 hardware revision, and at that radio's risk. raw_access true unlocks our WM after every load
 (wm.py): its guard then no longer keeps raw programs and calls from the registers that could make
@@ -69,6 +70,7 @@ class ExportConfig:
     link_mbps: int | None = None      # None: the unit port's negotiated speed
     packing: str | None = None        # None: chosen from the sample rate and the link
     piece: int | None = None          # None: a slice per datagram; else at most this many of its bytes
+    service: str | None = '/w1700k-stream'   # w1700k-stream's shared memory on this host; None: none here
 
 
 @dataclass(frozen=True)

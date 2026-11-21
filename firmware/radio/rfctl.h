@@ -33,6 +33,15 @@
  *     column (_presets_needed): a second round trip, and a guess that no one else wrote them.
  *     Writing them always costs a retune within one bin the presets' SPI time (sx.h: 1.5 ms of WM
  *     time instead of 0.8 ms); the stream does not notice either.
+ * rfctl_hold(band, hz)     The LO of band to hz by the frequency words alone (INT, then FRAC with
+ *     its load bit), the lock kept: no presets, no VCO search, no lock step, so the phases of the
+ *     chains' LOs against each other stay as the last rfctl_tune left them (probe_page.h HOLD).
+ *     0 unless hz is within the band's reach (probe_page.h RF_HOLD_REACH) of the LO it last locked
+ *     at and, on an MT7977, is on that LO's side of the ratio split. Then the D-die words
+ *     that follow the LO, the settling time, and rfctl_tune's health reads and frequency note.
+ * rfctl_rephase(band, chain)  The chain's block enables under software control (ADIE_CHAIN_OVR),
+ *     receiving, off, and back to the D-die's control: its LO path starts again, in either of
+ *     its two phases against the other chains (probe_page.h REPHASE).
  * rfctl_gain(band, lna, lpf)  Every chain's RXGAIN forced to (lna 0..4, lpf 0..9) in sets A
  *     and B (phy.h MT7996_PHY_RXGAIN_FORCE_AB), or handed to the AGC with lna = RFCTL_GAIN_AGC;
  *     then every chain's word read back.
@@ -43,7 +52,7 @@
  * rfctl_trim(band, code)   Every chain's ADIE_RCTRIM code (0..31) with ADIE_RCTRIM_SW set.
  * rfctl_status(band)       SX INT, FRAC, CFG and status, the frequency note, every chain's
  *     ADIE_RX_BW, then every chain's RXGAIN.
- * rfctl_locks()            The SX status of bands 0, 1 and 2.
+ * rfctl_locks()            The SX status of bands 0, 1 and 2, then the tuning-voltage reading of each.
  * rfctl_band(band)         ICAPCR8 of the three ICAPs = band (the band the stream captures),
  *     between two reads of ICAP0's write pointer CR9 that place the switch in the ring.
  */
@@ -96,6 +105,9 @@ uint32_t rfctl_run(const struct rfctl_op *ops, uint32_t n, uint32_t *res);
 
 uint32_t rfctl_tune(uint32_t band, uint64_t hz, struct rfctl_op *ops, uint32_t max, uint64_t *actual_hz,
 		    uint32_t *health);
+uint32_t rfctl_hold(uint32_t band, uint64_t hz, struct rfctl_op *ops, uint32_t max, uint64_t *actual_hz,
+		    uint32_t *health);
+uint32_t rfctl_rephase(uint32_t band, uint32_t chain, struct rfctl_op *ops, uint32_t max);
 uint32_t rfctl_gain(uint32_t band, uint32_t lna, uint32_t lpf, struct rfctl_op *ops, uint32_t max);
 uint32_t rfctl_filter(uint32_t band, uint32_t mhz, struct rfctl_op *ops, uint32_t max);
 uint32_t rfctl_trim(uint32_t band, uint32_t code, struct rfctl_op *ops, uint32_t max);

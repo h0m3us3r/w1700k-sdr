@@ -56,8 +56,9 @@ StreamClient::Position StreamClient::position() const
     const auto v = view();
     if (!v) return {};
     uint64_t run, newest;
-    w1700k_stream_position(v->header(), &run, &newest);
-    return {run ? v->run_id(run) : 0, newest};
+    unsigned channels;
+    w1700k_stream_layout(v->header(), &run, &newest, &channels);
+    return {run ? v->run_id(run) : 0, newest, channels};
 }
 
 int StreamClient::receive_cpu() const
@@ -104,6 +105,14 @@ void StreamClient::write_control(w1700k_stream_header *h)
     store(&h->radio_capture_rate, capture_rate_);
     store(&h->radio_filter_hz, filter_hz_);
     store(&h->flatten, flatten_);
+    if (channels_) store(&h->radio_channels, channels_);
+}
+
+void StreamClient::set_channels(unsigned channels)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    channels_ = channels;
+    if (view_ && channels_) write_control(view_->header());
 }
 
 void StreamClient::restart_run()

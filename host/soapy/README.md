@@ -39,6 +39,7 @@ In GNU Radio Companion: a *Soapy Custom Source* with driver `w1700k`.
 
 | | |
 | --- | --- |
+| Channels | Two receive channels: chains 0 and 1 of the band in use. A stream of channel 0 is one channel; a stream of channels 0 and 1 is both, sampled at the same instants, each buffer of `readStream` one channel's and the same index the same instant. They are one radio: frequency, sample rate, bandwidth and gain are common, and setting one channel's sets the other's. Two channels go up to 160 Msps each, and get one fixed gain on both chains unless one is set |
 | Sample rates | 40, 80, 160 and 320 Msps: the radio's own. Nothing lower: a program that cannot take 40 Msps cannot use the device yet |
 | Formats | `CS16`, the native one: the radio's 14-bit samples as they are, full scale 8192. `CF32`: the same, full scale 1.0 |
 | Antennas | `2.4G`, `5G`, `6G`: the unit's three radios (bands 0, 1, 2). One is captured at a time |

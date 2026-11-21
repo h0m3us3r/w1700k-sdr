@@ -26,6 +26,10 @@ struct SpectrumSettings {
     unsigned averaging = 0;    // FFT blocks per frame; 0: every sample
     bool peak = true;          // combine blocks by maximum, not mean power
     bool remove_dc = false;    // subtract each block's mean first
+    // Of a two-channel stream: the channel shown, 0 or 1, or kBothChannels: a frame of each over
+    // the same samples, channel 0's first (SpectrumFrame::channel says which a frame is).
+    unsigned channel = 0;
+    static constexpr unsigned kBothChannels = 2;
 
     // Throws std::runtime_error naming the first invalid field.
     void validate() const;
@@ -54,6 +58,10 @@ struct SpectrumFrame {
     double sample_rate = 0;    // span of the frame, Hz
     unsigned blocks = 0;       // FFT blocks combined
     bool peak = false;
+    // The channel of the stream the frame is of (0 of a one-channel stream). Frames say it so
+    // that those of two channels can travel together: a view of both is two frames over the
+    // same samples (the same run and index), one of each channel.
+    unsigned channel = 0;
     // Power per bin relative to a full-scale tone (1 = 0 dBFS), from center - rate/2 upwards.
     // Linear, so that frames merge and reduce to a view's bins without a logarithm per FFT bin;
     // spectrum_db() converts what is sent.

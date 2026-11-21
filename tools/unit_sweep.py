@@ -87,6 +87,34 @@ def modes(link_mbps, piece):
     return out
 
 
+def two_channel_modes(link_mbps, piece):
+    """The same of two-channel streams (chains 0 and 1 of a band together), with a seventh field,
+    the channels: every band at each rate two channels are streamed at. Two channels at a rate
+    cost the link what one costs at twice it, and are refused where that does not fit."""
+    out = []
+    for band in (0, 1, 2):
+        for rate in (40_000_000, 80_000_000, 160_000_000):
+            fits = chosen_for(2 * rate, link_mbps, piece) is not None
+            out.append((f'{BAND_NAME[band]}, two channels at {rate // 10**6} Msps',
+                        'the packing the link gives twice the rate' if fits else TOO_MUCH, band, rate, rate,
+                        None if fits else REFUSED, 2))
+    return out
+
+
+def channel_levels(shm, newest, slices=6):
+    """Each channel's level in the newest few slices of a two-channel run, dBFS."""
+    totals, count, per = [0.0, 0.0], 0, stream_shm.SLICE // 2
+    for index in range(max(0, newest - slices), newest):
+        if shm.tag(index) & stream_shm.TAG_KIND & ~stream_shm.TAG_FLAT:
+            continue
+        slot = index & (shm.get('ring_slices') - 1)
+        flat = struct.unpack_from('<%dh' % (2 * stream_shm.SLICE), shm.map, shm.get('samples_offset') + slot * 8192)
+        for channel in (0, 1):
+            totals[channel] += sum(v * v for v in flat[channel * 2 * per:(channel + 1) * 2 * per])
+        count += per
+    return [10 * math.log10(t / count / 8192 ** 2) if count and t else -math.inf for t in totals]
+
+
 def level_dbfs(shm, newest, slices=6):
     """The level of the newest few slices against full scale, and how many different values they hold."""
     total, count, values = 0.0, 0, set()
@@ -106,13 +134,13 @@ def level_dbfs(shm, newest, slices=6):
 def run_refused(ctl, events, mode):
     """A rate the link cannot carry: the controller refuses it, saying what the link would need,
     and no stream starts."""
-    name, what, band, rate, capture, _ = mode
+    name, what, band, rate, capture, _, *more = mode
     result = {'name': name, 'what': what, 'ok': False, 'packing': REFUSED, 'msps': 0.0, 'lost': 0,
               'level_dbfs': 0.0, 'led': '', 'problem': ''}
     del events[:]
     try:
         ctl.configure(band, rate, None, capture if capture != rate else None)
-        ctl.start()
+        ctl.start(channels=more[0] if more else 1)
         result['problem'] = (f'a stream started ({ctl.state()["stream"]["packing"]}) at a rate the link '
                              'cannot carry')
     except Refused as refusal:
@@ -131,7 +159,8 @@ def run_refused(ctl, events, mode):
 
 
 def run_mode(ctl, shm, events, mode, seconds):
-    name, what, band, rate, capture, packing = mode
+    name, what, band, rate, capture, packing, *more = mode
+    channels = more[0] if more else 1
     if packing == REFUSED:
         return run_refused(ctl, events, mode)
     result = {'name': name, 'what': what, 'ok': False, 'packing': packing or '', 'msps': 0.0, 'lost': 0,
@@ -140,7 +169,7 @@ def run_mode(ctl, shm, events, mode, seconds):
     del events[:]
     try:
         ctl.configure(band, rate, None, capture if capture != rate else None)
-        ctl.start(packing)
+        ctl.start(packing, channels)
         state = ctl.state()
         used = state['stream']['packing']
         result['packing'] = used
@@ -150,7 +179,7 @@ def run_mode(ctl, shm, events, mode, seconds):
         time.sleep(seconds)
         after, took = {k: shm.get(k) for k in counters}, time.monotonic() - began
         delta = {k: after[k] - before[k] for k in counters}
-        result['msps'] = delta['slices'] * stream_shm.SLICE / took / 1e6
+        result['msps'] = delta['slices'] * stream_shm.SLICE / channels / took / 1e6    # a channel's
         result['lost'] = delta['lost']
         level, distinct = level_dbfs(shm, shm.position()[1])
         result['level_dbfs'] = round(level, 1) if math.isfinite(level) else -99.0
@@ -173,14 +202,25 @@ def run_mode(ctl, shm, events, mode, seconds):
             problems.append(f'{delta["reduced"]} slices came with fewer bits in a lossless packing')
         if not -70 < level < -1 or distinct < 8:
             problems.append(f'level {level:.1f} dBFS with {distinct} different values: not a signal')
+        if channels == 2:
+            run, newest, laid_out = shm.layout()
+            if laid_out != 2 or state['stream']['channels'] != 2:
+                problems.append(f'the stream service lays the run out for {laid_out} channel(s), the controller '
+                                f'reports {state["stream"]["channels"]}')
+            else:
+                each = channel_levels(shm, newest)
+                result['channel_dbfs'] = [round(v, 1) if math.isfinite(v) else -99.0 for v in each]
+                if not all(-70 < v < -1 for v in each):
+                    problems.append('a channel is no signal: ' + ', '.join(f'{v:.1f} dBFS' for v in each))
         if state['radio']['synth_locked'][band] is not True:
             problems.append('the synthesizer is out of lock')
         if state['error']:
             problems.append(state['error'])
         want_look = 'breathing' if reduced(used) else 'steady'
-        if led['look'] != want_look or (rate < 320_000_000 and round(led['hue']) != LED_HUE[rate // 10**6]) \
-                or (rate >= 320_000_000 and not led.get('rainbow_seconds')):
-            problems.append(f'the LED shows {result["led"]}')
+        if channels == 1 and (led['look'] != want_look
+                              or (rate < 320_000_000 and round(led['hue']) != LED_HUE[rate // 10**6])
+                              or (rate >= 320_000_000 and not led.get('rainbow_seconds'))):
+            problems.append(f'the LED shows {result["led"]}')    # (two channels: the LED's look is not laid down yet)
     except Exception as error:                       # a refused or failed request is this mode's result
         problems.append(f'{type(error).__name__}: {error}')
     finally:
@@ -219,7 +259,8 @@ def main():
         ctl.load()
     speed, _ = ctl.stream.check_interface(cfg.export.interface)
     link = min(v for v in (speed, cfg.export.link_mbps, 10_000) if v)
-    todo = [m for m in modes(link, cfg.export.piece) if not args.only or args.only in m[0]]
+    todo = [m for m in modes(link, cfg.export.piece) + two_channel_modes(link, cfg.export.piece)
+            if not args.only or args.only in m[0]]
     print(f'unit_sweep: {len(todo)} modes on a {link} Mbit/s link, {args.seconds:g} s each')
     results = []
     try:

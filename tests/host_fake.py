@@ -56,7 +56,7 @@ EE_BUFFER = 0xE0100000            # where our WM's radio_ee lands in CRAM (any a
 RF_BUILD = 0xE0050000             # its RF command builder
 # probe_page.h CTL status codes
 CTL_OK, CTL_BAD_OP, CTL_TIMEOUT, CTL_TOO_MANY, CTL_BAD_ARG, CTL_DENIED = 0, 1, 2, 3, 7, 9
-STREAM_BAD_PACKING, STREAM_NOT_READY = 0x200, 0x300       # radio_cmd.h RADIO_STREAM_*: STREAM refused
+STREAM_BAD_PACKING, STREAM_NOT_READY, STREAM_BAD_PATHS = 0x200, 0x300, 0x400   # radio_cmd.h RADIO_STREAM_*: STREAM refused
 OWN_IMAGE = (0x00916400, 0x00938000)                      # our WM in ULM1 (firmware/wm/wm.h)
 GUARDED_MMIO = {0x70021008, 0x7C070030}                   # read or written: the eFuse control word, semaphore 12
 GUARDED_MMIO_WRITES = {0x820F3000}                        # written: band 1's ARB_SCR
@@ -88,6 +88,7 @@ class FakeDevice:
         self.icap_band = None             # ICAPCR8 of the three ICAPs
         self.route_armed = False
         self.stream_packing = None        # the STREAM command's packing while it runs
+        self.stream_paths = None          # and how many capture paths it asked for (0: not said, one)
         self.pump = None                  # mt7996-stream: None, 'waiting' (no producer took go), 'streaming'
         self.pump_argv = None
         self.wa_stuck = False             # the WA does not leave the packer at the stream's end
@@ -96,6 +97,13 @@ class FakeDevice:
         self.sx_status = [0, 0, 0]        # each band's SX status [1:0] (0 locked); a reload keeps it
         self.unlocking = {}               # band -> the SX status its tunes leave (1 too low, 2 too high)
         self.lo, self.gain, self.filter, self.trim = {}, {}, {}, {}
+        self.lock_at = {}                 # band -> the LO its synthesizer last locked at (a HOLD moves from it)
+        self.locks = [0, 0, 0]            # each band's full locks: each may turn the chains' phase half a turn
+        self.hold_vtune = {}              # band -> the tuning-voltage reading its HOLDs settle at (13 otherwise)
+        self.hold_reads = {}              # band -> the LOCKS reads its loop takes to settle after a HOLD (0 otherwise)
+        self.settling = {}                # band -> the LOCKS reads its status flag still reads too high for
+        self.vtune = [15, 15, 15]         # each band's tuning-voltage reading
+        self.rephases = []                # (band, chain) of each REPHASE
         self.cr9 = 0x2000
         self.ctl_timeouts = 0             # the next N ctl ioctls time out
         self.setup_timeouts = 0           # ... and N after the pump starts (it takes the device)
@@ -219,7 +227,7 @@ class FakeDevice:
             res, code, arg = self.radio_failures.pop(name)
             self._radio_ack(res, code, arg)
         elif name == 'stream':
-            res = self._stream(args[0])
+            res = self._stream(args[0], args[1])
             if res is not None:                           # else acknowledged when the stream ends
                 self._radio_ack(res)
         else:
@@ -265,6 +273,7 @@ class FakeDevice:
             self.channels[band] = (hz, bwf & 0xFF)
             self.lo[band] = radio.actual_lo(band, hz)
             self.sx_status[band] = self.unlocking.get(band, self.sx_status[band])
+            self._locked(band)
         elif name == 'rate':                          # the sample rate alone: LO and filter stay
             band, bw = a[:2]
             if band > 2 or bw > (3 if band == 0 else 4):
@@ -296,9 +305,10 @@ class FakeDevice:
 
     # --- streams ---
 
-    def _stream(self, packing):
-        """STREAM: the WA started if the schedule has it pack, the route and ICAP0 armed, the
-        producer waiting for the go word; None while it runs."""
+    def _stream(self, packing, paths=0):
+        """STREAM: the WA started if the schedule has it pack, the route and ICAP0 armed (for one
+        path, or for two below the 320 MHz class), the producer waiting for the go word; None
+        while it runs."""
         names = {code: name for name, code in wm.RADIO_PACKING.items()}
         if packing not in names:
             return STREAM_BAD_PACKING
@@ -306,7 +316,9 @@ class FakeDevice:
         band = next((b for b in range(3) if state & wm.STATE_SELECTED[b]), None)
         if not state & UP or band is None or not state & CAPTURE(band):
             return STREAM_NOT_READY
-        self.stream_packing = names[packing]
+        if paths > 2 or paths == 2 and self.channels[band][1] >= 4:
+            return STREAM_BAD_PATHS
+        self.stream_packing, self.stream_paths = names[packing], paths
         if self.stream_packing != 'raw':
             self._start_wa()
         self.route_armed = True
@@ -431,6 +443,16 @@ class FakeDevice:
             self.cr9 = (self.cr9 + 0x2000) % RING
         return self.cr9
 
+    def _locked(self, band):
+        """Band's synthesizer has run a full lock: where a HOLD moves from, or nowhere if it failed."""
+        self.locks[band] += 1
+        self.settling.pop(band, None)
+        self.vtune[band] = 15
+        if self.sx_status[band] & 3:
+            self.lock_at.pop(band, None)
+        else:
+            self.lock_at[band] = self.lo[band]
+
     def _rf(self, command, band, b, c):
         """An RF op as our WM's builder and interpreter run it: (status, result), the RF block
         written (probe_page.h "RF commands")."""
@@ -448,6 +470,17 @@ class FakeDevice:
             self.lo[band] = lo = radio.actual_lo(band, hz)
             ops, outs = 33 if band == 0 else 100, [self.sx_status[band], 0x40, 0, 0x10000, 0]
             res = rf.RF_UNLOCKED if self.sx_status[band] & 3 else CTL_OK
+            self._locked(band)
+        elif command == rf.RF_HOLD:
+            hz, at = c << 32 | b, self.lock_at.get(band)
+            if (not rf.LO_RANGE[band][0] <= hz <= rf.LO_RANGE[band][1] or at is None
+                    or abs(hz - at) > rf.HOLD_REACH_HZ[band] + 1000):
+                return CTL_BAD_ARG, CTL_BAD_ARG
+            self.lo[band] = lo = radio.actual_lo(band, hz)
+            # read too early to judge by: the loop settles later, and LOCKS shows it
+            self.settling[band] = self.hold_reads.get(band, 0)
+            self.vtune[band] = self.hold_vtune.get(band, 13)
+            ops, outs = 8, [2, 15 << 12, 0, 0x10000, 0]
         elif command == rf.RF_GAIN:
             if b == rf.RF_GAIN_AGC:
                 word = 0
@@ -471,8 +504,17 @@ class FakeDevice:
             outs = self._sx_words(band) + [self.sx_status[band], round(self.lo.get(band, 0) / 1000)]
             outs += [self.filter.get(band, 0)] * n + [self.gain.get(band, 0)] * n
             ops = len(outs)
+        elif command == rf.RF_REPHASE:
+            if b >= n:
+                return CTL_BAD_ARG, CTL_BAD_ARG
+            self.rephases.append((band, b))
+            ops, outs = 5, []
         elif command == rf.RF_LOCKS:
-            ops, outs = 3, list(self.sx_status)
+            flags = list(self.sx_status)
+            for b_, left in list(self.settling.items()):
+                if left > 0:
+                    flags[b_], self.settling[b_] = 2, left - 1
+            ops, outs = 6, flags + [v << 12 for v in self.vtune]
         elif command == rf.RF_BAND:
             before = self._cr9()
             self.icap_band = band
@@ -730,7 +772,7 @@ def make_config(tmp):
     eeprom = tmp / 'eeprom.bin'
     eeprom.write_bytes(bytes(range(256)) * 30 + b'\xff' * (16384 - 7680))
     return Config(unit=UnitConfig(bin_dir='/fake'), eeprom=eeprom, firmware_dir=tmp,
-                  export=ExportConfig(dst_mac='02:00:00:00:00:01'))
+                  export=ExportConfig(dst_mac='02:00:00:00:00:01', service=None))   # no test tells a real service
 
 
 def temp_dir():

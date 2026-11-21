@@ -77,6 +77,14 @@ void Ring::write_control(w1700k_stream_header *h)
         store(&h->radio_filter_hz, filter_hz_);
     }
     if (flatten_set_) store(&h->flatten, uint64_t(flatten_));
+    if (channels_) store(&h->radio_channels, channels_);
+}
+
+void Ring::set_channels(unsigned channels)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    channels_ = channels;
+    if (view_ && channels_) write_control(view_->header());
 }
 
 void Ring::set_radio(double sample_rate, double capture_rate, double filter_hz)
@@ -103,11 +111,13 @@ void Reader::start(double rate)
 {
     view_ = ring_.view();
     uint64_t run = 0, newest = 0;
-    if (view_ && view_->alive()) w1700k_stream_position(view_->header(), &run, &newest);
+    unsigned channels = 1;
+    if (view_ && view_->alive()) w1700k_stream_layout(view_->header(), &run, &newest, &channels);
     // A run in progress is read from now on, timed from now; with none, the next one from its
     // first slice.
     joined_ = run != 0;
     run_ = run;
+    run_channels_ = channels;
     index_ = newest;
     offset_ = 0;
     rebase(run ? now_ns() : 0, rate);
@@ -123,13 +133,13 @@ void Reader::rebase(long long at_ns, double rate)
 
 void Reader::skip(uint64_t slices)
 {
-    samples_ += slices * kSlice - offset_;
+    samples_ += slices * per_slice() - offset_;
     index_ += slices;
     offset_ = 0;
     tally_.gaps++;
 }
 
-long Reader::read(int16_t *cs16, float *cf32, size_t count, long timeout_us, double rate, long long &time_ns)
+long Reader::read(int16_t *const *cs16, float *const *cf32, size_t count, long timeout_us, double rate, long long &time_ns)
 {
     const auto next_ns = [this] {
         return base_ns_ + (rate_ > 0 ? std::llround(double(samples_) * 1e9 / rate_) : 0LL);
@@ -147,7 +157,15 @@ long Reader::read(int16_t *cs16, float *cf32, size_t count, long timeout_us, dou
             joined_ = false;
         }
         uint64_t run = 0, newest = 0;
-        if (view_ && view_->alive()) w1700k_stream_position(view_->header(), &run, &newest);
+        unsigned channels = 1;
+        if (view_ && view_->alive()) w1700k_stream_layout(view_->header(), &run, &newest, &channels);
+        if (run && channels < want_) {
+            // A run of one channel, and two are read: it has no second channel. Nothing of it is
+            // given; the two-channel run that follows is read from its first slice.
+            if (got) break;
+            joined_ = false;
+            run = 0;
+        }
         if (run) {
             const w1700k_stream_header *h = view_->header();
             const uint64_t ring = h->ring_slices;
@@ -156,6 +174,7 @@ long Reader::read(int16_t *cs16, float *cf32, size_t count, long timeout_us, dou
                 // now; timed from when the service saw it begin.
                 if (got) break;
                 run_ = run;
+                run_channels_ = channels;
                 index_ = newest > ring / 2 ? newest : 0;
                 offset_ = 0;
                 joined_ = true;
@@ -181,19 +200,22 @@ long Reader::read(int16_t *cs16, float *cf32, size_t count, long timeout_us, dou
                     return kGap;
                 }
                 if (!lapped && (tag & ~W1700K_STREAM_TAG_FLAT) == want) {
-                    const size_t n = std::min<size_t>(count - got, kSlice - offset_);
-                    const int16_t *src = w1700k_stream_slice(h, index_) + 2 * offset_;
-                    if (cs16) {
-                        std::memcpy(cs16 + 2 * got, src, n * 2 * sizeof(int16_t));
-                    } else {
-                        float *dst = cf32 + 2 * got;
-                        for (size_t k = 0; k < 2 * n; k++) dst[k] = float(src[k]) * kToFloat;
+                    const unsigned per = per_slice();
+                    const size_t n = std::min<size_t>(count - got, per - offset_);
+                    for (unsigned c = 0; c < want_; c++) {
+                        const int16_t *src = w1700k_stream_channel(h, index_, c, run_channels_) + 2 * offset_;
+                        if (cs16) {
+                            std::memcpy(cs16[c] + 2 * got, src, n * 2 * sizeof(int16_t));
+                        } else {
+                            float *dst = cf32[c] + 2 * got;
+                            for (size_t k = 0; k < 2 * n; k++) dst[k] = float(src[k]) * kToFloat;
+                        }
                     }
                     __atomic_thread_fence(__ATOMIC_ACQUIRE);
                     if (tag_at(h, index_) == tag) {
                         got += n;
                         offset_ += unsigned(n);
-                        if (offset_ == kSlice) {
+                        if (offset_ == per) {
                             offset_ = 0;
                             index_++;
                         }
