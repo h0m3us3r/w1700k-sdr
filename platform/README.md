@@ -57,6 +57,15 @@ firmware file (the W1700K2's PHY) from linux-firmware by commit and SHA-256.
 at another OpenWrt repository (for example a local mirror) while still
 requiring the pinned commit.
 
+An archive can name `mirrors`, tried in order after its `url`: the file is the
+same wherever it comes from, since it is held to its SHA-256, so a mirror is
+trusted with nothing. U-Boot's has them because the site its releases came from
+(`ftp.denx.de`) stopped answering, as quinlansls reported in
+[issue 37](https://github.com/h0m3us3r/w1700k-sdr/issues/37); the project now
+publishes only archives generated from its git, which are other bytes under
+another name. If no address gives an archive, a copy from anywhere put into
+`platform/build/downloads/` under its name is checked and used the same way.
+
 ## Layout
 
 | Directory | Contents |
