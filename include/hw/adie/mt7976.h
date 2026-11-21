@@ -114,7 +114,8 @@
  * The MT7977's own 320 MHz code on band 1, for comparison: +0.6 / -2.2 /
  * -6.8 / -14.1 / -19.3 at 80 / 100 / 120 / 140 / 150 MHz, alias -40.7.
  * [22:20] = 2 with the trim 9 codes under the calibrated one (8 on unit A) is
- * the widest setting without peaking: MT7976_RXF_WIDE_*. [0] .. [15] and
+ * the widest setting without peaking on that die: MT7976_RXF_WIDE_*, which
+ * also keep the trim from going lower than 8 on any die (below). [0] .. [15] and
  * [17..19], [23..26], [28..31] single flips: no visible effect; [16] clear
  * -4 dB at 130 MHz; [27] set mutes. [measured] */
 #define MT7976_RXF_125                  0x125u
@@ -123,8 +124,25 @@
 #define MT7976_RXF_125_EXT_WIDE         2u
 #define MT7976_RXF_125_MUTE             HW_BIT(27)
 /* The 320 MHz-class filter: code 3, [22:20] = 2, RC trim lowered from the
- * calibrated code by this many steps (clamped at 0). [measured] */
+ * calibrated code by MT7976_RXF_WIDE_TRIM_DROP steps, but not under
+ * MT7976_RXF_WIDE_TRIM_MIN (nor raised over the calibrated code).
+ *
+ * The floor is there because the widened filter does not only peak at a low
+ * trim, it oscillates, and where that begins goes by the trim code itself and
+ * not by its distance from the calibrated one. Two dies:
+ *   unit A (W1700K), calibrated 17: clean at 8 (17 - 9); resonant at 0
+ *   a Velo7 Max, calibrated 13:     oscillates at 0, 2 and 4 (13 - 9);
+ *                                   clean at 5, 6, 8, 10, 12, 14 and 17
+ * Oscillating, the filter puts a line 0.16 MHz wide at +-143..148 MHz from
+ * the LO, wandering, 52..67 dB over the floor and about -20 dBFS at LNA 2 /
+ * LPF 5. It is no signal from the antenna: it keeps its offset when the LO
+ * moves, keeps its level from LNA 0 to 4, and is gone at code 3 unwidened;
+ * and the AGC, which sees it, holds the baseband gain at its lowest. A drop of
+ * 9 alone put the second die at 4. With the floor at 8 the first die is set
+ * as before and the second three codes clear of the highest that oscillated.
+ * [measured: 2026-11-21, 320 Msps at 2442 MHz, the trim stepped by hand] */
 #define MT7976_RXF_WIDE_TRIM_DROP       9u
+#define MT7976_RXF_WIDE_TRIM_MIN        8u
 
 /* 0x12f  Chain word (k 0..3); RF_INIT writes it on k 4 only (0xffc04622).
  * Chain 0 at power-on 0xff2a5324. [27]: spectrum mirror (rfmodes.h

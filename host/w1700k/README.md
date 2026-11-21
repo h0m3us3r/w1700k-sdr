@@ -131,7 +131,11 @@ analog filter. Defaults, all set by every load:
   and is kept across LO and rate changes until `filter auto`; the state reports
   `rf.filter_follows_rate`.
   On band 0 the MT7976 has no 320 MHz filter code: 320 is its 160 MHz code widened (about -3 dB at
-  +-100 MHz at 320 Msps, `include/hw/adie/mt7976.h`).
+  +-100 MHz at 320 Msps on the die it was measured on, `include/hw/adie/mt7976.h`). It is widened
+  by lowering the filter's trim, and at a low enough trim the widened filter oscillates: a line
+  that wanders near +-145 MHz from the LO at about -20 dBFS, which the AGC takes for signal and
+  answers with its lowest gain. The firmware keeps the trim out of those codes, so on a die that
+  calibrates lower the 320 MHz filter is narrower rather than unstable.
 
 ## Behaviour
 
