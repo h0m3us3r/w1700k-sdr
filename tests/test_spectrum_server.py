@@ -12,6 +12,7 @@ mislabelled, and that a controller that dies is reported and restarted.
 """
 import base64
 import collections
+import fcntl
 import glob
 import hashlib
 import json
@@ -906,6 +907,93 @@ class WhoIsAnswered(unittest.TestCase):
         self.serve("--web", os.path.join(base, "web"))
         self.assertEqual(self.ask("/index.html")[2], b"the page\n")
         self.assertEqual(self.ask("-notes.txt")[0], 404, "a target with no leading slash named the file beside it")
+
+
+@unittest.skipIf(build_problem(), build_problem())
+class PlansMeasuredApart(unittest.TestCase):
+    """FFTW's measured plan of an FFT size is found by a process of its own and kept, so the
+    server waits for none: where measuring takes minutes (arm64, where FFTW times by the clock)
+    a server asked to stop did not stop until its measurement ended, 106 s on one host."""
+
+    MEASURING = 300     # seconds a host is given to measure the smallest size; 20 to 30 where this was found
+
+    @classmethod
+    def setUpClass(cls):
+        result = subprocess.run(["make", "-C", SPECTRUM], capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError("build failed:\n" + result.stdout + result.stderr)
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cache, ignore_errors=True)
+        self.kept = os.path.join(self.cache, "w1700k", "fftwf-wisdom")
+        self.env = dict(os.environ, XDG_CACHE_HOME=self.cache)
+
+    def someone_measures(self, size):
+        """As while another process measures the plan of `size` (512 is 2^9): it holds the
+        byte of the lock file that says so, and that size's own."""
+        os.makedirs(os.path.dirname(self.kept), exist_ok=True)
+        held = open(self.kept + ".lock", "w")
+        self.addCleanup(held.close)
+        for byte in (0, size.bit_length() - 1):
+            fcntl.lockf(held, fcntl.LOCK_EX, 1, byte)
+
+    def measure(self, size):
+        process = subprocess.Popen([BINARY, "--measure-plan", str(size)], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, text=True, env=self.env)
+
+        def end():
+            if process.poll() is None:
+                process.kill()
+            process.wait(10)
+            process.stderr.close()
+        self.addCleanup(end)
+        return process
+
+    def test_a_server_stops_at_once_while_its_plan_is_being_measured(self):
+        self.someone_measures(262144)       # the size a server starts at: the process it starts has nothing to do
+        server = subprocess.Popen([BINARY, "--listen", "127.0.0.1:0", "--stream", "/w1700k-sptest-none-%d" % os.getpid(),
+                                   "--no-controller"], stderr=subprocess.PIPE, text=True, env=self.env)
+
+        def end():
+            if server.poll() is None:
+                server.kill()
+            server.wait(10)
+            server.stderr.close()
+        self.addCleanup(end)
+        self.assertIn("http://", server.stderr.readline())
+        time.sleep(1)
+        self.assertFalse(os.path.exists(self.kept), "nothing was measured: the server runs on the estimate")
+        asked = time.monotonic()
+        server.terminate()
+        self.assertEqual(server.wait(10), 0)
+        self.assertLess(time.monotonic() - asked, 5)
+
+    def test_a_plan_is_measured_once_and_kept(self):
+        first = self.measure(512)
+        self.assertEqual(first.wait(self.MEASURING), 0, first.stderr.read())
+        self.assertGreater(os.path.getsize(self.kept), 0)
+        written = os.stat(self.kept).st_mtime_ns
+        started = time.monotonic()
+        self.assertEqual(self.measure(512).wait(10), 0)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(os.stat(self.kept).st_mtime_ns, written, "nothing left to measure, nothing written")
+
+    def test_a_second_process_for_a_size_has_nothing_to_do_and_one_for_another_waits(self):
+        self.someone_measures(512)
+        started = time.monotonic()
+        self.assertEqual(self.measure(512).wait(10), 0)
+        self.assertLess(time.monotonic() - started, 5)
+        other = self.measure(1024)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            other.wait(1.5)
+        self.assertFalse(os.path.exists(self.kept))
+
+    def test_a_size_that_is_not_an_fft_size_is_refused(self):
+        refused = self.measure(500)
+        self.assertNotEqual(refused.wait(10), 0)
+        self.assertIn("power of two", refused.stderr.read())
+        self.assertFalse(os.path.exists(self.kept))
 
 
 if __name__ == "__main__":

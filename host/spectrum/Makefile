@@ -10,7 +10,7 @@ override CXXFLAGS += -std=c++17 -pthread -I../stream/include $(WARNINGS)
 LDLIBS += -pthread -lz -lfftw3f -lrt
 
 SOURCES := $(wildcard src/*.cpp)
-OBJECTS := $(patsubst src/%.cpp,build/%.o,$(SOURCES)) build/web_assets.o build/placement.o
+OBJECTS := $(patsubst src/%.cpp,build/%.o,$(SOURCES)) build/web_assets.o build/placement.o build/apart.o
 
 .PHONY: all clean install
 all: build/w1700k-spectrum
@@ -25,7 +25,11 @@ build/%.o: src/%.cpp $(wildcard src/*.h) ../stream/include/w1700k_stream.h | bui
 build/placement.o: ../stream/src/placement.cpp ../stream/src/placement.h | build
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-build/%.o: src/%.cpp ../stream/src/placement.h
+# A process of the program's own, for measuring a plan: the stream service's code too.
+build/apart.o: ../stream/src/apart.cpp ../stream/src/apart.h | build
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+build/%.o: src/%.cpp ../stream/src/placement.h ../stream/src/apart.h
 
 build/web_assets.cpp: embed.sh $(wildcard web/*) | build
 	sh embed.sh web > $@

@@ -61,9 +61,8 @@ bool refresh();
 // Measures the plans and keeps them, unless they are kept already or another process is
 // measuring them: what `w1700k-stream --measure-plans` does. 0, or 1 where they cannot be kept.
 int measure();
-// Starts that as a process of its own, at the ordinary priority, which goes on if this one ends.
-// To be called before this process opens what such a process must not inherit: it is given
-// none of this one's open files all the same. False if it could not be started.
+// Starts that as a process of its own (apart.h), at the ordinary priority, which goes on if
+// this one ends. False if it could not be started.
 bool measure_in_background();
 }  // namespace flatten_plans
 

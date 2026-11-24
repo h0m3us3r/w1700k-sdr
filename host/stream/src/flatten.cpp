@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 #include "flatten.h"
 
+#include "apart.h"
+
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,9 +15,7 @@
 
 #include <fcntl.h>
 #include <sys/file.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__SSE2__)
@@ -274,33 +273,8 @@ int flatten_plans::measure()
 
 bool flatten_plans::measure_in_background()
 {
-    // A child that starts the measuring process and ends, so that process is nobody's to wait for
-    // and outlives this one: a service that runs for seconds still leaves the plans for the next.
-    char program[4096];  // this program's own file, by its name: so the process is listed under it
-    const ssize_t length = readlink("/proc/self/exe", program, sizeof program - 1);
-    if (length <= 0) return false;
-    program[length] = 0;
-    const pid_t child = fork();
-    if (child < 0) return false;
-    if (child == 0) {
-        setsid();  // not this one's terminal: a Ctrl-C meant for the service is not for it
-        if (fork() != 0) _exit(0);
-        // Only what a process may do between fork and exec from here on. None of this one's open
-        // files: a socket of the stream's port held by a process that reads nothing would be
-        // sent a share of the stream by the kernel.
-        const int null = open("/dev/null", O_RDWR);
-        for (int fd = 0; fd < 3; ++fd)
-            if (null >= 0) dup2(null, fd);
-        const long limit = sysconf(_SC_OPEN_MAX);
-        for (int fd = 3; fd < (limit > 0 && limit < 65536 ? int(limit) : 65536); ++fd) close(fd);
-        setpriority(PRIO_PROCESS, 0, 0);  // the ordinary priority, whatever this one runs at
-        execl(program, "w1700k-stream", "--measure-plans", static_cast<char *>(nullptr));
-        _exit(127);
-    }
-    int status = 0;
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
-    }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    // At the ordinary priority, whatever this process runs at: it measures by the clock.
+    return apart::run({"--measure-plans"});
 }
 
 FlattenRun::FlattenRun()
