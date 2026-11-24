@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <fftw3.h>
@@ -42,7 +43,31 @@ private:
     std::unique_ptr<fftwf_complex[], void (*)(void *)> transfer_{nullptr, fftwf_free};
 };
 
-// One thread's overlap-save engine (its own buffers and plans).
+// The plans of the correction's two transforms. FFTW finds the fastest by measuring ("measured":
+// 3.4 us a transform on an arm64 host where its estimate takes 5.4), in a few milliseconds where
+// it has a cycle counter to time with and in most of a minute where it has not (FFTW as arm64
+// distributions build it: 54 s there, during which the service did not start). So the transforms
+// start on the estimated plans, at once; the measured ones are found by a process of their own,
+// kept between runs, and taken up when they are there.
+namespace flatten_plans {
+// Where the measured plans are kept: $XDG_CACHE_HOME/w1700k/stream-fftwf-wisdom (default
+// ~/.cache); "" where there is neither that nor a HOME.
+std::string path();
+// The transforms run on the measured plans.
+bool measured();
+// Looks for measured plans kept since the last look and has every FlattenRun use them; true
+// when the transforms run on measured plans. For a service to call now and then.
+bool refresh();
+// Measures the plans and keeps them, unless they are kept already or another process is
+// measuring them: what `w1700k-stream --measure-plans` does. 0, or 1 where they cannot be kept.
+int measure();
+// Starts that as a process of its own, at the ordinary priority, which goes on if this one ends.
+// To be called before this process opens what such a process must not inherit: it is given
+// none of this one's open files all the same. False if it could not be started.
+bool measure_in_background();
+}  // namespace flatten_plans
+
+// One thread's overlap-save engine (its own buffer; the plans are every thread's, flatten_plans).
 class FlattenRun {
 public:
     FlattenRun();
@@ -62,5 +87,4 @@ public:
 
 private:
     fftwf_complex *buffer_;
-    fftwf_plan forward_, inverse_;
 };

@@ -3,6 +3,7 @@
 unpacked bit-exact, events and losses tagged, the roll-off correction's gain where it applies and
 nowhere else, runs restarted on request, and the export's integrity counted."""
 import cmath
+import fcntl
 import math
 import os
 import shutil
@@ -11,6 +12,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
@@ -582,6 +584,123 @@ class OnlyTheUnit(Service):
         self.wait_newest(40)
         self.assertEqual(self.shm.samples(39), unpacked(noise_words(39)))
         self.assertEqual((self.shm.get("bad"), self.shm.get("slices")), (40, 40))
+
+
+@unittest.skipIf(build_problem(), build_problem())
+class TransformPlans(unittest.TestCase):
+    """The service is ready at once, on FFTW's estimated plans of the correction's transforms,
+    and moves to its measured ones, which a process of their own finds and keeps between runs.
+    Where FFTW measures by the clock (arm64 as distributions build it) measuring takes most of a
+    minute, and the service used to take that long to start: every test that starts one failed."""
+
+    MEASURING = 300     # seconds a host is given to measure them; 54 where this was found
+
+    @classmethod
+    def setUpClass(cls):
+        result = subprocess.run(["make", "-C", STREAM], capture_output=True, text=True)
+        if result.returncode:
+            raise AssertionError("build failed:\n" + result.stdout + result.stderr)
+
+    def setUp(self):
+        self.cache = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cache, ignore_errors=True)
+        self.kept = os.path.join(self.cache, "w1700k", "stream-fftwf-wisdom")
+        self.env = dict(os.environ, XDG_CACHE_HOME=self.cache)
+        self.count = 0
+
+    def someone_measures(self):
+        """As while another process measures the plans: none started now does."""
+        os.makedirs(os.path.dirname(self.kept), exist_ok=True)
+        held = open(self.kept + ".lock", "w")
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+    def service(self, env=None):
+        """A service started; (process, the lines it has said, seconds until it served)."""
+        self.count += 1
+        name = "/w1700k-test-%d-plans-%d" % (os.getpid(), self.count)
+        started = time.monotonic()
+        proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(free_udp_port()), "--name", name,
+                                 "--ring-mib", "16", "--receive-mib", "64", "--workers", "2", "--rx-threads", "2"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                env=self.env if env is None else env)
+        said = []
+        reader = threading.Thread(target=lambda: said.extend(iter(proc.stderr.readline, "")), daemon=True)
+        reader.start()
+
+        def stop():
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGINT)
+                proc.wait(10)
+            reader.join(10)
+            proc.stderr.close()
+        self.addCleanup(stop)
+        while not stream_shm.ready(name):
+            self.assertIsNone(proc.poll(), "".join(said))
+            self.assertLess(time.monotonic() - started, 10, "w1700k-stream did not start: " + "".join(said))
+            time.sleep(0.02)
+        return proc, said, time.monotonic() - started
+
+    def wait_for(self, said, text, seconds):
+        deadline = time.monotonic() + seconds
+        while not any(text in line for line in said):
+            self.assertLess(time.monotonic(), deadline, "never said %r:\n%s" % (text, "".join(said)))
+            time.sleep(0.1)
+
+    def measure(self, env=None):
+        return subprocess.run([BINARY, "--measure-plans"], capture_output=True, text=True, timeout=self.MEASURING,
+                              env=self.env if env is None else env)
+
+    def test_it_serves_at_once_with_no_plans_kept(self):
+        self.someone_measures()
+        _, said, took = self.service()
+        self.assertLess(took, 5)
+        self.wait_for(said, "serving", 5)
+        self.assertIn("estimated plans for now", "".join(said))
+        self.assertIn(self.kept, "".join(said))
+
+    def test_the_measured_plans_are_found_kept_and_taken_up(self):
+        proc, said, _ = self.service()
+        self.wait_for(said, "now run on FFTW's measured plans", self.MEASURING)
+        self.assertGreater(os.path.getsize(self.kept), 0)
+        proc.send_signal(signal.SIGINT)
+        self.assertEqual(proc.wait(10), 0)
+        # The next service has them from its first transform, and has nothing measured.
+        written = os.stat(self.kept).st_mtime_ns
+        _, said, took = self.service()
+        self.wait_for(said, "serving", 5)
+        self.assertLess(took, 5)
+        self.assertNotIn("estimated", "".join(said))
+        # Asked to measure again, there is nothing to do.
+        started = time.monotonic()
+        self.assertEqual(self.measure().returncode, 0)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(os.stat(self.kept).st_mtime_ns, written)
+
+    def test_one_process_measures_them_at_a_time(self):
+        self.someone_measures()
+        started = time.monotonic()
+        self.assertEqual(self.measure().returncode, 0)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertFalse(os.path.exists(self.kept))
+
+    def test_kept_plans_that_are_not_plans_are_passed_over(self):
+        os.makedirs(os.path.dirname(self.kept))
+        with open(self.kept, "w") as f:
+            f.write("not what FFTW wrote\n")
+        self.someone_measures()
+        _, said, took = self.service()
+        self.assertLess(took, 5)
+        self.wait_for(said, "serving", 5)
+        self.assertIn("estimated plans for now", "".join(said))
+
+    def test_with_nowhere_to_keep_them_it_serves_on_the_estimate_and_says_so(self):
+        homeless = {k: v for k, v in os.environ.items() if k not in ("HOME", "XDG_CACHE_HOME")}
+        _, said, took = self.service(homeless)
+        self.assertLess(took, 5)
+        self.wait_for(said, "serving", 5)
+        self.assertIn("nowhere to keep", "".join(said))
+        self.assertEqual(self.measure(homeless).returncode, 1)
 
 
 class Options(unittest.TestCase):

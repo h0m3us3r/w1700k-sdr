@@ -17,6 +17,7 @@
 
 #include "ingest.h"
 #include "awake.h"
+#include "flatten.h"
 #include "placement.h"
 #include "publish.h"
 
@@ -51,7 +52,10 @@ void usage()
                  "  --deep-idle       let the host idle as deeply as it likes while a stream arrives (default:\n"
                  "                    ask the kernel to keep the CPUs out of deep idle for as long as one does)\n"
                  "  --own-priority    run at the priority it was started with (default: nice -10, where the\n"
-                 "                    user may, so that a busy host does not starve the receive threads)\n");
+                 "                    user may, so that a busy host does not starve the receive threads)\n"
+                 "  --measure-plans   serve nothing: find FFTW's measured plans of the correction's transforms\n"
+                 "                    and keep them for later runs, as a service that lacks them has done in\n"
+                 "                    the background by itself\n");
 }
 
 unsigned positive(const std::string &option, const std::string &text, unsigned long max)
@@ -74,7 +78,7 @@ int main(int argc, char **argv)
 {
     std::string bind = "10.77.0.10", name = W1700K_STREAM_NAME, unit;
     unsigned port = 7700, rx_threads = 8, workers = 6, ring_mib = 512, receive_mib = kReceiveMib, report = 0;
-    bool share_irq_cpu = false, deep_idle = false, own_priority = false;
+    bool share_irq_cpu = false, deep_idle = false, own_priority = false, measure_plans = false;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -94,6 +98,7 @@ int main(int argc, char **argv)
             else if (arg == "--share-irq-cpu") share_irq_cpu = true;
             else if (arg == "--deep-idle") deep_idle = true;
             else if (arg == "--own-priority") own_priority = true;
+            else if (arg == "--measure-plans") measure_plans = true;
             else if (arg == "-h" || arg == "--help") {
                 usage();
                 return 0;
@@ -110,6 +115,15 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    if (measure_plans) {
+        try {
+            return flatten_plans::measure();
+        } catch (const std::exception &e) {
+            std::fprintf(stderr, "w1700k-stream: %s\n", e.what());
+            return 1;
+        }
+    }
+
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
     // Before any thread is started: each inherits it. On a host with every CPU busy the receive
@@ -122,6 +136,28 @@ int main(int argc, char **argv)
                      "(sudo init/host/link keep ..., then log in again)\n",
                      kNice, std::strerror(errno));
     try {
+        // Before a socket is opened or a thread started. The service does not wait for the plans:
+        // where FFTW measures by the clock (arm64 as distributions build it) they take most of a
+        // minute, and until this was so the service took that long to start.
+        bool plans_measured = flatten_plans::measured();
+        if (!plans_measured) {
+            const std::string kept = flatten_plans::path();
+            if (kept.empty())
+                std::fprintf(stderr,
+                             "w1700k-stream: the correction's transforms run on FFTW's estimated plans: with neither "
+                             "XDG_CACHE_HOME nor HOME there is nowhere to keep its measured ones\n");
+            else if (flatten_plans::measure_in_background())
+                std::fprintf(stderr,
+                             "w1700k-stream: the correction's transforms run on FFTW's estimated plans for now; its "
+                             "measured ones are being found in the background (a moment on most hosts, a minute "
+                             "on some) and kept in %s\n",
+                             kept.c_str());
+            else
+                std::fprintf(stderr,
+                             "w1700k-stream: the correction's transforms run on FFTW's estimated plans: the "
+                             "process that measures them could not be started (%s --measure-plans does it)\n",
+                             argv[0]);
+        }
         SharedRing shared(name, ring_mib * 128);
         SampleRing received(receive_mib * 128);
         Ingest ingest(received, bind, port, rx_threads, unit);
@@ -135,7 +171,7 @@ int main(int argc, char **argv)
         // Looked at again every two seconds: the interface may appear, or its interrupt be
         // moved, after this service started.
         int avoided = -1;
-        unsigned tick = 0;
+        unsigned tick = 0, plans_tick = 0;
         // The receive threads ask for the host to be kept awake when datagrams arrive; two
         // seconds without any, and it may sleep as it likes again.
         uint64_t arrived = 0;
@@ -159,6 +195,10 @@ int main(int argc, char **argv)
                     avoided = cpu;
                     __atomic_store_n(&shared.header()->receive_cpu, uint64_t(cpu + 1), __ATOMIC_RELEASE);
                 }
+            }
+            if (!plans_measured && ++plans_tick % 5 == 0 && flatten_plans::refresh()) {
+                plans_measured = true;
+                std::fprintf(stderr, "w1700k-stream: the correction's transforms now run on FFTW's measured plans\n");
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (!report || std::chrono::steady_clock::now() - last < std::chrono::seconds(report)) continue;

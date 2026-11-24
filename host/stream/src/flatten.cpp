@@ -2,11 +2,22 @@
 #include "flatten.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
 #include <stdexcept>
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #if defined(__SSE2__)
 #include <emmintrin.h>
@@ -139,22 +150,167 @@ double Flatten::gain_db(double x) const
     return 20 * std::log10(std::fabs(re));
 }
 
+// ---- the transforms' plans (flatten.h, flatten_plans) ------------------------------------------------
+
+namespace {
+
+// One pair for every thread: a plan is made on a buffer of its own and run on each thread's
+// (FFTW's execute for another array of the same alignment, which any number of threads may be
+// in at once). A pair that was put to use is never destroyed, since a thread may be in it; the
+// one estimated pair a process leaves behind when it moves to the measured one is two small plans.
+struct Plans {
+    fftwf_plan forward = nullptr, inverse = nullptr;
+    bool measured = false;
+};
+std::atomic<const Plans *> plans_in_use{nullptr};
+struct timespec kept_read = {0, 0};  // the kept plans' modification time when last read; with the planner held
+
+std::string kept_path(bool create)
+{
+    std::string dir;
+    if (const char *cache = getenv("XDG_CACHE_HOME"); cache && *cache) dir = cache;
+    else if (const char *home = getenv("HOME"); home && *home) dir = std::string(home) + "/.cache";
+    else return "";
+    if (create) mkdir(dir.c_str(), 0700);
+    dir += "/w1700k";
+    if (create) mkdir(dir.c_str(), 0700);
+    return dir + "/stream-fftwf-wisdom";
+}
+
+// With the planner held. Gives FFTW the kept plans if they were written since they were last
+// read; whether it did.
+bool read_kept()
+{
+    const std::string path = kept_path(false);
+    struct stat st;
+    if (path.empty() || stat(path.c_str(), &st)) return false;
+    if (st.st_mtim.tv_sec == kept_read.tv_sec && st.st_mtim.tv_nsec == kept_read.tv_nsec) return false;
+    kept_read = st.st_mtim;
+    return fftwf_import_wisdom_from_filename(path.c_str()) != 0;
+}
+
+// With the planner held. The measured pair where FFTW knows both plans, else (measure: found
+// now, however long that takes; otherwise) the estimated pair.
+Plans *plan(bool measure)
+{
+    const int n = int(Flatten::kFft);
+    fftwf_complex *on = fftwf_alloc_complex(Flatten::kFft);
+    auto pair = std::make_unique<Plans>();
+    const unsigned how = measure ? FFTW_MEASURE : FFTW_MEASURE | FFTW_WISDOM_ONLY;
+    pair->forward = fftwf_plan_dft_1d(n, on, on, FFTW_FORWARD, how);
+    pair->inverse = fftwf_plan_dft_1d(n, on, on, FFTW_BACKWARD, how);
+    pair->measured = pair->forward && pair->inverse;
+    if (!pair->measured) {
+        if (pair->forward) fftwf_destroy_plan(pair->forward);
+        if (pair->inverse) fftwf_destroy_plan(pair->inverse);
+        pair->forward = fftwf_plan_dft_1d(n, on, on, FFTW_FORWARD, FFTW_ESTIMATE);
+        pair->inverse = fftwf_plan_dft_1d(n, on, on, FFTW_BACKWARD, FFTW_ESTIMATE);
+    }
+    fftwf_free(on);
+    if (!pair->forward || !pair->inverse) throw std::runtime_error("FFTW could not plan the correction's transforms");
+    return pair.release();
+}
+
+void discard(Plans *pair)  // with the planner held; a pair never put to use
+{
+    fftwf_destroy_plan(pair->forward);
+    fftwf_destroy_plan(pair->inverse);
+    delete pair;
+}
+
+// The pair in use: from the first call on, the kept measured plans or the estimate.
+const Plans *plans()
+{
+    if (const Plans *pair = plans_in_use.load(std::memory_order_acquire)) return pair;
+    std::lock_guard<std::mutex> lock(planner);
+    if (const Plans *pair = plans_in_use.load(std::memory_order_acquire)) return pair;
+    read_kept();
+    const Plans *pair = plan(false);
+    plans_in_use.store(pair, std::memory_order_release);
+    return pair;
+}
+
+}  // namespace
+
+std::string flatten_plans::path() { return kept_path(false); }
+
+bool flatten_plans::measured() { return plans()->measured; }
+
+bool flatten_plans::refresh()
+{
+    if (plans()->measured) return true;
+    std::lock_guard<std::mutex> lock(planner);
+    if (!read_kept()) return false;
+    Plans *pair = plan(false);
+    if (!pair->measured) {
+        discard(pair);
+        return false;
+    }
+    plans_in_use.store(pair, std::memory_order_release);  // the estimated pair stays: a thread may be in it
+    return true;
+}
+
+int flatten_plans::measure()
+{
+    const std::string path = kept_path(true);
+    if (path.empty()) return 1;
+    // One process measures at a time, and each asks first whether it is still needed: several
+    // services started together (a test run) start as many of these.
+    const int held = open((path + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (held < 0) return 1;
+    if (flock(held, LOCK_EX | LOCK_NB)) return 0;
+    std::lock_guard<std::mutex> lock(planner);
+    read_kept();
+    Plans *pair = plan(false);
+    const bool kept = pair->measured;
+    discard(pair);
+    if (kept) return 0;
+    discard(plan(true));
+    read_kept();  // what another program kept meanwhile stays kept: FFTW adds a file to what it knows
+    const std::string fresh = path + ".new";
+    if (!fftwf_export_wisdom_to_filename(fresh.c_str()) || std::rename(fresh.c_str(), path.c_str())) return 1;
+    return 0;
+}
+
+bool flatten_plans::measure_in_background()
+{
+    // A child that starts the measuring process and ends, so that process is nobody's to wait for
+    // and outlives this one: a service that runs for seconds still leaves the plans for the next.
+    char program[4096];  // this program's own file, by its name: so the process is listed under it
+    const ssize_t length = readlink("/proc/self/exe", program, sizeof program - 1);
+    if (length <= 0) return false;
+    program[length] = 0;
+    const pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) {
+        setsid();  // not this one's terminal: a Ctrl-C meant for the service is not for it
+        if (fork() != 0) _exit(0);
+        // Only what a process may do between fork and exec from here on. None of this one's open
+        // files: a socket of the stream's port held by a process that reads nothing would be
+        // sent a share of the stream by the kernel.
+        const int null = open("/dev/null", O_RDWR);
+        for (int fd = 0; fd < 3; ++fd)
+            if (null >= 0) dup2(null, fd);
+        const long limit = sysconf(_SC_OPEN_MAX);
+        for (int fd = 3; fd < (limit > 0 && limit < 65536 ? int(limit) : 65536); ++fd) close(fd);
+        setpriority(PRIO_PROCESS, 0, 0);  // the ordinary priority, whatever this one runs at
+        execl(program, "w1700k-stream", "--measure-plans", static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 FlattenRun::FlattenRun()
 {
     buffer_ = fftwf_alloc_complex(Flatten::kFft);
-    std::lock_guard<std::mutex> lock(planner);
-    forward_ = fftwf_plan_dft_1d(int(Flatten::kFft), buffer_, buffer_, FFTW_FORWARD, FFTW_MEASURE);
-    inverse_ = fftwf_plan_dft_1d(int(Flatten::kFft), buffer_, buffer_, FFTW_BACKWARD, FFTW_MEASURE);
-    if (!forward_ || !inverse_) throw std::runtime_error("FFTW could not plan the correction's transforms");
+    if (!buffer_) throw std::bad_alloc();
+    plans();  // planned now, not when the first block is filtered
 }
 
-FlattenRun::~FlattenRun()
-{
-    std::lock_guard<std::mutex> lock(planner);
-    fftwf_destroy_plan(forward_);
-    fftwf_destroy_plan(inverse_);
-    fftwf_free(buffer_);
-}
+FlattenRun::~FlattenRun() { fftwf_free(buffer_); }
 
 namespace {
 
@@ -187,9 +343,10 @@ void multiply(fftwf_complex *x, const fftwf_complex *h, unsigned count)
 // centred on input t + kDelay.
 void FlattenRun::filter(const Flatten &f)
 {
-    fftwf_execute(forward_);
+    const Plans *pair = plans();
+    fftwf_execute_dft(pair->forward, buffer_, buffer_);
     multiply(buffer_, f.transfer(), Flatten::kFft);
-    fftwf_execute(inverse_);
+    fftwf_execute_dft(pair->inverse, buffer_, buffer_);
 }
 
 // A complex sample is two floats in both the caller's arrays and FFTW's, so blocks move in and out
