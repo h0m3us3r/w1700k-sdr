@@ -67,13 +67,51 @@ def download(url, sha256, name=None, mirrors=()):
     return target
 
 
+def measures_links_from_the_destination():
+    """Whether this Python's 'data' filter has the fault `data_filter` below puts right: asked
+    of the filter itself, not of a version number, since a distribution patches its own."""
+    link = tarfile.TarInfo('directory/link')
+    link.type, link.linkname = tarfile.SYMTYPE, '../beside'         # directory/link -> beside
+    try:
+        tarfile.data_filter(link, tempfile.gettempdir())
+    except tarfile.LinkOutsideDestinationError:
+        return True
+    return False
+
+
+def data_filter(member, path):
+    """tarfile's 'data' filter, which refuses whatever would be written outside `path` or would
+    point out of it, with one fault of its first releases put right.
+
+    Python 3.10.12 and 3.11.4 (Ubuntu 22.04's python3.10 is the former) measure where a symbolic
+    link points from `path` and not from the directory the link is in. A link that climbs out of
+    its own directory and stays in the archive is refused by them as one that leaves it: Linux
+    has arch/arm64/tools/syscall_64.tbl -> ../../../scripts/syscall.tbl, and the build ended
+    there. 3.10.13 and 3.11.5 measure from the link. On a Python with the fault, a symbolic link
+    it refuses is measured here as they do: one that stays under `path` passes, as the filter
+    passes every link (its name, with no owner and no mode), and one that leaves is refused as
+    before."""
+    try:
+        return tarfile.data_filter(member, path)
+    except tarfile.LinkOutsideDestinationError:
+        if not (member.issym() and measures_links_from_the_destination()):
+            raise
+        root = os.path.realpath(path)
+        name = member.name.lstrip('/' + os.sep)
+        target = os.path.realpath(os.path.join(root, os.path.dirname(name), member.linkname))
+        if os.path.commonpath([target, root]) != root:
+            raise
+        return member.replace(name=name, mode=None, uid=None, gid=None, uname=None, gname=None,
+                              deep=False)
+
+
 def extract(archive, dest):
     """Unpack a source archive whose single top-level directory becomes `dest`."""
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='extract-', dir=dest.parent) as temporary:
         with tarfile.open(archive) as tar:
-            tar.extractall(temporary, filter='data')
+            tar.extractall(temporary, filter=data_filter)
         entries = list(Path(temporary).iterdir())
         require(len(entries) == 1 and entries[0].is_dir(),
                 f'{archive.name} does not hold a single top-level directory')
