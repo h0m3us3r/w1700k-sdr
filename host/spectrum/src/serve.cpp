@@ -939,6 +939,7 @@ private:
              ",\"coverage\":" + json_number(sample_rate_ > 0 ? std::min(1.0, spectrum_used_ / sample_rate_ / (shows_both() ? 2 : 1)) : 0) +
              ",\"share\":" + json_number(std::round(spectrum.share * 1000) / 1000) +
              ",\"workers\":" + std::to_string(spectrum.workers) + ",\"queued\":" + std::to_string(spectrum.queued) +
+             ",\"plan\":\"" + (spectrum.measured ? "measured" : "estimated") + "\"" +
              ",\"backlog\":" + std::to_string(spectrum.backlog) + ",\"missing\":" + std::to_string(spectrum.pairs_missing) +
              ",\"retuned\":" + std::to_string(spectrum.frames_retuned) + "}";
         section("spectrum");

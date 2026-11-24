@@ -336,7 +336,7 @@ class WebSocketClient:
 class ServerFixture:
     count = 0
 
-    def __init__(self, test, controller=True, extra=(), passive_tuning=None, progress_delay=0.3):
+    def __init__(self, test, controller=True, extra=(), passive_tuning=None, progress_delay=0.3, env=None):
         self.dir = tempfile.mkdtemp(prefix="spectrum-test-")
         test.addCleanup(shutil.rmtree, self.dir, True)
         self.log = os.path.join(self.dir, "controller.jsonl")
@@ -364,7 +364,7 @@ class ServerFixture:
                            shlex.quote(self.tuning_file), progress_delay)]
         else:
             command.append("--no-controller")
-        self.process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True)
+        self.process = subprocess.Popen(command, stderr=subprocess.PIPE, text=True, env=env)
         test.addCleanup(self.stop)
         self.stderr = []
         self.address = None
@@ -937,6 +937,7 @@ class PlansMeasuredApart(unittest.TestCase):
         self.addCleanup(held.close)
         for byte in (0, size.bit_length() - 1):
             fcntl.lockf(held, fcntl.LOCK_EX, 1, byte)
+        return held
 
     def measure(self, size):
         process = subprocess.Popen([BINARY, "--measure-plan", str(size)], stdout=subprocess.DEVNULL,
@@ -968,6 +969,33 @@ class PlansMeasuredApart(unittest.TestCase):
         server.terminate()
         self.assertEqual(server.wait(10), 0)
         self.assertLess(time.monotonic() - asked, 5)
+
+    def test_a_running_server_moves_to_the_measured_plan_when_it_is_kept(self):
+        """The whole of it, with a stream running: the server shows frames on the estimate
+        while the process it started for its FFT size waits behind another's measurement, that
+        process measures and keeps the plan when its turn comes, and the server, which was not
+        restarted, says it runs on the measured plan and goes on showing the tone where it is."""
+        # The size a server starts at is in another process's hands, which is measuring: the one
+        # the server starts for it has nothing to do, and the one for the tests' size waits.
+        other = self.someone_measures(262144)
+        fixture = ServerFixture(self, controller=False, extra=["--center", "2440", "--rate", "40"],
+                                passive_tuning={"center_hz": 2440e6, "sample_rate": 40e6, "running": True}, env=self.env)
+        ws = fixture.ws
+        fixture.exporter.tone_hz = 2445e6
+
+        def tone(frame):
+            width = (frame["stop"] - frame["start"]) / frame["bins"]
+            self.assertLess(abs(frame["peak_hz"] - 2445e6), 2 * width)
+
+        tone(ws.wait_frame(2440e6, 40e6))
+        self.assertEqual(ws.status["spectrum"]["plan"], "estimated")
+        self.assertFalse(os.path.exists(self.kept))
+        other.close()   # the other measurement ends: the turn of the server's own
+        ws.wait(lambda: ws.status["spectrum"]["plan"] == "measured", timeout=self.MEASURING,
+                what="the server on its measured plan")
+        self.assertGreater(os.path.getsize(self.kept), 0)
+        tone(ws.wait_frame(2440e6, 40e6))
+        self.assertEqual(fixture.process.poll(), None)
 
     def test_a_plan_is_measured_once_and_kept(self):
         first = self.measure(512)

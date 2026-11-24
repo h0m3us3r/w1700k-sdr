@@ -569,6 +569,7 @@ void SpectrumEngine::schedule()
                 next = end;
             }
             stats_.share = active.averaging ? 1 : share;
+            stats_.measured = t->plan->measured;
             stats_.slices_lost += lost;
             stats_.slices_skipped += skipped;
             stats_.pairs_dropped += dropped;

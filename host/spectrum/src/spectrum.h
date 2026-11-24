@@ -105,6 +105,8 @@ public:
         uint64_t pairs_used = 0;      // samples that went into FFT blocks
         uint64_t pairs_dropped = 0;   // samples of frames skipped while the workers were busy
         double share = 1;             // of the blocks "every sample" takes, the share the workers keep up with
+        bool measured = false;        // the FFT size in use runs on FFTW's measured plan (false: on its
+                                      // estimate, until the measured one is kept)
         uint64_t pairs_missing = 0;   // samples of blocks left out: a slice lost, overwritten or an event
         uint64_t slices_lost = 0;     // slices that never arrived
         uint64_t slices_skipped = 0;  // slices passed over while the scheduler was behind

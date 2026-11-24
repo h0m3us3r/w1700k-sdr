@@ -93,7 +93,9 @@ itself and which goes on if the server ends; one measures at a time. That takes 
 FFTW has a cycle counter to time with, and 108 s for the largest size on an arm64 host where it
 has none (FFTW 3.3.10 as Ubuntu builds it), where the measured plan is 31 % faster. The server
 waits for none of it: found in a thread of the server, as it was, a server asked to stop did not
-stop for that long.
+stop for that long. Which plan the size in use runs on is `spectrum.plan` in the status
+(`estimated` or `measured`) and "FFT plan" in the Stream panel; a running server moves to the
+measured plan within half a second of its being kept.
 
 `kill -USR1` writes the newest samples, as the stream serves them, to
 `DIR/w1700k-dump-<unix ms>.bin` (complex int16, I then Q, on the 14-bit scale: full scale 8192)
