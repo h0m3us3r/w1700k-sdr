@@ -85,9 +85,17 @@ The FFT workers take the CPU that is left: they run at nice 15, so the stream se
 threads, this server's web thread and a browser on the same host come first. With "every sample"
 averaging on a host that cannot transform them all, frames keep their rate and carry a share of
 their blocks (`spectrum.share` in the status, and the coverage shown in the Stream panel). FFTW's
-measured plan for each FFT size is found once in the background (seconds for the largest; the
-estimated plan serves meanwhile) and kept in `$XDG_CACHE_HOME/w1700k/fftwf-wisdom` (default
-`~/.cache`): at 262,144 points it transforms about 40 % more samples per core than the estimate.
+measured plan for each FFT size is found once in the background (the estimated plan serves
+meanwhile) and kept in `$XDG_CACHE_HOME/w1700k/fftwf-wisdom` (default `~/.cache`): at 262,144
+points it transforms about 40 % more samples per core than the estimate. It is found by a process
+of its own, `w1700k-spectrum --measure-plan N`, which a server that lacks the plan starts by
+itself and which goes on if the server ends; one measures at a time. That takes seconds where
+FFTW has a cycle counter to time with, and 108 s for the largest size on an arm64 host where it
+has none (FFTW 3.3.10 as Ubuntu builds it), where the measured plan is 31 % faster. The server
+waits for none of it: found in a thread of the server, as it was, a server asked to stop did not
+stop for that long. Which plan the size in use runs on is `spectrum.plan` in the status
+(`estimated` or `measured`) and "FFT plan" in the Stream panel; a running server moves to the
+measured plan within half a second of its being kept.
 
 `kill -USR1` writes the newest samples, as the stream serves them, to
 `DIR/w1700k-dump-<unix ms>.bin` (complex int16, I then Q, on the 14-bit scale: full scale 8192)

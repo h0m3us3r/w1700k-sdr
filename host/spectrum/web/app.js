@@ -965,6 +965,7 @@ function showStream(s) {
             ['Capacity', `${mibOf(capacity).toFixed(0)} MiB, ${((capacity * 2048) / s.receiver.sample_rate).toFixed(2)} s`],
             ['Peak', `${mibOf(ringPeak).toFixed(1)} MiB`],
             ['FFT workers', `${sp.workers}, ${sp.queued} frames queued`],
+            ['FFT plan', sp.plan === 'measured' ? 'measured' : 'estimated, the measured one being found'],
         ]);
         const errors = ERRORS.reduce((sum, k) => sum + (t[k] || 0), 0);
         setPill('pill-errors', errors ? `${errors} errors` : 'no errors', errors ? 'bad' : 'good');

@@ -2,17 +2,21 @@
 #include "spectrum.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 
+#include <fcntl.h>
 #include <fftw3.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+#include "../../stream/src/apart.h"
 
 namespace {
 
@@ -51,12 +55,15 @@ const std::vector<std::pair<std::string, std::vector<double>>> &window_table()
 
 std::mutex planner;  // FFTW's planner is not thread-safe; executing a plan is
 
-// A plan FFTW has measured runs the largest sizes about 40 % faster than one it estimates, and
-// takes seconds to find; with a time limit that cuts the search short it can come out slower
-// than the estimate. So measured plans are found once, in the background, and kept here for
-// later runs (FFTW's "wisdom"). "": no cache directory.
-constexpr double kMeasureLimit = 120;  // seconds: far beyond what any size here needs
-
+// A plan FFTW has measured runs the largest sizes about 40 % faster than one it estimates. It
+// takes seconds to find where FFTW has a cycle counter to time with and minutes where it has
+// none (arm64 as distributions build it: a minute at 32,768 points on an 8-core host), and with
+// a time limit that cuts the search short it can come out slower than the estimate. So each
+// size's measured plan is found once, with no limit, by a process of its own that goes on if the
+// server ends (`w1700k-spectrum --measure-plan N`; apart.h), and kept here for later runs
+// (FFTW's "wisdom"). Measured in a thread of the server, as it was, the server could not be
+// stopped until the measurement ended (106 s on that host, at its limit, and not kept), and
+// planning another size waited as long. "": no cache directory.
 std::string wisdom_path(bool create)
 {
     std::string dir;
@@ -69,24 +76,84 @@ std::string wisdom_path(bool create)
     return dir + "/fftwf-wisdom";
 }
 
-// With the planner held.
-void load_wisdom()
+struct timespec wisdom_read = {0, 0};  // the kept plans' modification time when last read; with the planner held
+
+// With the planner held. Gives FFTW the kept plans if they were written since they were last
+// read; whether it did.
+bool load_wisdom()
 {
     const std::string path = wisdom_path(false);
-    if (!path.empty()) fftwf_import_wisdom_from_filename(path.c_str());
+    struct stat st;
+    if (path.empty() || stat(path.c_str(), &st)) return false;
+    if (st.st_mtim.tv_sec == wisdom_read.tv_sec && st.st_mtim.tv_nsec == wisdom_read.tv_nsec) return false;
+    wisdom_read = st.st_mtim;
+    return fftwf_import_wisdom_from_filename(path.c_str()) != 0;
 }
 
-void save_wisdom()
+// With the planner held. All that FFTW knows, which is what was kept and what was measured since.
+bool save_wisdom()
 {
     const std::string path = wisdom_path(true);
-    if (path.empty()) return;
+    if (path.empty()) return false;
     const std::string fresh = path + ".new";
-    if (fftwf_export_wisdom_to_filename(fresh.c_str())) std::rename(fresh.c_str(), path.c_str());
+    return fftwf_export_wisdom_to_filename(fresh.c_str()) && std::rename(fresh.c_str(), path.c_str()) == 0;
+}
+
+// With the planner held: FFTW knows the measured plan of size n.
+bool plan_known(unsigned n)
+{
+    fftwf_complex *in = fftwf_alloc_complex(n);
+    const fftwf_plan plan = fftwf_plan_dft_1d(int(n), in, in, FFTW_FORWARD, FFTW_MEASURE | FFTW_WISDOM_ONLY);
+    if (plan) fftwf_destroy_plan(plan);
+    fftwf_free(in);
+    return plan != nullptr;
 }
 
 }  // namespace
 
 float spectrum_db(float power) { return 10 * std::log10(power + 1e-20f); }
+
+int spectrum_measure_plan(unsigned n)
+{
+    SpectrumSettings sized;
+    sized.size = n;
+    sized.validate();
+    const std::string path = wisdom_path(true);
+    if (path.empty()) return 1;
+    // One process measures at a time, so that each has the machine's caches to itself, and one
+    // has each size in hand: several servers started together, as a test run does, each ask for
+    // the same size, and all but the first have nothing to do. Both are locks on bytes of one
+    // file, which end with the process that holds them: byte 0 while measuring, and a byte of
+    // its own for each size (512 is 2^9: bytes 9 to 18) from asking until the plan is kept.
+    const int held = open((path + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (held < 0) return 1;
+    unsigned power = 0;
+    while ((1u << power) < n) ++power;
+    const auto lock_byte = [held](off_t at, bool wait) {
+        struct flock byte = {};
+        byte.l_type = F_WRLCK;
+        byte.l_whence = SEEK_SET;
+        byte.l_start = at;
+        byte.l_len = 1;
+        int result;
+        while ((result = fcntl(held, wait ? F_SETLKW : F_SETLK, &byte)) < 0 && wait && errno == EINTR) {
+        }
+        return result == 0;
+    };
+    if (!lock_byte(power, false)) return 0;
+    if (!lock_byte(0, true)) return 1;
+    std::lock_guard<std::mutex> lock(planner);
+    load_wisdom();
+    if (plan_known(n)) return 0;
+    fftwf_complex *in = fftwf_alloc_complex(n);
+    fftwf_set_timelimit(FFTW_NO_TIMELIMIT);
+    const fftwf_plan plan = fftwf_plan_dft_1d(int(n), in, in, FFTW_FORWARD, FFTW_MEASURE);
+    if (plan) fftwf_destroy_plan(plan);
+    fftwf_free(in);
+    if (!plan) return 1;
+    load_wisdom();  // what another program kept meanwhile stays kept: FFTW adds a file to what it knows
+    return save_wisdom() ? 0 : 1;
+}
 
 const std::vector<std::string> &spectrum_windows()
 {
@@ -228,7 +295,7 @@ SpectrumEngine::~SpectrumEngine()
         refine_stop_ = true;
     }
     refine_ready_.notify_all();
-    refiner_.join();  // a measurement under way finishes first: its plan is kept for the next run
+    refiner_.join();  // a measurement under way goes on, in its own process: its plan is kept for the next run
 }
 
 void SpectrumEngine::configure(const SpectrumSettings &settings)
@@ -323,38 +390,41 @@ std::shared_ptr<const SpectrumEngine::Transform> SpectrumEngine::transform(unsig
     return t;
 }
 
-// Measures the plans that were only estimated, one size at a time, saves them and has the
-// scheduler take them up. The workers go on with the estimate meanwhile; only planning another
-// new size waits for a measurement to end.
+// Has the plans that were only estimated measured, each size by a process of its own, and has
+// the scheduler take each up once it is kept. The workers go on with the estimate meanwhile, and
+// nothing here waits for a measurement: not planning another size, not the server's end.
 void SpectrumEngine::refine()
 {
+    std::vector<unsigned> awaited;  // sizes being measured, or queued behind one that is
     for (;;) {
-        unsigned n;
+        std::vector<unsigned> fresh;
         {
             std::unique_lock<std::mutex> lock(transforms_mutex_);
-            refine_ready_.wait(lock, [this] { return refine_stop_ || !refine_.empty(); });
+            const auto due = [this] { return refine_stop_ || !refine_.empty(); };
+            if (awaited.empty()) refine_ready_.wait(lock, due);
+            else refine_ready_.wait_for(lock, std::chrono::milliseconds(500), due);
             if (refine_stop_) return;
-            n = refine_.front();
-            refine_.pop_front();
+            for (; !refine_.empty(); refine_.pop_front())
+                if (std::find(awaited.begin(), awaited.end(), refine_.front()) == awaited.end())
+                    fresh.push_back(refine_.front());
         }
-        bool found;
+        // From this thread, which runs at the server's own priority (the workers lowered theirs).
+        for (unsigned n : fresh)
+            if (!wisdom_path(false).empty() && apart::run({"--measure-plan", std::to_string(n)})) awaited.push_back(n);
+        std::vector<unsigned> found;
         {
             std::lock_guard<std::mutex> lock(planner);
-            fftwf_complex *in = fftwf_alloc_complex(n);
-            fftwf_set_timelimit(kMeasureLimit);
-            const auto started = std::chrono::steady_clock::now();
-            const fftwf_plan plan = fftwf_plan_dft_1d(int(n), in, in, FFTW_FORWARD, FFTW_MEASURE);
-            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-            fftwf_set_timelimit(FFTW_NO_TIMELIMIT);
-            if (plan) fftwf_destroy_plan(plan);
-            fftwf_free(in);
-            found = plan && took < 0.9 * kMeasureLimit;  // not one a time limit cut short
-            if (found) save_wisdom();
+            if (load_wisdom())
+                for (unsigned n : awaited)
+                    if (plan_known(n)) found.push_back(n);
         }
-        if (!found) continue;
+        if (found.empty()) continue;
         {
             std::lock_guard<std::mutex> lock(transforms_mutex_);
-            plans_.erase(n);  // the next transform() of this size plans again, from what FFTW now knows
+            for (unsigned n : found) {
+                awaited.erase(std::find(awaited.begin(), awaited.end(), n));
+                plans_.erase(n);  // the next transform() of this size plans again, from what FFTW now knows
+            }
         }
         std::lock_guard<std::mutex> lock(mutex_);
         ++settings_version_;  // the scheduler fetches its transform again
@@ -499,6 +569,7 @@ void SpectrumEngine::schedule()
                 next = end;
             }
             stats_.share = active.averaging ? 1 : share;
+            stats_.measured = t->plan->measured;
             stats_.slices_lost += lost;
             stats_.slices_skipped += skipped;
             stats_.pairs_dropped += dropped;

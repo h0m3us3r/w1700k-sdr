@@ -7,6 +7,7 @@
 #include <string>
 
 #include "serve.h"
+#include "spectrum.h"
 
 namespace {
 
@@ -31,7 +32,9 @@ void usage()
                  "  --center MHZ        the stream's centre frequency until the controller reports it (default 5250)\n"
                  "  --rate MSPS         its sample rate until the controller reports it (default 320)\n"
                  "  --dump-dir DIR      where SIGUSR1 writes a snapshot of the newest samples (default /tmp)\n"
-                 "  --dump-seconds S    its length, at most the ring's (default 0.3)\n");
+                 "  --dump-seconds S    its length, at most the ring's (default 0.3)\n"
+                 "  --measure-plan N    serve nothing: find FFTW's measured plan of FFT size N and keep it for\n"
+                 "                      later runs, as a server that lacks it has done in the background by itself\n");
 }
 
 unsigned positive(const std::string &option, const std::string &text)
@@ -88,6 +91,7 @@ int main(int argc, char **argv)
             else if (arg == "--rate") o.sample_rate = number(arg, value()) * 1e6;
             else if (arg == "--dump-dir") o.dump_dir = value();
             else if (arg == "--dump-seconds") o.dump_seconds = number(arg, value());
+            else if (arg == "--measure-plan") return spectrum_measure_plan(positive(arg, value()));
             else if (arg == "-h" || arg == "--help") {
                 usage();
                 return 0;

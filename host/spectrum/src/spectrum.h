@@ -38,6 +38,12 @@ struct SpectrumSettings {
 // dBFS of a frame's power value.
 float spectrum_db(float power);
 
+// Measures FFTW's plan of FFT size `n` and keeps it for later runs, unless it is kept already
+// or another process has that size in hand; behind one measuring another size it waits its
+// turn. What `w1700k-spectrum --measure-plan N` does, which a server that lacks the plan starts
+// by itself. 0, or 1 where the plan cannot be kept; throws for a size that is not an FFT size.
+int spectrum_measure_plan(unsigned n);
+
 // FFT window names, in the order the UI offers them, and each one's
 // equivalent noise bandwidth in bins.
 const std::vector<std::string> &spectrum_windows();
@@ -99,6 +105,8 @@ public:
         uint64_t pairs_used = 0;      // samples that went into FFT blocks
         uint64_t pairs_dropped = 0;   // samples of frames skipped while the workers were busy
         double share = 1;             // of the blocks "every sample" takes, the share the workers keep up with
+        bool measured = false;        // the FFT size in use runs on FFTW's measured plan (false: on its
+                                      // estimate, until the measured one is kept)
         uint64_t pairs_missing = 0;   // samples of blocks left out: a slice lost, overwritten or an event
         uint64_t slices_lost = 0;     // slices that never arrived
         uint64_t slices_skipped = 0;  // slices passed over while the scheduler was behind
@@ -123,7 +131,7 @@ private:
     void work(Worker &worker);
     void finish(uint64_t sequence, std::shared_ptr<SpectrumFrame> frame);
     std::shared_ptr<const Transform> transform(unsigned size, const std::string &window);
-    void refine();  // the thread that measures plans
+    void refine();  // the thread that has plans measured, and takes them up
     void add_segment(Segment segment);  // with mutex_ held
 
     const StreamClient &stream_;

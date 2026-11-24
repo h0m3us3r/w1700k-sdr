@@ -31,6 +31,7 @@ build/w1700k-stream                    # until Ctrl-C; consumers attach any time
 | `--share-irq-cpu` | | run also on the CPU that takes the interface's packets (see below) |
 | `--deep-idle` | | let the host idle as deeply as it likes while a stream arrives (see below) |
 | `--own-priority` | | run at the priority it was started with (see below) |
+| `--measure-plans` | | serve nothing: measure the correction's FFT plans and keep them (see "The correction") |
 
 The object is the user's who runs the service, and its consumers run as that user: it is made
 readable and writable by its owner alone, and a consumer opens only an object that is its own
@@ -171,6 +172,17 @@ also writes (`radio_sample_rate`, `radio_capture_rate`, `radio_filter_hz`), says
 is as wide as the sample rate and the stream is not 640/2 (which is flat already); the service
 reports what applies in `flatten_active` and `flatten_rate`. The spectrum server writes these
 from the receiver's controller and the page's Flatten toggle.
+
+The service is ready at once: the correction's two 2048-point transforms start on the plans FFTW
+estimates, and move to the ones it measures when those are there. The measured plans are found by
+a process of their own (`w1700k-stream --measure-plans`, which a service that lacks them starts
+by itself, at the ordinary priority; one at a time, and it goes on if the service ends) and kept
+in `$XDG_CACHE_HOME/w1700k/stream-fftwf-wisdom` (default `~/.cache`), where the next service
+finds them. Where FFTW has a cycle counter to time with that takes milliseconds. Where it has
+none (FFTW 3.3.10 as Ubuntu builds it for arm64) it took 54 s on an 8-core arm64 host, and until
+it was done apart the service took that long to start. It is worth having there: 3.4 us a
+transform with the measured plans against 5.4 with the estimate. The service says on its error
+output which plans it runs on when they are the estimate, and when it moves.
 
 Measured on unit A, band 1 at 320 Msps, from the receiver's noise floor (relative to 15..45 % of
 Nyquist): without the correction -1.7 / -6.4 / -14.2 / -19.8 / -22.8 dB at 62.5 / 75 / 87.5 / 94 /
