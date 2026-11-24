@@ -54,6 +54,7 @@ from .radio import (DEFAULT_BANDS, DEFAULT_FILTER_MHZ, LO_RANGE, BandConfig, Rad
                     unit_eeprom)
 from .stream import (GO_ADDR, PACKED_SHARE, REDUCED, REDUCED_MAX_RATE, SENDER_MAX_DATAGRAMS, SPLIT, Result,
                      Stream, StreamError, check_host_mtu, datagram_rate, wire_rate)
+from .service import announce_channels
 from .unit import Unit
 
 STATE_FILE = '/tmp/w1700k-state.json'
@@ -70,6 +71,9 @@ assert PACKINGS == tuple(PACKED_SHARE) + tuple(REDUCED)
 # reduce (above REDUCED_MAX_RATE), the numbered ones where it can.
 AUTOMATIC = ('raw', 'full', 'half', SPLIT) + tuple(REDUCED)
 FULL_MAX_RATE = 160_000_000       # the WM and the WA pack every chunk up to this rate, half of them above
+TUNE_PHASE = ('keep', 'relock')       # a tune's say over the phase between a band's chains (Controller.tune)
+TWO_CHANNELS_MAX_RATE = 160_000_000   # two channels at this rate each are what the radio moves at 320 Msps, its most
+TWO_CHANNELS_GAIN = (2, 5)            # LNA and LPF index both chains are given when the AGC was on: mid-range
 DEFAULT_LINK_MBPS = 10_000        # a port that reports no speed: the unit's 10 GbE
 LINK_FILL = 0.975                 # the share of the link a stream may take (320 Msps half is 97.0 % of 10 GbE)
 START_TIMEOUT = 10.0
@@ -161,12 +165,18 @@ class Controller:
         self.bands_ready = []
         self.band = DEFAULT_BAND
         self.packing = None               # the running stream's packing; None: no stream
+        self.channels = 1                 # a stream's channels: 1, or 2 (two chains of the band, sampled together)
+        self.gain_was_agc = False         # a two-channel stream fixed the gain itself; a stop gives the AGC back
         self.link_mbps = None             # the export link's capacity, read at a stream start; None: not yet
         self.packing_manual = None        # the running stream's packing as set by hand; None: chosen automatically
         self.filter_follows_rate = True   # each band's analog filter is filter_for() its sample rate
         self.rf = {b: default_rf(cfg, filter_for(cfg)) for b, cfg in self.bands.items()}
         self.synth_locked = [None] * len(BANDS)
         self.lo_lock = {}                 # band -> (lowest, highest) LO its synthesizer locks at, found at load
+        # band -> its synthesizer's locks counted (None: its phase is not known to have been kept).
+        # Each full lock leaves the band's chains at random in one of two phases half a turn apart
+        # from each other: a comparison of two channels made under one count holds under that count.
+        self.relocks = {b: 0 for b in BANDS}
 
     # --- state ---
 
@@ -180,9 +190,9 @@ class Controller:
                       'synth_locked': list(self.synth_locked)},
             'stream': {'running': self.packing is not None, 'packing': self.packing,
                        'packing_manual': self.packing_manual is not None, 'link_mbps': self.link_mbps,
-                       'sample_rate': cfg.sample_rate, 'center_hz': rfs['lo_hz']},
+                       'sample_rate': cfg.sample_rate, 'center_hz': rfs['lo_hz'], 'channels': self.channels},
             'rf': dict(rfs, lo_range_hz=list(self.lo_lock.get(self.band, LO_RANGE[self.band])),
-                       filter_follows_rate=self.filter_follows_rate),
+                       filter_follows_rate=self.filter_follows_rate, relocks=self.relocks[self.band]),
             'error': self.error,
         }
 
@@ -201,8 +211,10 @@ class Controller:
                   'lo_lock': {str(b): list(v) for b, v in self.lo_lock.items()},
                   'bands': {str(b): c.as_dict() for b, c in self.bands.items()},
                   'bands_ready': self.bands_ready, 'packing': self.packing, 'link_mbps': self.link_mbps,
+                  'channels': self.channels, 'gain_was_agc': self.gain_was_agc,
                   'packing_manual': self.packing_manual, 'filter_follows_rate': self.filter_follows_rate,
                   'rf': {str(b): v for b, v in self.rf.items()}, 'synth_locked': self.synth_locked,
+                  'relocks': [self.relocks[b] for b in BANDS],
                   # last, after everything the unit's own reader of this file looks for: whose it
                   # is, and the long operation that session is in the middle of
                   'session': self.session, 'busy': self.busy,
@@ -269,6 +281,8 @@ class Controller:
         self.bands, self.band = bands, record['band']
         self.loaded, self.bands_ready = bool(record['loaded']), list(record['bands_ready'])
         self.packing = record['packing']
+        self.channels = 2 if record.get('channels') == 2 and self.packing else 1
+        self.gain_was_agc = bool(record.get('gain_was_agc')) and self.channels == 2
         link = record.get('link_mbps')
         self.link_mbps = link if isinstance(link, int) and not isinstance(link, bool) and link > 0 else None
         manual = record.get('packing_manual')
@@ -276,6 +290,9 @@ class Controller:
         self.filter_follows_rate = bool(record.get('filter_follows_rate', True))
         self.rf = rfs
         self.lo_lock = {int(b): tuple(v) for b, v in record.get('lo_lock', {}).items()}
+        counts = record.get('relocks')
+        if isinstance(counts, list) and len(counts) == len(BANDS) and all(type(v) is int and v >= 0 for v in counts):
+            self.relocks = dict(zip(BANDS, counts))
         locks = record.get('synth_locked', [None] * len(BANDS))
         if len(locks) == len(BANDS) and all(v in (None, True, False) for v in locks):
             self.synth_locked = list(locks)
@@ -351,17 +368,49 @@ class Controller:
         self._check_lock_range(band, cfg.lo_hz)
         return self.run('configuring', self._configure, cfg)
 
-    def start(self, packing=None):
-        """Start streaming; `packing` sets it by hand, as export.packing does for every stream."""
+    def start(self, packing=None, channels=1):
+        """Start streaming; `packing` sets it by hand, as export.packing does for every stream.
+        `channels` 2 streams two receive chains of the band (chains 0 and 1, the radio's two
+        capture paths), sampled at the same instants, each at the band's sample rate: together
+        they cost what one channel costs at twice that rate. The host's stream service is told
+        first, and lays every slot out by channel (w1700k_stream.h)."""
         if packing is not None and packing not in PACKINGS:
             raise ValueError(f'packing: one of {", ".join(PACKINGS)}')
-        return self.run('starting', self._start, packing)
+        if channels not in (1, 2):
+            raise ValueError('channels: 1 or 2')
+        return self.run('starting', self._start, packing, channels)
 
     def stop(self):
-        return self.run('stopping', self._stop)
+        return self.run('stopping', self._stop_asked)
 
-    def tune(self, hz):
-        return self.run(None, self._tune, int(hz))
+    def _stop_asked(self):
+        """A stop that was asked for: the next stream is one channel again unless it says
+        otherwise, and the AGC is back if two channels took it away."""
+        result = self._stop()
+        if self.channels != 1:
+            self.channels = 1
+            if self.gain_was_agc:
+                self.gain_was_agc = False
+                self._gain(True, None, None)
+            self._save()
+        return result
+
+    def tune(self, hz, phase=None):
+        """The active band's LO. `phase` is what becomes of the phase between the band's chains:
+        None keeps it while a two-channel stream runs, wherever the synthesizer's lock reaches
+        (rf.hold), and locks again otherwise; 'keep' keeps it or refuses; 'relock' locks again.
+        Every new lock is counted in the state (rf.relocks)."""
+        if phase not in (None, *TUNE_PHASE):
+            raise ValueError(f'phase: {" or ".join(TUNE_PHASE)}')
+        return self.run(None, self._tune, int(hz), phase)
+
+    def rephase(self, chain=1):
+        """Start one chain's LO path of the active band again: the phase between it and the band's
+        other chains falls anew, at random, in one of its two states half a turn apart (what a
+        new lock does to every chain, done to one with the synthesizer left alone). Counted with
+        the locks (rf.relocks). For whoever can tell the states apart and wants a particular one
+        (tools/two_channel.py align)."""
+        return self.run(None, self._rephase, chain)
 
     def gain(self, agc=False, lna=None, lpf=None):
         return self.run(None, self._gain, agc, lna, lpf)
@@ -436,10 +485,57 @@ class Controller:
                           f'{REDUCED_MAX_RATE / 1e6:g} Msps, where the unit cannot reduce a stream alone')
         return manual
 
-    def _tune(self, hz):
+    def _tune(self, hz, phase=None):
         self._require_loaded()
-        self._check_lock_range(self.band, hz)
-        self._tune_band(self.band, hz)
+        b = self.band
+        self._check_lock_range(b, hz)
+        self._retune(b, hz, phase)
+
+    def _rephase(self, chain):
+        self._require_loaded()
+        if type(chain) is not int or not 0 <= chain < rf.CHAINS[self.band]:
+            raise ValueError(f'chain: 0..{rf.CHAINS[self.band] - 1}')
+        self.relocks[self.band] += 1
+        self._save()
+        rf.rephase(self._session(), self.band, chain)
+
+    def _retune(self, b, hz, phase=None):
+        """Band b's LO, by tune()'s rule for the phase between its chains."""
+        must = phase == 'keep'
+        keep = must or phase is None and bool(self.packing) and self.channels == 2 and b == self.band
+        if keep and self._hold_band(b, hz, must):
+            return
+        if keep:
+            self._log('warn', f'band {b}: {hz / 1e6:.3f} MHz is beyond what its lock reaches; locked again, and '
+                              'the phase between its channels may have turned half a turn')
+        self._tune_band(b, hz)
+
+    def _hold_band(self, b, hz, must):
+        """Band b's LO moved with its lock kept (HOLD): whether it was. Not when the unit will not;
+        `must` makes that a refusal. A lock that did not follow is locked again here either way,
+        and with `must` that is an error once it is."""
+        if self.synth_locked[b] is False:
+            if must:
+                raise Refused(f'band {b} has no lock to keep')
+            return False
+        try:
+            actual = rf.hold(self._session(), b, hz)
+        except rf.HoldRefused as exc:
+            if must:
+                raise Refused(f'{exc}; a tune that locks again reaches it, and may turn the phase between '
+                              'the channels half a turn')
+            return False
+        except rf.HoldLost as exc:
+            self._log('warn', f'{exc}; locking again')
+            self._tune_band(b, hz)
+            if must:
+                raise ControlError(f'{exc}: the band was locked again there, and the phase between its '
+                                   'channels may have turned half a turn')
+            return True
+        self.rf[b]['lo_hz'] = actual
+        self.bands[b] = replace(self.bands[b], lo_hz=actual)
+        self._save()
+        return True
 
     def _check_lock_range(self, band, hz):
         span = self.lo_lock.get(band)
@@ -447,6 +543,7 @@ class Controller:
             raise ValueError(f'band {band} locks {span[0] / 1e6:.1f}-{span[1] / 1e6:.1f} MHz on this unit')
 
     def _locks_at(self, band, hz):
+        self.relocks[band] += 1
         try:
             rf.tune(self._session(), band, hz)
             return True
@@ -481,7 +578,9 @@ class Controller:
         return tuple(edges)
 
     def _tune_band(self, b, hz):
-        """Band b's LO (TUNE), mid-stream too; the LO realised is the band's from now on."""
+        """Band b's LO (TUNE), mid-stream too; the LO realised is the band's from now on. Its
+        synthesizer locks again, which is counted."""
+        self.relocks[b] += 1
         try:
             actual = rf.tune(self._session(), b, hz)
         except rf.SynthUnlocked:
@@ -540,6 +639,10 @@ class Controller:
         self._require_loaded()
         if not self.packing:
             raise Refused('occupancy is measured beside a stream: start one')
+        if self.channels != 1:
+            # The DSP reads a chunk as one chain's samples in time order; a two-channel stream's
+            # chunks hold two chains, two samples of each in turn (iq_format.h).
+            raise Refused('occupancy reads a stream of one channel: this one has two')
         if not 0 < seconds <= 600:
             raise ValueError('occupancy: up to 600 seconds')
         cfg, session = self.bands[self.band], self._session()
@@ -579,6 +682,7 @@ class Controller:
         """A band at its LO and sample rate (SETUP: everything that follows from them, the synthesizer,
         the DC-offset calibration at the band's filter) and its capture path. The analog filter is
         not part of it (FILTER, set at load). The band keeps the LO the synthesizer realises."""
+        self.relocks[cfg.band] += 1
         self._command('setup', cfg.band, cfg.lo_hz & 0xFFFFFFFF, cfg.lo_hz >> 32, cfg.rate_code)
         self._command('capture', cfg.band, cfg.rate_code)
         self.bands[cfg.band] = replace(cfg, lo_hz=actual_lo(cfg.band, cfg.lo_hz))
@@ -655,15 +759,20 @@ class Controller:
         old = self.bands[b]
         manual = self.packing_manual
         if running:
-            needed = self._packing_at(cfg.sample_rate, manual)      # refused before anything changes
+            # refused before anything changes: what the stream's channels cost at that rate (two
+            # channels have a highest rate of their own), and a packing for it
+            needed = self._packing_at(self._stream_rate(cfg, self.channels), manual)
         if cfg.rate_code == old.rate_code and b in self.bands_ready:
             # the band's rate unchanged: switch the capture (mid-stream when the running packing
             # carries that rate, else restarted with the packing it needs), then the LO alone if it
             # moved
             if b != self.band:
-                # a stream chosen automatically keeps a packing that still fits; one set by hand is that one
-                if running and (running == needed or not manual and running not in REDUCED and running != SPLIT
-                                and packing_fits(running, cfg.sample_rate, self._link(), self.config.export.piece)):
+                # a stream chosen automatically keeps a packing that still fits; one set by hand is that one.
+                # Two channels are started again on the other band (the switch on a running ring is
+                # tried with one capture path only), and stay two.
+                if running and self.channels == 1 and (
+                        running == needed or not manual and running not in REDUCED and running != SPLIT
+                        and packing_fits(running, cfg.sample_rate, self._link(), self.config.export.piece)):
                     self._switch_mid_stream(b)
                 else:
                     if running:
@@ -674,7 +783,7 @@ class Controller:
                     if running:
                         self._start(manual)
             if cfg.lo_hz != old.lo_hz:
-                self._tune_band(b, cfg.lo_hz)
+                self._retune(b, cfg.lo_hz)
             return
         # another sample rate: RATE (no synthesizer: the LO, gain and filter stay), then the LO
         if running:
@@ -690,7 +799,7 @@ class Controller:
         self._command('select', b)
         self._save()
         if cfg.lo_hz != old.lo_hz:
-            self._tune_band(b, cfg.lo_hz)
+            self._retune(b, cfg.lo_hz)
         if running:
             self._start(manual)
 
@@ -701,9 +810,44 @@ class Controller:
         self._log('info', f'capturing band {band} from ICAP0 write pointer {before:#x}..{after:#x}')
         self._check_locks()
 
-    def _start(self, packing=None):
+    def _stream_rate(self, cfg, channels):
+        """The rate a stream of `channels` channels costs: the radio, the unit and the link carry
+        two channels at a band's rate exactly as they carry one at twice it. Two are refused where
+        the capture is another datapath (the 320 MHz class, and so 640/2) and where twice the rate
+        is more than the radio can move."""
+        if channels == 1:
+            return cfg.sample_rate
+        if cfg.capture_rate != cfg.sample_rate or cfg.sample_rate > TWO_CHANNELS_MAX_RATE:
+            raise Refused(f'two channels are streamed up to {TWO_CHANNELS_MAX_RATE / 1e6:g} Msps each, captured at '
+                          f'that rate; band {cfg.band} is at {cfg.sample_rate / 1e6:g} (captured at '
+                          f'{cfg.capture_rate / 1e6:g})')
+        return 2 * cfg.sample_rate
+
+    def _announce(self, channels):
+        """The host's stream service told how many channels the stream about to start has, so
+        that its first slot is already laid out for them."""
+        name = self.config.export.service
+        if name and announce_channels(channels, name):
+            return
+        if channels == 2:
+            self._log('warn', 'no w1700k-stream of this user on this host was told that the stream has two channels '
+                              '(none running, or one from before two channels): whoever reads it must know')
+
+    def _equal_gain(self):
+        """Two channels are compared with each other, so both chains get one fixed gain: under the
+        AGC each chain's gain steps by itself, and their ratio and phase step with it. A gain set
+        by hand is left as it is."""
+        if self.rf[self.band]['agc']:
+            self._gain(False, *TWO_CHANNELS_GAIN)
+            self.gain_was_agc = True
+            self._log('info', f'two channels: the gain is fixed at LNA {TWO_CHANNELS_GAIN[0]}, LPF '
+                              f'{TWO_CHANNELS_GAIN[1]} on both chains instead of the AGC (set another with gain)')
+
+    def _start(self, packing=None, channels=None):
         if self.packing:
             return
+        if channels is None:
+            channels = self.channels      # a stream this controller restarts keeps its channels
         if not self.loaded:
             self._load()
         export = self.config.export
@@ -713,13 +857,16 @@ class Controller:
         speed, mtu = self.stream.check_interface(export.interface)
         self.link_mbps = min((v for v in (speed, export.link_mbps) if v), default=None)
         manual = packing or export.packing
-        packing = self._packing_at(self.bands[self.band].sample_rate, manual)
+        packing = self._packing_at(self._stream_rate(self.bands[self.band], channels), manual)
         self.stream.check_mtu(export.interface, mtu, packing, export.piece)
         if here:
             check_host_mtu(here[0], here[2], export.dst_ip, packing, export.piece, mtu)
-        self.stream.install_own(self._wm(), packing)
+        if channels == 2:
+            self._equal_gain()
+        self._announce(channels)
+        self.stream.install_own(self._wm(), packing, channels)
         self.stream.launch(export, dst_mac, packing, mtu)
-        self.packing, self.packing_manual = packing, manual
+        self.packing, self.packing_manual, self.channels = packing, manual, channels
         self._save()
         try:
             self._wait_producer()
@@ -834,11 +981,15 @@ def handle(controller, request):
                              _require(request, 'lo_hz', (int, float), True),
                              _require(request, 'capture_rate', int, True))
     elif op == 'start':
-        controller.start(_require(request, 'packing', str, optional=True))
+        channels = _require(request, 'channels', int, optional=True)
+        controller.start(_require(request, 'packing', str, optional=True), 1 if channels is None else channels)
     elif op == 'stop':
         controller.stop()
     elif op == 'tune':
-        controller.tune(_require(request, 'hz', (int, float)))
+        controller.tune(_require(request, 'hz', (int, float)), _require(request, 'phase', str, optional=True))
+    elif op == 'rephase':
+        chain = _require(request, 'chain', int, optional=True)
+        controller.rephase(1 if chain is None else chain)
     elif op == 'gain':
         controller.gain(bool(request.get('agc')), _require(request, 'lna', int, True), _require(request, 'lpf', int, True))
     elif op == 'filter':

@@ -145,6 +145,19 @@ server reads its shared ring in slot order. A slot holding a firmware event take
 either are left out. The server asks the service for a new run when the controller reports the
 stream stopped or is asked to start one.
 
+A stream may be of two channels (chains 0 and 1 of the band, sampled together: *Two channels* on
+the page, which applies to the next start). *Channel* then chooses what is shown, at a channel's
+sample rate:
+
+- **0 or 1**: that channel's spectrum and waterfall.
+- **Both**: a frame of each channel over the same samples, channel 0's first, each saying which
+  it is of; they are paced and sent as a pair. *Layout* draws them **overlaid** (both traces on
+  one graph in their own colours, the waterfall's upper half channel 0 and its lower half
+  channel 1) or **side by side** (each channel's spectrum and waterfall in its own half, over
+  the same frequencies; zooming and panning move both, and the pointer and the marker are
+  drawn in both with each channel's level). Both channels cost twice the FFT work: at the
+  largest sizes fewer of the samples are used, as the page says.
+
 ## Page and server
 
 HTTP serves the page; everything else is a WebSocket at `/ws` (permessage-deflate). Messages
@@ -152,16 +165,17 @@ are JSON text with a type `t`, plus binary spectrum frames.
 
 From the page: `ping {c}`, `ack {seq}` for every frame, `view {start, stop, bins, auto, fps,
 kbps}` (the range and resolution wanted, and pacing limits), `fft {size, window, rate,
-averaging, peak, dc}`, `set {...}` with any of `lo`; `band, sample_rate, capture_rate`;
-`filter`; `filter_follow`; `agc, lna, lpf`; `flatten`, and `run {on}`.
+averaging, peak, dc, channel}` (`channel`: of a two-channel stream, the one shown, or 2 for both), `set {...}`
+with any of `lo`; `band, sample_rate, capture_rate`; `filter`; `filter_follow`; `agc, lna, lpf`;
+`flatten`, and `run {on, channels}` (`channels` 2: start a two-channel stream).
 
 From the server: `hello {version, windows, fft_defaults, max_bins, controller, bands, rates {label,
 sample_rate, capture_rate, bands}, filters, max_lna, max_lpf}`, `status` (sections `state`,
 `message`, `running`, `devices`, `receiver {lo, sample_rate, flatten, flatten_available,
-flatten_active}`, `controller {mode, command, alive, pid,
+flatten_active, channels}`, `controller {mode, command, alive, pid,
 restarts, busy, progress, error, queued, state}`, `fft`, `spectrum`, `stream`, `link`; unchanged
 ones are left out), `notice {level, text}` and `pong`. A frame is a 48-byte little-endian header
-(`u8` kind 1, `u8` flags (bit 0: peak detector), `u16` bins, `u32` sequence, `f64` start and stop
+(`u8` kind 1, `u8` flags (bit 0: peak detector, bit 1: the channel the frame is of), `u16` bins, `u32` sequence, `f64` start and stop
 Hz, `f32` base dB, `f32` step dB, `u32` frames merged, `u32` FFT blocks, `f64` server time ms)
 and one byte per bin: dBFS = base + code × step.
 

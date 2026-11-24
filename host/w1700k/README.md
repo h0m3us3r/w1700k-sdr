@@ -32,6 +32,7 @@ Build the firmware first (`make -C firmware`); the host reads `firmware/build/fi
 | `export.link_mbps` | the unit port's negotiated speed | what a stream may put on the link, Mbit/s, where that is less (a USB adapter that carries less than its Ethernet side links at) |
 | `export.packing` | automatic | `raw`, `half`, `full`, `split`, or `16`, `14`, `8`, `7` (bits per I/Q pair): every stream's packing set by hand, where the automatic choice is wrong for a link |
 | `export.piece` | whole slices | bytes of a slice per datagram, 256..8192, for a path without jumbo frames (`1456` fits a 1500-byte MTU) |
+| `export.service` | `/w1700k-stream` | the shared memory of `w1700k-stream` on this host, which is told how many channels a stream has before it starts; `null` where the stream goes to another host |
 
 All ssh traffic shares one ControlMaster connection (socket in `$XDG_RUNTIME_DIR`).
 
@@ -57,10 +58,11 @@ holds for an address).
 |---|---|
 | `load [--band B]` | load our firmware, bring the radio up from cold, every band at its LO and sample rate; B captured (about 2 s) |
 | `band B [--rate RATE] [--lo FREQ]` | capture band B; another rate (40, 80, 160, 320 Msps, or `640/2` on band 2) or LO |
-| `start [--packing P]` | start streaming (packing follows the rate and the link, see below; `--packing raw\|half\|full` sets this stream's by hand) |
+| `start [--packing P] [--channels 2]` | start streaming (packing follows the rate and the link, see below; `--packing raw\|half\|full` sets this stream's by hand). `--channels 2`: two channels, see below |
 | `stop` | stop streaming |
 | `status [--rf]` | the state below; `--rf` reads the active band's synthesizer, filter and gain |
-| `tune FREQ` | LO of the active band, any Hz it locks at (`5250M`, `2.442G`, `2441.000123M`) |
+| `tune FREQ [--keep-phase \| --relock]` | LO of the active band, any Hz it locks at (`5250M`, `2.442G`, `2441.000123M`); the options: [Two channels](#two-channels) |
+| `rephase [--chain N]` | start one chain's LO path again (channel 1 by default): its phase against the other chains lands anew in one of its two states; [Two channels](#two-channels) |
 | `gain --agc` / `gain --lna 0..4 --lpf 0..9` | AGC or forced gain |
 | `filter 20\|40\|80\|160\|320` | analog filter of the active band, at any sample rate |
 | `trim 0..31` | filter RC trim |
@@ -242,10 +244,94 @@ How to read it:
   it is, and what is there all the time, the same, is noise to it.
 - A firmware set built before the DSP image existed has none: the command then says so, and
   nothing is touched. `make -C firmware`, then `w1700k load`.
+- A stream of two channels is refused: its chunks hold two chains' samples in turn, and the
+  radio reads a chunk as one chain's.
 
 Measured on a unit: the stream lost no slice with it on at 40, 160 and 320 Msps; its shares
 agreed within 0.04 in every bin (0.02 on average) with the same rule worked out on the host from
 every chunk of the same six seconds; and on 6 GHz with nothing in the air no bin was busy.
+
+## Two channels
+
+`start --channels 2` streams two receive chains of the band together: chains 0 and 1, the radio's
+two capture paths, sampled at the same instants, each at the band's sample rate.
+
+- **What it costs.** Two channels at a rate are to the radio, the unit and the link what one
+  channel is at twice that rate, and the packing is chosen so: 2 x 40 Msps goes raw where 80 Msps
+  does, 2 x 160 Msps is packed as 320 Msps is. Two channels are streamed up to 160 Msps each;
+  320 Msps each and `640/2` are refused.
+- **Which chains.** Chains 0 and 1, on every band. The capture gives no choice of others on this
+  datapath: for other antennas, their cables are moved.
+- **Gain.** Under the AGC each chain's gain steps by itself, and with it the ratio and the phase
+  between the channels. A two-channel stream therefore fixes one gain on both chains (LNA 2,
+  LPF 5) unless one was set by hand, says so, and a `stop` gives the AGC back.
+- **While it runs** the LO may be tuned and the gain and filter set. Another sample rate or band
+  stops the stream, makes the change and starts it again as two channels, packed for what they
+  then cost; a rate or band two channels cannot have (above 160 Msps each) is refused before
+  anything is stopped, and the stream runs on.
+- **The readers.** `w1700k-stream` on this host is told first (`export.service`) and lays every
+  slot out by channel ([`../stream`](../stream/README.md#two-channels)); the state says
+  `stream.channels`. The channels are sample-aligned (measured on all three bands: no
+  whole-sample offset); a gain, a few nanoseconds of delay and a phase between them remain, from
+  the antennas, the filters and the synthesizer, and are not calibrated out here.
+- **Measuring them.** [`tools/two_channel.py`](../../tools/two_channel.py) `measure` or `watch`
+  gives channel 1 against channel 0 (gain, phase at the LO, delay) from any signal that reaches
+  both chains, and says how much of the spectrum it went by. From one source split by cable
+  into both connectors that is the unit's own; from an antenna it includes the air.
+- **What holds still** (one unit, a transmitter that did not move, so that changes are the
+  unit's): the gain to a few tenths of a dB, and everything through stream restarts, changes of
+  rate and a change of band and back. The phase does not survive a new lock of the
+  synthesizer: on every radio a retune that locks it again, even of 1 MHz and back, leaves the
+  phase in one of two states half a turn (180 degrees) apart, at random (about half and half of
+  10 to 30 such retunes, at 2390, 5200 to 5880 and 5900 to 5985 MHz), and within a state it
+  comes back to a few degrees. A firmware load can change it too.
+- **Retuning with the phase kept.** While a two-channel stream runs, `tune` moves the LO by the
+  synthesizer's frequency words alone and leaves its lock as it is, wherever that reaches: 16
+  MHz either side of where the band last locked (12 MHz at 2.4 GHz), and not across 5926 MHz,
+  where the synthesizer changes its ratio. Measured through the controller on all three radios
+  (14 moves each over the whole reach and back): the phase between the channels stayed within
+  6 degrees at 5250 and 5530 MHz, 1 degree at 5960 MHz and 2 degrees at 2390 MHz, never half a
+  turn, while ten new locks at the same LO flipped it about every other time. A second unit did
+  the same at 5250, 5960, 6105, 6400, 6600, 6900 and 2442 MHz, and its lock ranges and the tuning voltage a move uses
+  are the first's to within a step. The call returns
+  when the loop has settled (at once up to 8 MHz, 30 ms after 16 MHz).
+- **When it locks again.** A target beyond the reach is still tuned to: the synthesizer locks
+  again there, a warning says so, and the reach is around the new LO from then on. So does a
+  move whose loop did not settle (the tuning voltage is checked after every one). The state
+  counts each band's locks in `rf.relocks`: a phase measured under one count holds under that
+  count, to the half turn. `tune --keep-phase` (`"phase":"keep"`) asks for the lock to be kept
+  with or without a stream, and is refused where it cannot be; `tune --relock`
+  (`"phase":"relock"`) locks again. A stream of one channel locks again on every tune, as it
+  always did: that centres the loop at each LO, and it has no second channel to keep a phase
+  with.
+- **Which of the two states.** Nothing found in the radio says it: not the chains' DC offsets,
+  not a status bit of the synthesizer, not its test-tone generator (which reaches the chains
+  only as a second-harmonic line that half a turn leaves as it was). What does is the noise:
+  with no signal at all, part of each chain's floor is common to both (a correlation of 0.02 to
+  0.4 by frequency on 5 and 6 GHz, 0.4 to 0.7 at 2.4 GHz, at LNA 2), and the phase of that
+  common part takes two values half a turn apart that follow the state.
+- **Where the half turn lives.** In each chain, not only in the synthesizer: switching one
+  chain's blocks off and on leaves the state changed about every other time on one unit's
+  three radios, and on a second unit every other time at 2.4 GHz but one time in five on its
+  5 and 6 GHz radios. `w1700k rephase` does that to channel 1 and nothing else (no new lock;
+  counted in `rf.relocks`): a cheap way to throw the dice again.
+- **The same state every time.** [`tools/two_channel.py`](../../tools/two_channel.py) `align`
+  puts the two together. The first time at an LO it learns the state it finds as that LO's
+  reference (`~/.config/w1700k/phase-reference.json`); every later time it reads the state and
+  rephases channel 1 until it is the reference's again, so a phase measured between the
+  channels at that LO holds after any retune, reload or restart once `align` has run. `align
+  --follow` stays and does it after every retune it sees; `state` only reads. Checked against a
+  carrier's reading after a new lock and `align`: the reference state 16 of 16 times at 2442
+  MHz (a busy Wi-Fi channel) and at 2391 MHz, 14 of 14 at 5340, 5700 and 5960 MHz, 50 of 50 at
+  5220 MHz; on a second unit 14 of 14 at 2391, 2442, 5700 and 5960 MHz and 12 of 12 at 5340
+  MHz, and 14 of 14 at 6105, 6300, 6500, 6700, 6900 and 7100 MHz. Not trusted in a channel an
+  access point fills (5180 MHz there: the reading goes by its signal, and
+  says the channel is busy). A reading takes 0.05 s of quiet stream (bursts are left out, so about a second by
+  the clock in a busy channel) and an align two or three of them. Where too little noise is
+  shared, or the reference no longer fits, it says so and changes nothing. The reference is the
+  noise's phase at this unit's antennas where it stands: what the unit shares is picked up from
+  its surroundings, so a unit moved, or re-cabled, may need its references learned again
+  (`align --learn`); how long one holds otherwise has not been measured beyond an afternoon.
 
 ## The low-power radio
 
@@ -339,9 +425,10 @@ immediately; other requests run one at a time in order.
 | `{"id":1,"op":"status"}` | |
 | `{"id":2,"op":"load","band":1}` | `band` optional |
 | `{"id":3,"op":"configure","band":2,"sample_rate":320000000,"capture_rate":640000000,"lo_hz":6105000000}` | `sample_rate`, `capture_rate` (default: the sample rate; 640000000 with 320000000 is 640/2 on band 2), `lo_hz` optional; restarts a running stream for a new rate |
-| `{"id":4,"op":"start"}` | |
+| `{"id":4,"op":"start"}` | `"channels":2` for a two-channel stream; `"packing"` to set it by hand |
 | `{"id":5,"op":"stop"}` | |
-| `{"id":6,"op":"tune","hz":5300000000}` | the active band's LO, any Hz in its span |
+| `{"id":6,"op":"tune","hz":5300000000}` | the active band's LO, any Hz in its span; `"phase"`: `"keep"` or `"relock"`, by the stream's channels without it |
+| `{"id":6,"op":"rephase","chain":1}` | one chain's LO path started again (`chain` 1 without it) |
 | `{"id":7,"op":"gain","agc":true}` / `{"id":7,"op":"gain","lna":2,"lpf":9}` | |
 | `{"id":8,"op":"filter","mhz":80}` | the active band's filter by hand; the filters stop following the sample rate |
 | `{"id":9,"op":"filter_follow","on":true}` | every band's filter follows its sample rate (the default), or stays as it is |
@@ -359,7 +446,7 @@ stream that ends on its own (overrun, lost source) is reported as an error in ST
  "stream": {"running": true, "packing": "half", "packing_manual": false, "link_mbps": 10000,
             "sample_rate": 320000000, "center_hz": 5250000000},
  "rf": {"lo_hz": 5250000000, "agc": true, "lna": null, "lpf": null, "filter_mhz": 320,
-        "lo_range_hz": [4647562500, 7508048460]},
+        "lo_range_hz": [4647562500, 7508048460], "filter_follows_rate": true, "relocks": 21},
  "error": null}
 ```
 

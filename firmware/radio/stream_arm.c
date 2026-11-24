@@ -28,14 +28,16 @@ static const uint32_t pool_route[][2] = {
 	{ MT7996_CAP_ROUTE_WPATH2, MT7996_CAP_ROUTE_WPATH2_TYPE0 },
 };
 
-void stream_arm(void)
+void stream_arm(int two_paths)
 {
 	for (uint32_t i = 0; i < sizeof(pool_route) / sizeof(pool_route[0]); i++)
 		hal_wr(pool_route[i][0], pool_route[i][1]);
 	hal_wr(MT7996_ICAP_CR0(0), MT7996_ICAP_CR0_IDLE);
 	hal_wr(MT7996_ICAP_CR2(0), MT7996_ICAP_ADDR_OF_BYTES(0));
 	hal_wr(MT7996_ICAP_CR3(0), MT7996_ICAP_ADDR_END_OF(MT7996_IQ_POOL_MAX));
-	hal_wr(MT7996_ICAP_CR10(0), MT7996_ICAP_CR10_64B_128B_EN);
+	/* The 64 -> 128 packer makes a beat four sample times of path 0; without it a beat is two
+	 * sample times of path 0 and the same two of path 1 (iq_format.h). */
+	hal_wr(MT7996_ICAP_CR10(0), two_paths ? 0 : MT7996_ICAP_CR10_64B_128B_EN);
 }
 
 void stream_disarm(void)

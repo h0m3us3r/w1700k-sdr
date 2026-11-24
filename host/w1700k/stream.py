@@ -210,11 +210,14 @@ class Stream:
     def __init__(self, unit):
         self.unit = unit
 
-    def install_own(self, w, packing):
+    def install_own(self, w, packing, paths=1):
         """Our own firmware: one STREAM command; our WM arms the route and ICAP0, starts the WA for
         packing, and runs the producer it carries, which waits for the pump's go word. The command
-        is acknowledged when the stream has ended (collect_own)."""
-        req = w.radio_post('stream', wm_mod.RADIO_PACKING[firmware_packing(packing)])
+        is acknowledged when the stream has ended (collect_own). `paths` 2 is both of the band's
+        capture paths (radio_cmd.h STREAM, experimental): a slice is then, beat by beat, two
+        sample times of path 0 and the same two of path 1."""
+        # one path is the command as it always was: the argument is given only for two
+        req = w.radio_post('stream', wm_mod.RADIO_PACKING[firmware_packing(packing)], *([paths] if paths != 1 else []))
         # A stream is acknowledged when it has ended, seconds from now at the least. One
         # acknowledged at once was refused, and the pump is not started on it: it would wait for
         # a producer that is not there.

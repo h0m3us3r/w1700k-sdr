@@ -20,6 +20,15 @@
  *
  * The service publishes slots in index order. `newest` is the frontier: every slot of the run
  * below it is final. Read run and newest together with w1700k_stream_position().
+ *
+ * Channels (version 2). A run is of one channel or of two: two receive chains of one band,
+ * sampled at the same instants (the radio's two capture paths). A run's channels do not change;
+ * read them with the run, w1700k_stream_layout(). A slot of a two-channel run holds
+ * W1700K_STREAM_SLICE / 2 sample times, laid out by channel: channel 0's samples, then channel
+ * 1's, sample k of each taken at the same instant (w1700k_stream_channel()). One tag covers the
+ * slot, so an event or a loss is the same for both channels. A one-channel run is laid out as
+ * in version 1. A reader that knows only one channel must refuse two (it would read two signals
+ * end to end as one), which is why the version changed.
  */
 #ifndef W1700K_STREAM_H
 #define W1700K_STREAM_H
@@ -35,7 +44,8 @@
 
 #define W1700K_STREAM_NAME		"/w1700k-stream"
 #define W1700K_STREAM_MAGIC		0x4d525453u	/* "STRM" */
-#define W1700K_STREAM_VERSION		1u
+#define W1700K_STREAM_VERSION		2u
+#define W1700K_STREAM_MAX_CHANNELS	2u
 #define W1700K_STREAM_SLICE		2048u		/* complex samples per slot */
 #define W1700K_STREAM_FULL_SCALE	8192		/* the radio's 14-bit full scale */
 #define W1700K_STREAM_HEADER_BYTES	4096u
@@ -65,7 +75,8 @@ struct w1700k_stream_header {
 	uint64_t newest;		/* slots of the run below this are final */
 	uint64_t run_started_ns, last_any_ns;	/* CLOCK_MONOTONIC */
 	uint64_t received;		/* the newest completion received + 1 (ahead of newest) */
-	uint64_t reserved1[10];
+	uint64_t run_channels;		/* the run's channels, 1 or 2; written with run and newest */
+	uint64_t reserved1[9];
 
 	/* counters since the service started */
 	uint64_t datagrams, bytes;
@@ -92,7 +103,10 @@ struct w1700k_stream_header {
 	uint64_t radio_sample_rate;	/* samples/s; 0: unknown */
 	uint64_t radio_capture_rate;	/* samples/s before the stream (640/2: 640e6); 0: unknown */
 	uint64_t radio_filter_hz;	/* the analog filter's width; 0: unknown */
-	uint64_t reserved3[11];
+	uint64_t radio_channels;	/* 2: the stream is of two channels (0, 1: of one). Whoever starts a
+					 * stream writes it first; a change makes the next completion start
+					 * a new run, so no run is of both. radio_sample_rate is a channel's */
+	uint64_t reserved3[10];
 
 	/* the service's view of the control */
 	uint64_t flatten_active;	/* the correction applies to the slices being published */
@@ -130,6 +144,36 @@ static inline void w1700k_stream_position(const struct w1700k_stream_header *h, 
 		*newest = w1700k_stream_load(&h->newest);
 		s1 = w1700k_stream_load(&h->position_seq);
 	} while ((s0 & 1) || s0 != s1);
+}
+
+/* run, newest and the run's channels (1 or 2), read consistently. */
+static inline void w1700k_stream_layout(const struct w1700k_stream_header *h, uint64_t *run, uint64_t *newest,
+					unsigned *channels)
+{
+	uint64_t s0, s1, c;
+
+	do {
+		s0 = w1700k_stream_load(&h->position_seq);
+		*run = w1700k_stream_load(&h->run);
+		*newest = w1700k_stream_load(&h->newest);
+		c = w1700k_stream_load(&h->run_channels);
+		s1 = w1700k_stream_load(&h->position_seq);
+	} while ((s0 & 1) || s0 != s1);
+	*channels = c == 2 ? 2 : 1;
+}
+
+/* Sample times in a slot of a run of `channels` channels. */
+static inline unsigned w1700k_stream_slice_samples(unsigned channels)
+{
+	return W1700K_STREAM_SLICE / (channels == 2 ? 2 : 1);
+}
+
+/* Channel `channel`'s samples in slot `index` of a run of `channels` channels: int16 I, Q pairs,
+ * w1700k_stream_slice_samples(channels) of them. */
+static inline int16_t *w1700k_stream_channel(const struct w1700k_stream_header *h, uint64_t index,
+					     unsigned channel, unsigned channels)
+{
+	return w1700k_stream_slice(h, index) + (size_t)channel * w1700k_stream_slice_samples(channels) * 2;
 }
 
 static inline uint64_t w1700k_stream_now_ns(void)

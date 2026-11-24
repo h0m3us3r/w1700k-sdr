@@ -25,6 +25,8 @@ export const PALETTES = {
 };
 // The spectrum's fill, bottom to top (SDR#'s spectrum gradient).
 const FILL = ['000000', '000050', '1E90FF', 'ADD8E6', 'FFFFFF'];
+// The trace of each channel of a two-channel stream shown together (and of a single trace: the first).
+export const CHANNEL_COLORS = [[0.92, 0.97, 1.0], [0.45, 0.95, 0.55]];
 
 const VERTEX = `#version 300 es
 void main() {
@@ -38,7 +40,8 @@ uniform highp sampler2D columns;  // row 0: trace, row 1: peak hold (dB per colu
 uniform sampler2D fill;
 uniform vec2 origin, size;
 uniform float top, bottom, fillAlpha, lineWidth;
-uniform bool showFill, showPeak;
+uniform bool showFill, showPeak, lineOnly;
+uniform vec3 lineColor;
 out vec4 color;
 
 float level(int x, int row) {
@@ -61,12 +64,16 @@ float trace(int x, float y, int row) {
 void main() {
     vec2 p = gl_FragCoord.xy - origin;
     int x = int(p.x);
+    if (lineOnly) {  // a second trace over the first: its line alone, blended onto what is drawn
+        color = vec4(lineColor, trace(x, p.y, 0));
+        return;
+    }
     vec3 c = vec3(0.0);
     float v = level(x, 0);
     if (showFill && v > -1e29 && p.y < height(v))
         c = mix(c, texture(fill, vec2(clamp(p.y / size.y, 0.0, 1.0), 0.5)).rgb, fillAlpha);
     if (showPeak) c = mix(c, vec3(1.0, 0.72, 0.2), 0.9 * trace(x, p.y, 1));
-    c = mix(c, vec3(0.92, 0.97, 1.0), trace(x, p.y, 0));
+    c = mix(c, lineColor, trace(x, p.y, 0));
     color = vec4(c, 1.0);
 }`;
 
@@ -125,7 +132,6 @@ export class Renderer {
         this.gl = canvas.getContext('webgl2', {antialias: false, alpha: false, preserveDrawingBuffer: false});
         if (!this.gl) throw new Error('This page needs WebGL 2.');
         this.width = this.height = 1;
-        this.rowTimes = [];
         this.setup();
     }
 
@@ -149,43 +155,47 @@ export class Renderer {
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
             return t;
         };
-        // Units: 0 columns, 1 fill, 2 rows, 3 meta, 4 palette.
-        this.columnsTexture = texture(0);
-        this.columnsWidth = 0;
+        // A track is one signal's trace and waterfall: its columns, its ring of rows and their
+        // ranges. There are two, for the two channels of a two-channel stream shown together; a
+        // view of one signal uses track 0. Units: 1 fill, 4 palette; track 0: 0 columns, 2 rows,
+        // 3 meta; track 1: 5 columns, 6 rows, 7 meta.
         this.fillTexture = texture(1);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, gradient(FILL));
-        this.rowsTexture = texture(2);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R16F, this.textureWidth, this.textureHeight);
-        this.metaTexture = texture(3);
-        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 1, this.textureHeight);
+        this.tracks = [{columns: 0, rows: 2, meta: 3}, {columns: 5, rows: 6, meta: 7}].map((units) => {
+            const track = {units, columnsTexture: texture(units.columns), columnsWidth: 0};
+            track.rowsTexture = texture(units.rows);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R16F, this.textureWidth, this.textureHeight);
+            track.metaTexture = texture(units.meta);
+            gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 1, this.textureHeight);
+            track.head = 0;
+            track.filled = 0;
+            track.rowTimes = new Array(this.textureHeight).fill(0);
+            track.rowMeta = new Float64Array(4 * this.textureHeight);  // start, stop (Hz), bins, valid
+            track.reference = 0;
+            return track;
+        });
         this.paletteTexture = texture(4);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         this.setPalette(this.paletteName || 'sdrsharp');
-
-        this.head = 0;
-        this.filled = 0;
-        this.rowTimes = new Array(this.textureHeight).fill(0);
-        this.rowMeta = new Float64Array(4 * this.textureHeight);  // start, stop (Hz), bins, valid
-        this.reference = 0;
     }
 
-    // Moves the reference to `hz` and rewrites every row's range relative to it.
-    rebase(hz) {
-        const gl = this.gl, meta = new Float32Array(this.rowMeta.length);
-        this.reference = Math.round(hz / 1e6) * 1e6;
+    // Moves a track's reference to `hz` and rewrites every row's range relative to it.
+    rebase(hz, track) {
+        const gl = this.gl, meta = new Float32Array(track.rowMeta.length);
+        track.reference = Math.round(hz / 1e6) * 1e6;
         for (let i = 0; i < meta.length; i += 4) {
-            meta[i] = this.rowMeta[i] - this.reference;
-            meta[i + 1] = this.rowMeta[i + 1] - this.reference;
-            meta[i + 2] = this.rowMeta[i + 2];
-            meta[i + 3] = this.rowMeta[i + 3];
+            meta[i] = track.rowMeta[i] - track.reference;
+            meta[i + 1] = track.rowMeta[i + 1] - track.reference;
+            meta[i + 2] = track.rowMeta[i + 2];
+            meta[i + 3] = track.rowMeta[i + 3];
         }
-        gl.activeTexture(gl.TEXTURE3);
-        gl.bindTexture(gl.TEXTURE_2D, this.metaTexture);
+        gl.activeTexture(gl.TEXTURE0 + track.units.meta);
+        gl.bindTexture(gl.TEXTURE_2D, track.metaTexture);
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, this.textureHeight, gl.RGBA, gl.FLOAT, meta);
     }
 
@@ -232,103 +242,140 @@ export class Renderer {
         }
     }
 
-    // Adds a waterfall row: dB values over [start, stop) Hz.
-    pushRow(db, start, stop, time) {
-        const gl = this.gl, bins = Math.min(db.length, this.textureWidth);
-        this.head = (this.head + 1) % this.textureHeight;
-        this.filled = Math.min(this.filled + 1, this.textureHeight);
-        this.rowTimes[this.head] = time;
-        gl.activeTexture(gl.TEXTURE2);
-        gl.bindTexture(gl.TEXTURE_2D, this.rowsTexture);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, bins, 1, gl.RED, gl.FLOAT,
+    // Adds a waterfall row to a track: dB values over [start, stop) Hz.
+    pushRow(db, start, stop, time, n = 0) {
+        const gl = this.gl, track = this.tracks[n], bins = Math.min(db.length, this.textureWidth);
+        track.head = (track.head + 1) % this.textureHeight;
+        track.filled = Math.min(track.filled + 1, this.textureHeight);
+        track.rowTimes[track.head] = time;
+        gl.activeTexture(gl.TEXTURE0 + track.units.rows);
+        gl.bindTexture(gl.TEXTURE_2D, track.rowsTexture);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, track.head, bins, 1, gl.RED, gl.FLOAT,
                          db.length > bins ? db.subarray(0, bins) : db);
-        this.rowMeta.set([start, stop, bins, 1], 4 * this.head);
-        if (Math.abs((start + stop) / 2 - this.reference) > REBASE_HZ) {
-            this.rebase((start + stop) / 2);
+        track.rowMeta.set([start, stop, bins, 1], 4 * track.head);
+        if (Math.abs((start + stop) / 2 - track.reference) > REBASE_HZ) {
+            this.rebase((start + stop) / 2, track);
             return;
         }
-        gl.activeTexture(gl.TEXTURE3);
-        gl.bindTexture(gl.TEXTURE_2D, this.metaTexture);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, this.head, 1, 1, gl.RGBA, gl.FLOAT,
-                         new Float32Array([start - this.reference, stop - this.reference, bins, 1]));
+        gl.activeTexture(gl.TEXTURE0 + track.units.meta);
+        gl.bindTexture(gl.TEXTURE_2D, track.metaTexture);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, track.head, 1, 1, gl.RGBA, gl.FLOAT,
+                         new Float32Array([start - track.reference, stop - track.reference, bins, 1]));
     }
 
-    // The time of the row `age` rows back, or 0.
-    rowTime(age) {
-        if (age < 0 || age >= this.filled) return 0;
-        return this.rowTimes[(this.head - age + this.textureHeight) % this.textureHeight];
+    // The time of a track's row `age` rows back, or 0.
+    rowTime(age, n = 0) {
+        const track = this.tracks[n];
+        if (age < 0 || age >= track.filled) return 0;
+        return track.rowTimes[(track.head - age + this.textureHeight) % this.textureHeight];
     }
 
     clearWaterfall() {
         const gl = this.gl;
-        gl.activeTexture(gl.TEXTURE3);
-        gl.bindTexture(gl.TEXTURE_2D, this.metaTexture);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, this.textureHeight, gl.RGBA, gl.FLOAT,
-                         new Float32Array(4 * this.textureHeight));
-        this.rowMeta.fill(0);
-        this.filled = 0;
+        for (const track of this.tracks) {
+            gl.activeTexture(gl.TEXTURE0 + track.units.meta);
+            gl.bindTexture(gl.TEXTURE_2D, track.metaTexture);
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1, this.textureHeight, gl.RGBA, gl.FLOAT,
+                             new Float32Array(4 * this.textureHeight));
+            track.rowMeta.fill(0);
+            track.filled = 0;
+        }
     }
 
-    // One value per device-pixel column of the spectrum: the trace, and the
+    // One value per device-pixel column of a track's spectrum: the trace, and the
     // peak-hold trace (or null).
-    setColumns(trace, peak) {
-        const gl = this.gl, w = trace.length;
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, this.columnsTexture);
-        if (w !== this.columnsWidth) {
+    setColumns(trace, peak, n = 0) {
+        const gl = this.gl, track = this.tracks[n], w = trace.length;
+        gl.activeTexture(gl.TEXTURE0 + track.units.columns);
+        gl.bindTexture(gl.TEXTURE_2D, track.columnsTexture);
+        if (w !== track.columnsWidth) {
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, w, 2, 0, gl.RED, gl.FLOAT, null);
-            this.columnsWidth = w;
+            track.columnsWidth = w;
         }
         gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, 1, gl.RED, gl.FLOAT, trace);
         if (peak) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 1, w, 1, gl.RED, gl.FLOAT, peak);
     }
 
+    // The widths in device pixels of the panes of a mode: one pane, or two side by side.
+    paneWidth(mode) {
+        return mode === 'side' ? Math.floor(this.canvas.width / 2) : this.canvas.width;
+    }
+
     // layout: CSS pixel heights {spectrum, axis, waterfall}; view: {start, stop} Hz;
-    // levels: {top, bottom} dB, contrast; fill, peak: booleans.
+    // levels: {top, bottom} dB, contrast; fill, peak: booleans; mode: 'single' (track 0 alone),
+    // or of a two-channel stream 'overlaid' (both traces on one graph, track 1's as a line of its
+    // own colour; the waterfall's upper half track 0, its lower half track 1) or 'side' (track 0's
+    // plots in the left half, track 1's in the right, each over the whole view).
     draw(layout, view, s) {
         const gl = this.gl, r = this.ratio, W = this.canvas.width, H = this.canvas.height;
         const spectrumH = Math.round(layout.spectrum * r), waterfallH = H - Math.round((layout.spectrum + layout.axis) * r);
+        const mode = s.mode || 'single', paneW = this.paneWidth(mode);
         gl.disable(gl.SCISSOR_TEST);
+        gl.disable(gl.BLEND);
         gl.viewport(0, 0, W, H);
         gl.clearColor(0.03, 0.035, 0.045, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
-        if (spectrumH > 0 && this.columnsWidth === W) {
-            const p = this.spectrumProgram, u = p.uniforms;
+        const trace = (n, x, color, lineOnly) => {
+            const track = this.tracks[n], p = this.spectrumProgram, u = p.uniforms;
+            if (spectrumH <= 0 || track.columnsWidth !== paneW) return;
             gl.useProgram(p);
-            gl.viewport(0, H - spectrumH, W, spectrumH);
-            gl.uniform1i(u.columns, 0);
+            gl.viewport(x, H - spectrumH, paneW, spectrumH);
+            gl.uniform1i(u.columns, track.units.columns);
             gl.uniform1i(u.fill, 1);
-            gl.uniform2f(u.origin, 0, H - spectrumH);
-            gl.uniform2f(u.size, W, spectrumH);
+            gl.uniform2f(u.origin, x, H - spectrumH);
+            gl.uniform2f(u.size, paneW, spectrumH);
             gl.uniform1f(u.top, s.top);
             gl.uniform1f(u.bottom, s.bottom);
             gl.uniform1f(u.fillAlpha, 180 / 255);
             gl.uniform1f(u.lineWidth, 1.25 * r);
-            gl.uniform1i(u.showFill, s.fill ? 1 : 0);
-            gl.uniform1i(u.showPeak, s.peak ? 1 : 0);
+            gl.uniform1i(u.showFill, s.fill && !lineOnly ? 1 : 0);
+            gl.uniform1i(u.showPeak, s.peak && !lineOnly ? 1 : 0);
+            gl.uniform1i(u.lineOnly, lineOnly ? 1 : 0);
+            gl.uniform3f(u.lineColor, color[0], color[1], color[2]);
+            if (lineOnly) {
+                gl.enable(gl.BLEND);
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            }
             gl.drawArrays(gl.TRIANGLES, 0, 3);
-        }
-        if (waterfallH > 0) {
-            const p = this.waterfallProgram, u = p.uniforms;
+            gl.disable(gl.BLEND);
+        };
+        const fall = (n, x, y, height) => {
+            const track = this.tracks[n], p = this.waterfallProgram, u = p.uniforms;
+            if (height <= 0) return;
             gl.useProgram(p);
-            gl.viewport(0, 0, W, waterfallH);
-            gl.uniform1i(u.rows, 2);
-            gl.uniform1i(u.meta, 3);
+            gl.viewport(x, y, paneW, height);
+            gl.uniform1i(u.rows, track.units.rows);
+            gl.uniform1i(u.meta, track.units.meta);
             gl.uniform1i(u.palette, 4);
-            gl.uniform2f(u.origin, 0, 0);
-            gl.uniform2f(u.size, W, waterfallH);
-            gl.uniform1f(u.viewStart, view.start - this.reference);
+            gl.uniform2f(u.origin, x, y);
+            gl.uniform2f(u.size, paneW, height);
+            gl.uniform1f(u.viewStart, view.start - track.reference);
             gl.uniform1f(u.viewSpan, view.stop - view.start);
             gl.uniform1f(u.rowHeight, Math.max(1, r));
             gl.uniform1f(u.textureWidth, this.textureWidth);
             gl.uniform1f(u.top, s.top);
             gl.uniform1f(u.bottom, s.bottom);
             gl.uniform1f(u.contrast, s.contrast);
-            gl.uniform1i(u.head, this.head);
-            gl.uniform1i(u.filled, this.filled);
+            gl.uniform1i(u.head, track.head);
+            gl.uniform1i(u.filled, track.filled);
             gl.uniform1i(u.textureHeight, this.textureHeight);
             gl.drawArrays(gl.TRIANGLES, 0, 3);
+        };
+        if (mode === 'side') {
+            for (const n of [0, 1]) {
+                trace(n, n * paneW, CHANNEL_COLORS[n], false);
+                fall(n, n * paneW, 0, waterfallH);
+            }
+        } else if (mode === 'overlaid') {
+            const lower = Math.floor(waterfallH / 2);
+            trace(0, 0, CHANNEL_COLORS[0], false);
+            trace(1, 0, CHANNEL_COLORS[1], true);
+            fall(0, 0, lower, waterfallH - lower);
+            fall(1, 0, 0, lower);
+        } else {
+            trace(0, 0, CHANNEL_COLORS[0], false);
+            fall(0, 0, 0, waterfallH);
         }
     }
 }

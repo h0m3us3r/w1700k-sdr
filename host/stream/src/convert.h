@@ -53,6 +53,53 @@ inline void words_to_float(const uint32_t *words, unsigned count, float *out)
     }
 }
 
+// A two-channel slice: `beats` beats of four words, words 0 and 1 channel 0 at two sample times and
+// words 2 and 3 channel 1 at the same two (iq_format.h, a beat with no packer). To int16 I, Q
+// pairs, each channel's to its own place: 2 * beats samples each.
+inline void words_to_int16_2ch(const uint32_t *words, unsigned beats, int16_t *out0, int16_t *out1)
+{
+    unsigned b = 0;
+#if defined(__SSE2__)
+    const __m128i low = _mm_set1_epi32(0xffff);
+    for (; b < beats; ++b) {
+        const __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i *>(words + 4 * b));
+        const __m128i i = _mm_srai_epi32(_mm_slli_epi32(w, 2), 18), q = _mm_srai_epi32(_mm_slli_epi32(w, 18), 18);
+        const __m128i iq = _mm_or_si128(_mm_and_si128(i, low), _mm_slli_epi32(q, 16));
+        _mm_storel_epi64(reinterpret_cast<__m128i *>(out0 + 4 * b), iq);
+        _mm_storel_epi64(reinterpret_cast<__m128i *>(out1 + 4 * b), _mm_unpackhi_epi64(iq, iq));
+    }
+#endif
+    for (; b < beats; ++b)
+        for (unsigned k = 0; k < 2; ++k) {
+            out0[4 * b + 2 * k] = sample_i(words[4 * b + k]);
+            out0[4 * b + 2 * k + 1] = sample_q(words[4 * b + k]);
+            out1[4 * b + 2 * k] = sample_i(words[4 * b + 2 + k]);
+            out1[4 * b + 2 * k + 1] = sample_q(words[4 * b + 2 + k]);
+        }
+}
+
+// The same beats to float I, Q pairs, each channel's to its own place.
+inline void words_to_float_2ch(const uint32_t *words, unsigned beats, float *out0, float *out1)
+{
+    unsigned b = 0;
+#if defined(__SSE2__)
+    for (; b < beats; ++b) {
+        const __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i *>(words + 4 * b));
+        const __m128 i = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_slli_epi32(w, 2), 18));
+        const __m128 q = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_slli_epi32(w, 18), 18));
+        _mm_storeu_ps(out0 + 4 * b, _mm_unpacklo_ps(i, q));
+        _mm_storeu_ps(out1 + 4 * b, _mm_unpackhi_ps(i, q));
+    }
+#endif
+    for (; b < beats; ++b)
+        for (unsigned k = 0; k < 2; ++k) {
+            out0[4 * b + 2 * k] = sample_i(words[4 * b + k]);
+            out0[4 * b + 2 * k + 1] = sample_q(words[4 * b + k]);
+            out1[4 * b + 2 * k] = sample_i(words[4 * b + 2 + k]);
+            out1[4 * b + 2 * k + 1] = sample_q(words[4 * b + 2 + k]);
+        }
+}
+
 // `count` floats rounded to the nearest int16 (halves to even), saturating; returns how many
 // saturated. The values are far inside the int32 range (14-bit samples under a capped gain).
 inline uint64_t floats_to_int16(const float *in, unsigned count, int16_t *out)

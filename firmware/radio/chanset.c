@@ -1494,8 +1494,10 @@ static uint32_t chanset_tune(const struct chanset_ctx *c)
 	radio_band[c->band].lo_hz = actual;
 	if (HW_GET(ADIE_SX_STATUS_VCO, tune_res[health]) != ADIE_SX_STATUS_VCO_LOCKED) {
 		hal_fail(HAL_FAIL_STATE, tune_res[health]);
+		radio_band[c->band].lock_hz = 0;
 		return RADIO_ERR_HW;
 	}
+	radio_band[c->band].lock_hz = actual;	/* a HOLD (rfctl_hold) moves the LO from here */
 	return RADIO_OK;
 }
 

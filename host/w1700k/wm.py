@@ -56,7 +56,8 @@ RADIO_FAILS = {1: 'poll timed out at', 2: 'A-die poll timed out at', 3: 'A-die t
                7: 'a register access faulted at'}
 # STREAM's results that are no producer status (radio_cmd.h RADIO_STREAM_*): refusals, at once.
 STREAM_REFUSALS = {0x200: 'not a packing schedule',
-                   0x300: 'the radio is not up, or no band is selected whose capture path is set up'}
+                   0x300: 'the radio is not up, or no band is selected whose capture path is set up',
+                   0x400: 'not one or two paths, or two at the 320 MHz class'}
 STATE_SELECTED = {band: 1 << (28 + band) for band in range(3)}
 EEPROM_BYTES = 7680
 

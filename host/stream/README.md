@@ -137,6 +137,26 @@ layout, the tag rules and helpers to map the object and read the position. In sh
 A reader reads a slot's tag (acquire), its samples, then the tag again: a changed tag means the
 slot was overwritten meanwhile.
 
+### Two channels
+
+A stream is of one channel or of two: two receive chains of one band (chains 0 and 1), sampled at
+the same instants, each at the band's sample rate (`w1700k start --channels 2`). The layout is
+version 2 for it:
+
+- A run is of one or of two for its whole length. `run_channels` is published with `run` and
+  `newest`; read all three with `w1700k_stream_layout()`.
+- A slot of a two-channel run holds 1024 sample times, laid out by channel: channel 0's 1024
+  samples, then channel 1's (`w1700k_stream_channel()`). Sample k of each is the same instant.
+  One tag covers the slot, so an event or a loss is the same for both channels. A one-channel
+  run is laid out as it always was.
+- Whoever starts a stream says how many channels it has before it starts, in the control word
+  `radio_channels` (the controller does: `export.service`). A change of that word makes the next
+  completion a new run's first, so no run is of both. `radio_sample_rate` is a channel's rate.
+- The correction is applied to each channel as a stream of its own.
+
+A reader of the old layout refuses the object (`EPROTO`): read as one channel, a two-channel slot
+would be two signals end to end.
+
 ## The correction ("flatten")
 
 Every sample rate's decimation attenuates the band's edges, signal and noise alike: about -2 dB

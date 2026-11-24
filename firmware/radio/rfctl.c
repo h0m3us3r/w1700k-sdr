@@ -7,6 +7,7 @@
  */
 #include "hw/adie/mt7976.h"
 #include "hw/adie/mt7977.h"
+#include "hw/adie/rfmodes.h"
 #include "hw/adie/sx.h"
 #include "hw/adie/sxchan.h"
 #include "hw/mt7996/icap.h"
@@ -242,9 +243,10 @@ static uint32_t mt7977_range(uint32_t mhz)
 /* The presets: the SX80_E3 column of the Group (MediaTek's key MT7977_SXCH_KEY), whose band-code
  * row only sets the preset field ADIE_SX_BAND_PRESET (the SAR owns the code above it), then on
  * k 4..0 the RCD pre-row and the RCD rows of the range. */
-static int mt7977_presets(struct prog *p, uint32_t die, uint32_t mhz, uint32_t ratio58)
+/* The Group whose presets an LO takes: its own, the nearest outside them all, kept to the ratio's. */
+static uint32_t mt7977_preset_group(uint32_t mhz, uint32_t ratio58)
 {
-	uint32_t g = mt7977_group(mhz), c, range, v, i;
+	uint32_t g = mt7977_group(mhz);
 
 	if (!g)
 		g = mhz < group_lo[0] ? group_n[0] : group_n[NELEM(group_n) - 1];
@@ -252,6 +254,13 @@ static int mt7977_presets(struct prog *p, uint32_t die, uint32_t mhz, uint32_t r
 		g = MT7977_SX_E3_LAST_5_8;
 	if (!ratio58 && g <= MT7977_SX_E3_LAST_5_8)
 		g = MT7977_SX_E3_LAST_5_8 + 1u;
+	return g;
+}
+
+static int mt7977_presets(struct prog *p, uint32_t die, uint32_t mhz, uint32_t ratio58)
+{
+	uint32_t g = mt7977_preset_group(mhz, ratio58), c, range, v, i;
+
 	c = column(e3_keys, NELEM(e3_keys), MT7977_SXCH_KEY(g, ratio58));
 	if (c >= NELEM(e3_keys))
 		return 0;
@@ -385,6 +394,96 @@ uint32_t rfctl_tune(uint32_t band, uint64_t hz, struct rfctl_op *ops, uint32_t m
 	ar(&p, band, sx, ADIE_SX_CMP);
 	ar(&p, band, sx, band == MT7976_DIE ? ADIE_SX_BAND : ADIE_SX_DONE);
 	aw(&p, band, ADIE_K_WF(0), band == MT7976_DIE ? ADIE_FREQ_NOTE_MT7976 : ADIE_FREQ_NOTE_MT7977, khz);
+	if (!done(&p))
+		return 0;
+	return done(&p);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * HOLD
+ * --------------------------------------------------------------------------------------------- */
+
+/* The words are given this long before the health reads. The loop itself takes longer after a
+ * large move (30 ms after 16 MHz, 20 ms after 12, under 5 ms up to 8 [measured, both MT7977s]):
+ * until then the status word's flag reads too low or too high and the tuning-voltage reading is
+ * on its way. Whoever sent the HOLD reads LOCKS until the flag has cleared. */
+#define HOLD_SETTLE_US	500u
+/* The lock's LO is the one its words gave, a few Hz off the one asked for: the reach is not
+ * refused for that. */
+#define HOLD_REACH_SLACK_HZ	1000u
+
+uint32_t rfctl_hold(uint32_t band, uint64_t hz, struct rfctl_op *ops, uint32_t max, uint64_t *actual_hz,
+		    uint32_t *health)
+{
+	struct prog p = { ops, 0, max };
+	const uint64_t reach = (uint64_t)(band == MT7976_DIE ? MT7996_PROBE_CTL_RF_HOLD_REACH_MT7976_MHZ
+							    : MT7996_PROBE_CTL_RF_HOLD_REACH_MHZ) * RFCTL_HZ_PER_MHZ
+			       + HOLD_REACH_SLACK_HZ;
+	uint32_t rem, mhz, khz, int_w, frac_w, ratio58, sx = sx_k(band);
+	uint64_t at, lo_min, lo_max;
+
+	if (band >= RFCTL_BANDS || !(at = radio_band[band].lock_hz))
+		return 0;
+	lo_min = (uint64_t)(band == MT7976_DIE ? MT7976_LO_TUNE_MIN_MHZ : MT7977_LO_TUNE_MIN_MHZ) * RFCTL_HZ_PER_MHZ;
+	lo_max = (uint64_t)(band == MT7976_DIE ? MT7976_LO_TUNE_MAX_MHZ : MT7977_LO_TUNE_MAX_MHZ) * RFCTL_HZ_PER_MHZ;
+	if (hz < lo_min || hz > lo_max || (hz > at ? hz - at : at - hz) > reach)
+		return 0;
+	mhz = (uint32_t)rfctl_div64(hz, RFCTL_HZ_PER_MHZ, &rem);
+	khz = (uint32_t)div_round(hz, RFCTL_HZ_PER_KHZ);
+	if (band == MT7976_DIE) {
+		if (!divider(hz, mhz, MT7976_RATIO_5_16_NUM, MT7976_RATIO_5_16_DEN, MT7976_PFD_KHZ * RFCTL_HZ_PER_KHZ,
+			     &int_w, &frac_w, actual_hz))
+			return 0;
+	} else {
+		/* The VCO stays on the lock's ratio: across the split the same LO is another VCO
+		 * frequency altogether. The presets and RCD rows stay the lock's too, and that is
+		 * allowed: a Group spans 80..400 MHz and a range 345..620 MHz under one set, so the
+		 * reach past a boundary leaves them no further off than they are inside one. */
+		ratio58 = hz < (uint64_t)MT7977_FW_SPLIT_MHZ * RFCTL_HZ_PER_MHZ;
+		if (ratio58 != (at < (uint64_t)MT7977_FW_SPLIT_MHZ * RFCTL_HZ_PER_MHZ))
+			return 0;
+		if (!divider(hz, mhz, ratio58 ? MT7977_RATIO_5_8_NUM : MT7977_RATIO_3_4_NUM,
+			     ratio58 ? MT7977_RATIO_5_8_DEN : MT7977_RATIO_3_4_DEN, MT7977_PFD_KHZ * RFCTL_HZ_PER_KHZ,
+			     &int_w, &frac_w, actual_hz))
+			return 0;
+	}
+	aw(&p, band, sx, ADIE_SX_INT, int_w);
+	aw(&p, band, sx, ADIE_SX_FRAC, frac_w);		/* with its load bit: without it nothing moves */
+	put(&p, MT7996_PROBE_CTL_OP_DELAY | HW_PREP(MT7996_PROBE_CTL_OP_ARG, HOLD_SETTLE_US), 0, 0, 0);
+	if (radio_band[band].set)
+		freq_words(&p, band, mhz, radio_band[band].bw);
+	*health = p.n;
+	ar(&p, band, sx, ADIE_SX_STATUS);
+	ar(&p, band, sx, ADIE_SX_VTMON);
+	ar(&p, band, sx, ADIE_SX_CMP);
+	ar(&p, band, sx, band == MT7976_DIE ? ADIE_SX_BAND : ADIE_SX_DONE);
+	aw(&p, band, ADIE_K_WF(0), band == MT7976_DIE ? ADIE_FREQ_NOTE_MT7976 : ADIE_FREQ_NOTE_MT7977, khz);
+	return done(&p);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * REPHASE
+ * --------------------------------------------------------------------------------------------- */
+
+/* How long the chain is held receiving under software control before it is switched off. */
+#define REPHASE_HOLD_US	1000u
+
+/* The order measured to do it: software control, receive, off, the D-die's control again. No
+ * transmit block is named (ADIE_CHAIN_EN_RX has none of ADIE_CHAIN_EN_TX_MASK). */
+_Static_assert(!(ADIE_CHAIN_EN_RX & (ADIE_CHAIN_EN_TX_MASK | ADIE_CHAIN_EN_TXDET_A | ADIE_CHAIN_EN_TXDET_B)),
+	       "REPHASE names no transmit block");
+
+uint32_t rfctl_rephase(uint32_t band, uint32_t chain, struct rfctl_op *ops, uint32_t max)
+{
+	struct prog p = { ops, 0, max };
+
+	if (band >= RFCTL_BANDS || chain >= chains[band])
+		return 0;
+	aw(&p, band, ADIE_K_WF(chain), ADIE_CHAIN_OVR, ADIE_CHAIN_OVR_MANUAL);
+	aw(&p, band, ADIE_K_WF(chain), ADIE_CHAIN_EN, ADIE_CHAIN_EN_RX);
+	put(&p, MT7996_PROBE_CTL_OP_DELAY | HW_PREP(MT7996_PROBE_CTL_OP_ARG, REPHASE_HOLD_US), 0, 0, 0);
+	aw(&p, band, ADIE_K_WF(chain), ADIE_CHAIN_EN, 0);
+	aw(&p, band, ADIE_K_WF(chain), ADIE_CHAIN_OVR, 0);
 	return done(&p);
 }
 
@@ -510,6 +609,8 @@ uint32_t rfctl_locks(struct rfctl_op *ops, uint32_t max)
 
 	for (uint32_t band = 0; band < RFCTL_BANDS; band++)
 		ar(&p, band, sx_k(band), ADIE_SX_STATUS);
+	for (uint32_t band = 0; band < RFCTL_BANDS; band++)
+		ar(&p, band, sx_k(band), ADIE_SX_VTMON);
 	return done(&p);
 }
 
@@ -542,8 +643,21 @@ uint32_t rfctl_build(uint32_t a, uint32_t b, uint32_t c, struct rfctl_prog *p)
 	case MT7996_PROBE_CTL_RF_TUNE:
 		n = rfctl_tune(band, (uint64_t)c << 32 | b, rfctl_buf, RFCTL_MAX_OPS, &lo, &out);
 		check = out;
-		if (n)
+		if (n) {
 			radio_band[band].lo_hz = lo;	/* the band's LO, for RATE and SETUP's state */
+			/* where its synthesizer locks when the program has run (one that does not lock is
+			 * the host's to see in the result: it does not HOLD from there) */
+			radio_band[band].lock_hz = lo;
+		}
+		break;
+	case MT7996_PROBE_CTL_RF_HOLD:
+		/* no lock is tried: the status word's flag is not this command's to be judged by */
+		n = rfctl_hold(band, (uint64_t)c << 32 | b, rfctl_buf, RFCTL_MAX_OPS, &lo, &out);
+		if (n)
+			radio_band[band].lo_hz = lo;
+		break;
+	case MT7996_PROBE_CTL_RF_REPHASE:
+		n = rfctl_rephase(band, b, rfctl_buf, RFCTL_MAX_OPS);
 		break;
 	case MT7996_PROBE_CTL_RF_GAIN:
 		n = rfctl_gain(band, b, c, rfctl_buf, RFCTL_MAX_OPS);

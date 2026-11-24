@@ -14,6 +14,8 @@
  *                                0's RC code set as a bring-up leaves it (RFCTL_RC_CODE)
  *   radio_smoke rfctl-rc=N ...   the same on a die whose RC code is N
  *   radio_smoke rfctl-uncal ...  the same before any bring-up (no RC code)
+ *   radio_smoke arm one|two      what arming and disarming a stream writes (stream_arm.c), for one
+ *                                capture path or for both
  *
  * Each band at its default (host/w1700k/radio.py DEFAULT_BANDS): band 0 at an LO of 2442 MHz and
  * 160 MHz, band 1 at 5250 MHz and 160 MHz, band 2 at 6105 MHz and 320 MHz.
@@ -42,6 +44,7 @@
 #include "radio.h"
 #include "radio_cmd.h"
 #include "rfctl.h"
+#include "stream_arm.h"
 #include "tests/mock.h"
 
 uint32_t radio_command(uint32_t op, const uint32_t *arg, uint32_t *state);
@@ -152,8 +155,21 @@ static int rfctl(int argc, char **argv, int rc_code)
 	return 0;
 }
 
+/* The capture route and ICAP0 around a stream, for one path or for two: every access printed
+ * (the mock's free run), the arm's before the line "disarm" and the disarm's after it. */
+static int arm(int two_paths)
+{
+	mock_open("-");
+	stream_arm(two_paths);
+	printf("disarm\n");
+	stream_disarm();
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc == 3 && !strcmp(argv[1], "arm"))
+		return arm(!strcmp(argv[2], "two"));
 	if (argc >= 2 && !strcmp(argv[1], "rfctl"))
 		return rfctl(argc - 2, argv + 2, RFCTL_RC_CODE);
 	if (argc >= 2 && !strncmp(argv[1], "rfctl-rc=", 9))

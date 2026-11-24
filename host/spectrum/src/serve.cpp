@@ -126,9 +126,11 @@ struct Viewer {
     double tokens = 0;                 // allowance under max_kbps, bytes
     Clock::time_point tokens_at = Clock::now();
 
-    std::shared_ptr<const SpectrumFrame> pending;  // next frame to send
-    std::shared_ptr<SpectrumFrame> merged;         // `pending`, when it is this viewer's own merge
-    unsigned pending_frames = 0;                   // frames combined into it
+    // The next frame to send, of each channel: a view of both channels of a two-channel stream
+    // has one waiting of each, sent together; any other has channel 0's or channel 1's alone.
+    std::shared_ptr<const SpectrumFrame> pending[2];
+    std::shared_ptr<SpectrumFrame> merged[2];      // `pending`, when it is this viewer's own merge
+    unsigned pending_frames[2] = {0, 0};           // frames combined into it
 
     Clock::time_point mark = Clock::now();         // per-second statistics
     unsigned frames_sent = 0, frames_merged = 0;
@@ -195,6 +197,15 @@ private:
         const bool now_running = running && running->is_boolean() && running->boolean;
         if (streaming_ && !now_running) stream_.restart_run();  // what comes next is a new stream
         streaming_ = now_running;
+        // A running stream's channels: the stream service was told by whoever started it, and is
+        // told again from here should it restart. A stopped stream's are nobody's to say.
+        const JsonValue *chans = state.at("stream.channels");
+        const unsigned channels = now_running && chans && chans->is_number() && chans->number == 2 ? 2 : 1;
+        if (now_running) stream_.set_channels(channels);
+        if (channels != stream_channels_) {
+            stream_channels_ = channels;
+            status_due_ = true;
+        }
         // What the stream service needs to know to correct the roll-off.
         auto number = [&](const char *path) {
             const JsonValue *v = state.at(path);
@@ -218,6 +229,12 @@ private:
         static const double kCorrected[] = {40e6, 80e6, 160e6, 320e6};
         return radio_rate_ > 0 && radio_capture_ == radio_rate_ && radio_filter_ == radio_rate_ &&
                std::find(std::begin(kCorrected), std::end(kCorrected), radio_rate_) != std::end(kCorrected);
+    }
+
+    // Frames of both channels of a two-channel stream are being made (the page shows both).
+    bool shows_both() const
+    {
+        return stream_channels_ == 2 && engine_.settings().channel == SpectrumSettings::kBothChannels;
     }
 
     void require_controller() const
@@ -257,23 +274,25 @@ private:
         };
     }
 
-    Controller::Op start_op()
+    // `channels` 2: chains 0 and 1 of the band together (host/w1700k: start, channels).
+    Controller::Op start_op(unsigned channels = 1)
     {
-        return {"start", "", [this] { stream_.restart_run(); }, report("start")};
+        return {"start", channels == 2 ? ",\"channels\":2" : "", [this] { stream_.restart_run(); }, report("start")};
     }
 
     Controller::Op stop_op() { return {"stop", "", nullptr, report("stop")}; }
 
-    void receiver_run(bool on)
+    void receiver_run(bool on, unsigned channels)
     {
         require_controller();
         require_idle();
+        if (channels != 1 && channels != 2) throw std::runtime_error("channels must be 1 or 2");
         if (on == streaming_) return;
         if (!on) {
             controller_->submit({stop_op()});
             return;
         }
-        controller_->submit({start_op()});
+        controller_->submit({start_op(channels)});
     }
 
     // One `set` message may carry several groups of settings, applied in this order; the first
@@ -380,11 +399,14 @@ private:
     void dump()
     {
         const Tuning now = engine_.tuning();
-        const uint64_t n = uint64_t(options_.dump_seconds * now.sample_rate / kSliceSamples);
-        // The buffer first: filling it takes long enough for the ring to move on.
-        std::vector<int16_t> samples(n * kSliceSamples * 2);
         const std::shared_ptr<const StreamView> view = stream_.view();
         const StreamClient::Position p = stream_.position();
+        // A two-channel run's slot holds half as many sample times, of both channels; the dump is
+        // then a sample time at a time, channel 0's I and Q and channel 1's (as sdr-recv records).
+        const unsigned per = kSliceSamples / p.channels;
+        const uint64_t n = uint64_t(options_.dump_seconds * now.sample_rate / per);
+        // The buffer first: filling it takes long enough for the ring to move on.
+        std::vector<int16_t> samples(n * kSliceSamples * 2);
         if (!view || !p.run || !n || p.newest < n + 64 || n + 64 > view->capacity() * 3 / 4) {
             std::fprintf(stderr, "dump: not enough stream (or more than the ring holds)\n");
             return;
@@ -402,7 +424,17 @@ private:
             int16_t *out = &samples[kept++ * kSliceSamples * 2];
             bool ok = StreamView::holds_samples(tag, p.run, index);
             if (ok) {
-                std::memcpy(out, view->slice(index), kSliceSamples * 4);
+                if (p.channels == 2) {
+                    const int16_t *a = view->slice(index), *b = a + 2 * per;
+                    for (unsigned k2 = 0; k2 < per; ++k2) {
+                        out[4 * k2] = a[2 * k2];
+                        out[4 * k2 + 1] = a[2 * k2 + 1];
+                        out[4 * k2 + 2] = b[2 * k2];
+                        out[4 * k2 + 3] = b[2 * k2 + 1];
+                    }
+                } else {
+                    std::memcpy(out, view->slice(index), kSliceSamples * 4);
+                }
                 std::atomic_thread_fence(std::memory_order_acquire);
                 ok = view->tag(index) == tag;
                 flattened += ok && (tag & W1700K_STREAM_TAG_FLAT);
@@ -425,21 +457,24 @@ private:
         for (size_t i = 0; i < missing.size() && i < 64; ++i) list += (i ? "," : "") + std::to_string(missing[i]);
         FILE *j = std::fopen((base + ".json").c_str(), "we");
         if (j) {
-            std::fprintf(j, "{\"center_hz\":%.3f,\"sample_rate\":%.3f,\"tuning_steady\":%s,\"run\":%llu,"
+            std::fprintf(j, "{\"center_hz\":%.3f,\"sample_rate\":%.3f,\"channels\":%u,\"tuning_steady\":%s,\"run\":%llu,"
                             "\"first_slice\":%llu,\"slices\":%llu,\"samples\":%llu,\"event_slices\":%llu,"
                             "\"missing_slices\":%zu,\"missing\":[%s],\"flattened_slices\":%llu,\"unix_ms\":%ld,"
-                            "\"format\":\"ci16: int16 I then int16 Q per sample, 14-bit scale (full scale 8192)\"}\n",
-                         t.center_hz, t.sample_rate, held ? "true" : "false",
+                            "\"format\":\"%s\"}\n",
+                         t.center_hz, t.sample_rate, p.channels, held ? "true" : "false",
                          (unsigned long long)StreamView::service_run(p.run), (unsigned long long)first,
-                         (unsigned long long)n, (unsigned long long)(kept * kSliceSamples),
+                         (unsigned long long)n, (unsigned long long)(kept * per),
                          (unsigned long long)events, missing.size(), list.c_str(), (unsigned long long)flattened,
-                         stamp);
+                         stamp,
+                         p.channels == 2 ? "ci16, two channels: per sample time int16 I, Q of channel 0, then I, Q of "
+                                           "channel 1; 14-bit scale (full scale 8192); samples counts sample times"
+                                         : "ci16: int16 I then int16 Q per sample, 14-bit scale (full scale 8192)");
             if (std::fclose(j)) written = false;
         } else {
             written = false;
         }
         std::fprintf(stderr, "dump: %s.bin, %llu samples at %s MHz, %zu slices missing%s%s\n", base.c_str(),
-                     (unsigned long long)(kept * kSliceSamples), mhz(t.center_hz).c_str(), missing.size(),
+                     (unsigned long long)(kept * per), mhz(t.center_hz).c_str(), missing.size(),
                      held ? "" : " (the tuning changed during it)", written ? "" : " (WRITE FAILED)");
     }
 
@@ -509,7 +544,7 @@ private:
             } else if (type == "set") {
                 receiver_set(m);
             } else if (type == "run") {
-                receiver_run(m.boolean_or("on", !streaming_));
+                receiver_run(m.boolean_or("on", !streaming_), unsigned(m.number_or("channels", 1)));
             } else if (type == "fft") {
                 SpectrumSettings s = engine_.settings();
                 s.size = unsigned(m.number_or("size", s.size));
@@ -518,7 +553,15 @@ private:
                 s.averaging = unsigned(std::max(0.0, m.number_or("averaging", s.averaging)));
                 s.peak = m.boolean_or("peak", s.peak);
                 s.remove_dc = m.boolean_or("dc", s.remove_dc);
+                const unsigned shown = s.channel;
+                s.channel = unsigned(std::max(0.0, m.number_or("channel", s.channel)));
                 s.validate();
+                if (s.channel != shown) {  // what waited is of the channels shown before
+                    for (unsigned c = 0; c < 2; ++c) {
+                        v.pending[c].reset();
+                        v.merged[c].reset();
+                    }
+                }
                 engine_.configure(s);
                 status_due_ = true;
             } else {
@@ -582,10 +625,11 @@ private:
         double interval = std::chrono::duration<double>(now - v.mark).count();
         if (interval >= 1) {
             uint64_t bytes = web_.sent(client_);
-            v.fps = v.frames_sent / interval;
+            const double per_step = shows_both() ? 2 : 1;  // a pair of frames is one step of the display
+            v.fps = v.frames_sent / per_step / interval;
             v.delivered_rate = (v.delivered - v.delivered_mark) / interval;
             v.delivered_mark = v.delivered;
-            v.merged_rate = v.frames_merged / interval;
+            v.merged_rate = v.frames_merged / per_step / interval;
             v.kbps = (bytes - v.bytes_mark) * 8 / 1000.0 / interval;
             v.frames_sent = v.frames_merged = 0;
             v.bytes_mark = bytes;
@@ -620,35 +664,39 @@ private:
     // Merges a new frame into what the viewer has waiting, then tries to send.
     void offer(unsigned client, Viewer &v, const std::shared_ptr<const SpectrumFrame> &frame)
     {
-        const SpectrumFrame *p = v.pending.get();
+        const unsigned c = frame->channel & 1;      // a channel's frames merge with that channel's alone
+        const SpectrumFrame *p = v.pending[c].get();
         bool same = p && p->run == frame->run && p->center_hz == frame->center_hz &&
                     p->sample_rate == frame->sample_rate && p->power.size() == frame->power.size() &&
                     p->peak == frame->peak;
         if (!same) {
-            v.pending = frame;
-            v.merged.reset();
-            v.pending_frames = 1;
+            v.pending[c] = frame;
+            v.merged[c].reset();
+            v.pending_frames[c] = 1;
         } else {
-            if (!v.merged) {
-                v.merged = std::make_shared<SpectrumFrame>(*v.pending);
-                v.pending = v.merged;
+            if (!v.merged[c]) {
+                v.merged[c] = std::make_shared<SpectrumFrame>(*v.pending[c]);
+                v.pending[c] = v.merged[c];
             }
             // The maximum, or the mean power, of the frames merged.
-            const size_t bins = v.merged->power.size();
-            float *merged_power = v.merged->power.data();
+            const size_t bins = v.merged[c]->power.size();
+            float *merged_power = v.merged[c]->power.data();
             const float *power = frame->power.data();
             if (frame->peak) {
                 for (size_t i = 0; i < bins; ++i) merged_power[i] = std::max(merged_power[i], power[i]);
             } else {
-                const float keep = float(v.pending_frames) / float(v.pending_frames + 1), add = 1 - keep;
+                const float keep = float(v.pending_frames[c]) / float(v.pending_frames[c] + 1), add = 1 - keep;
                 for (size_t i = 0; i < bins; ++i) merged_power[i] = merged_power[i] * keep + power[i] * add;
             }
-            SpectrumFrame *merged = v.merged.get();
+            SpectrumFrame *merged = v.merged[c].get();
             merged->blocks += frame->blocks;
             merged->index = frame->index;
-            ++v.pending_frames;
+            ++v.pending_frames[c];
             ++v.frames_merged;
         }
+        // With both channels shown, the pair goes together: channel 0's frame waits for channel
+        // 1's over the same samples, which the engine gives next.
+        if (shows_both() && !(v.pending[0] && v.pending[1])) return;
         try_send(client, v);
     }
 
@@ -664,7 +712,7 @@ private:
 
     void try_send(unsigned client, Viewer &v)
     {
-        if (!v.pending || web_.queued(client) > kSocketBacklog || v.in_flight.size() >= 32) return;
+        if (!(v.pending[0] || v.pending[1]) || web_.queued(client) > kSocketBacklog || v.in_flight.size() >= 32) return;
         auto now = Clock::now();
         if (v.max_fps > 0 && now - v.last_send < std::chrono::duration<double>(1 / v.max_fps)) return;
         if (v.max_kbps > 0) {
@@ -677,19 +725,23 @@ private:
         uint64_t estimate = v.last_frame_bytes ? v.last_frame_bytes : 64;
         if (!v.in_flight.empty() && v.in_flight_bytes + estimate > window_bytes(v, estimate)) return;
 
-        std::string message = encode(*v.pending, v, v.sequence + 1);
-        uint64_t before = web_.sent(client) + web_.queued(client);
-        web_.send_binary(client, message);
-        uint64_t bytes = web_.sent(client) + web_.queued(client) - before;
-        v.last_frame_bytes = bytes;
-        charge(client, v, before);
-        if (!v.window) v.window = double(bytes);
-        v.in_flight.push_back({++v.sequence, now, bytes, v.in_flight.empty()});
-        v.in_flight_bytes += bytes;
+        // What waits goes now: one frame, or channel 0's and channel 1's, each acknowledged by itself.
+        for (unsigned c = 0; c < 2; ++c) {
+            if (!v.pending[c]) continue;
+            std::string message = encode(*v.pending[c], v, v.sequence + 1, v.pending_frames[c]);
+            uint64_t before = web_.sent(client) + web_.queued(client);
+            web_.send_binary(client, message);
+            uint64_t bytes = web_.sent(client) + web_.queued(client) - before;
+            v.last_frame_bytes = bytes;
+            charge(client, v, before);
+            if (!v.window) v.window = double(bytes);
+            v.in_flight.push_back({++v.sequence, now, bytes, v.in_flight.empty()});
+            v.in_flight_bytes += bytes;
+            v.pending[c].reset();
+            v.merged[c].reset();
+            ++v.frames_sent;
+        }
         v.last_send = now;
-        v.pending.reset();
-        v.merged.reset();
-        ++v.frames_sent;
     }
 
     void acknowledge(unsigned client, Viewer &v, uint32_t sequence)
@@ -727,7 +779,7 @@ private:
     // The frame fitted to the viewer's range and resolution: at most v.bins bins, each the
     // maximum of the FFT bins it covers (taken as power: one logarithm per bin sent), as 8-bit
     // steps of kStepDb above a base level.
-    static std::string encode(const SpectrumFrame &f, const Viewer &v, uint32_t sequence)
+    static std::string encode(const SpectrumFrame &f, const Viewer &v, uint32_t sequence, unsigned merged)
     {
         const size_t n = f.power.size();
         const double width = f.sample_rate / double(n), left = f.center_hz - f.sample_rate / 2 - width / 2;
@@ -752,11 +804,12 @@ private:
 
         std::string out(48 + bins, '\0');
         auto put = [&](size_t at, const void *data, size_t size) { std::memcpy(&out[at], data, size); };
-        uint8_t kind = 1, flags = f.peak ? 1 : 0;
+        // flags: bit 0 the detector (peak), bit 1 the channel the frame is of.
+        uint8_t kind = 1, flags = uint8_t((f.peak ? 1 : 0) | (f.channel & 1) << 1);
         uint16_t count = uint16_t(bins);
         double start = left + double(first) * width, stop = left + double(last) * width, time = wall_ms();
         float step = kStepDb;
-        uint32_t frames = v.pending_frames, blocks = f.blocks;
+        uint32_t frames = merged, blocks = f.blocks;
         put(0, &kind, 1);
         put(1, &flags, 1);
         put(2, &count, 2);
@@ -843,7 +896,8 @@ private:
             spectrum_dropped_ = (spectrum.pairs_dropped - mark_spectrum_.pairs_dropped) / interval;
             byte_rate_ = (in.bytes - mark_in_.bytes) / interval;
             datagram_rate_ = (in.datagrams - mark_in_.datagrams) / interval;
-            sample_rate_ = (in.slices - mark_in_.slices) * double(kSliceSamples) / interval;
+            // a channel's samples a second: what the frames of the channel shown are made from
+            sample_rate_ = (in.slices - mark_in_.slices) * double(kSliceSamples) / stream_.position().channels / interval;
             packed_share_ = in.slices > mark_in_.slices
                                 ? double(in.packed - mark_in_.packed) / double(in.slices - mark_in_.slices) : 0;
             mark_ = now;
@@ -865,7 +919,8 @@ private:
                              json_number(tuning.sample_rate) + ",\"flatten\":" +
                              (stream_.flatten() ? "true" : "false") + ",\"flatten_available\":" +
                              (flatten_available() ? "true" : "false") + ",\"flatten_active\":" +
-                             (in.flatten_active ? "true" : "false") + "}"},
+                             (in.flatten_active ? "true" : "false") + ",\"channels\":" +
+                             std::to_string(stream_channels_) + "}"},
             {"controller", controller_ ? controller_->status_json() : "{\"mode\":\"off\"}"},
         };
         std::string s;
@@ -875,12 +930,13 @@ private:
         };
         s += "{\"size\":" + std::to_string(fft.size) + ",\"window\":" + json_quote(fft.window) +
              ",\"rate\":" + json_number(fft.rate) + ",\"averaging\":" + std::to_string(fft.averaging) +
-             ",\"peak\":" + (fft.peak ? "true" : "false") + ",\"dc\":" + (fft.remove_dc ? "true" : "false") + "}";
+             ",\"peak\":" + (fft.peak ? "true" : "false") + ",\"dc\":" + (fft.remove_dc ? "true" : "false") +
+             ",\"channel\":" + std::to_string(fft.channel) + "}";
         section("fft");
         s += "{\"fps\":" + json_number(std::round(spectrum_fps_ * 10) / 10) +
              ",\"pairs_used\":" + json_number(std::round(spectrum_used_)) +
              ",\"pairs_dropped\":" + json_number(std::round(spectrum_dropped_)) +
-             ",\"coverage\":" + json_number(sample_rate_ > 0 ? std::min(1.0, spectrum_used_ / sample_rate_) : 0) +
+             ",\"coverage\":" + json_number(sample_rate_ > 0 ? std::min(1.0, spectrum_used_ / sample_rate_ / (shows_both() ? 2 : 1)) : 0) +
              ",\"share\":" + json_number(std::round(spectrum.share * 1000) / 1000) +
              ",\"workers\":" + std::to_string(spectrum.workers) + ",\"queued\":" + std::to_string(spectrum.queued) +
              ",\"backlog\":" + std::to_string(spectrum.backlog) + ",\"missing\":" + std::to_string(spectrum.pairs_missing) +
@@ -920,6 +976,7 @@ private:
     // Web thread only.
     Tuning tuning_;                 // the stream's, as the controller last reported it
     bool streaming_ = false;        // the controller reports a stream running
+    unsigned stream_channels_ = 1;  // of that stream: 2, chains 0 and 1 together
     double radio_rate_ = 0, radio_capture_ = 0, radio_filter_ = 0;  // the controller's, for the correction
     unsigned tuning_ops_ = 0;       // tune or configure requests under way
     bool status_due_ = false;       // something the status shows has changed

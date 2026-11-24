@@ -36,7 +36,13 @@ STATUS = {1: 'bad op', 2: 'timeout', 3: 'too many ops', 4: 'RF-SPI semaphore not
              '(what could transmit, an eFuse, an access that wedges a die). For development, unlock it: '
              '"raw_access": true in the configuration'}
 # RF commands (include/hw/mt7996/probe_page.h "RF commands"): op RF, a = command | band << 8.
-RF_TUNE, RF_GAIN, RF_FILTER, RF_TRIM, RF_STATUS, RF_LOCKS, RF_BAND = range(1, 8)
+RF_TUNE, RF_GAIN, RF_FILTER, RF_TRIM, RF_STATUS, RF_LOCKS, RF_BAND, RF_HOLD, RF_REPHASE = range(1, 10)
+RF_REFUSED = 7                    # an RF op's status: the command or its argument refused
+# How far from its last lock a HOLD moves each band's LO (probe_page.h RF_HOLD_REACH_MHZ, _MT7976_MHZ).
+HOLD_REACH_HZ = {0: 12_000_000, 1: 16_000_000, 2: 16_000_000}
+VTUNE_WINDOW = (3, 28)            # the tuning-voltage reading of a loop that holds (include/hw/adie/sx.h ADIE_SX_VTMON)
+HOLD_SETTLE = 0.25                # s a HOLD's loop is given to settle (30 ms after its largest move, measured)
+HOLD_POLL = 0.01
 RF_GAIN_AGC = 0xFFFFFFFF
 RF_UNLOCKED = 8                   # an RF op's result: the tune's VCO did not lock
 RF_BLOCK = CTL_BASE + 0xA40       # LO Hz [31:0], LO Hz [63:32], ops, outs, then the result words
@@ -271,6 +277,10 @@ def _describe_gain(word):
 
 # --- RF commands (firmware/radio/rfctl.h): no register named here ---
 
+class RFRefused(CtlError):
+    """The unit refused an RF command or its argument: nothing was written."""
+
+
 def rf_op(command, band=0, b=0, c=0):
     """One RF op: our WM builds the command's register program and runs it inside the op."""
     return (RF, command | band << 8, b & 0xFFFFFFFF, c & 0xFFFFFFFF)
@@ -284,7 +294,8 @@ def rf_command(session, command, band=0, b=0, c=0, timeout=2.0):
     status, (res,) = session.wait(session.post([rf_op(command, band, b, c)]), 1, timeout)
     if status:
         where = f' at op {res >> 8} of its program' if res >> 8 else ''
-        raise CtlError(f'RF command {command} band {band}: {STATUS.get(status & 0xFF, status)}{where}')
+        kind = RFRefused if status & 0xFF == RF_REFUSED else CtlError
+        raise kind(f'RF command {command} band {band}: {STATUS.get(status & 0xFF, status)}{where}')
     words, _ = session.ctl(read=(RF_BLOCK, 4 + RF_OUT_MAX))
     return res, words[4:4 + min(words[3], RF_OUT_MAX)], words[0] | words[1] << 32
 
@@ -303,6 +314,59 @@ def tune(session, band, f_hz):
         raise SynthUnlocked(band, f'the VCO did not lock at {f_hz / 1e6:.3f} MHz '
                                   f'({"too low" if vco == 1 else "too high"})')
     return actual
+
+
+class HoldRefused(CtlError):
+    """A HOLD the unit did not start: the LO stays where it was, and so does the lock."""
+
+
+class HoldLost(CtlError):
+    """A HOLD that moved the frequency words and whose loop did not settle on them: the band's
+    synthesizer has to be locked again (tune), which is where the phase between the chains goes."""
+
+    def __init__(self, band, hz, flag, vtune):
+        self.band, self.flag, self.vtune = band, flag, vtune
+        what = (f'its VCO still reads {"too low" if flag == 1 else "too high"} after {HOLD_SETTLE * 1e3:.0f} ms' if flag
+                else f'its tuning voltage reads {vtune}, held within {VTUNE_WINDOW[0]}..{VTUNE_WINDOW[1]}')
+        super().__init__(f'band {band}: the lock did not follow to {hz / 1e6:.3f} MHz ({what})')
+
+
+def hold(session, band, f_hz, sleep=time.sleep):
+    """Move band's LO to f_hz by its synthesizer's frequency words alone, the lock kept: the LO the
+    words give, Hz. A tune locks the synthesizer again, and each lock leaves the band's chains at
+    random in one of two phases half a turn apart from each other; this leaves them as they are.
+    Returns once the loop has settled on the words (at once for a few MHz, 30 ms after 16 MHz).
+    HoldRefused when the unit will not (f_hz farther than HOLD_REACH_HZ[band] from where it last
+    locked, or across 5926 MHz from it, where the synthesizer changes ratio): nothing has changed.
+    HoldLost when the loop does not settle, or settles with its tuning voltage outside the window."""
+    f_hz = int(f_hz)
+    lo, hi = LO_RANGE[band]
+    if not lo <= f_hz <= hi:
+        raise ValueError(f'band {band} tunes {lo / 1e9:.2f}-{hi / 1e9:.2f} GHz')
+    try:
+        _, _, actual = rf_command(session, RF_HOLD, band, f_hz, f_hz >> 32)
+    except RFRefused as exc:
+        raise HoldRefused(f'band {band}: {f_hz / 1e6:.3f} MHz is not reached from its lock (within '
+                          f'{HOLD_REACH_HZ[band] / 1e6:g} MHz of where it locked{"" if band == 0 else ", and not across 5926 MHz"})') from exc
+    waited = 0.0
+    while True:
+        flag, vtune = synth_health(session)[band]
+        if not flag or waited >= HOLD_SETTLE:
+            break
+        sleep(HOLD_POLL)
+        waited += HOLD_POLL
+    if flag or not VTUNE_WINDOW[0] <= vtune <= VTUNE_WINDOW[1]:
+        raise HoldLost(band, f_hz, flag, vtune)
+    return actual
+
+
+def rephase(session, band, chain):
+    """Start one chain's LO path again (its blocks switched off and on, nothing else touched): the
+    phase of its LO against the band's other chains falls anew, at random, in one of its two
+    states half a turn apart. The chain's samples are invalid for a moment."""
+    if band not in CHAINS or not 0 <= chain < CHAINS[band]:
+        raise ValueError(f'band {band} has chains 0..{CHAINS.get(band, 1) - 1}')
+    rf_command(session, RF_REPHASE, band, chain)
 
 
 def set_gain(session, band, lna=None, lpf=None):
@@ -332,9 +396,17 @@ def status(session, band):
     return _status(band, rf_command(session, RF_STATUS, band)[1])
 
 
+def synth_health(session):
+    """Each band's synthesizer: (its status flag: 0 locked, 1 the VCO too low, 2 too high; its
+    tuning-voltage reading, VTUNE_WINDOW when the loop holds comfortably)."""
+    out = rf_command(session, RF_LOCKS)[1]
+    n = len(CHAINS)
+    return [(out[b] & 3, out[n + b] >> 12 & 0x1f) for b in range(n)]
+
+
 def synth_locks(session):
     """Whether each band's synthesizer reports lock."""
-    return [v & 3 == 0 for v in rf_command(session, RF_LOCKS)[1]]
+    return [flag == 0 for flag, _ in synth_health(session)]
 
 
 def select_band(session, band):

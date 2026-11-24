@@ -67,8 +67,14 @@ such a revision and at that radio's risk.
   program, then the RX DC-offset calibration; no channel numbers), `RATE band bw` (the bandwidth
   alone: no synthesizer, no DCOC, LO and filter kept), `DCOC band` (the DC-offset calibration at
   the current LO and filter), `CAPTURE band bw` (the capture path and the MAC receive enable),
-  `SELECT band`, `STREAM packing` (acknowledged when the stream ends), and `STEP` for
-  development. The LO (TUNE: any Hz the synthesizer reaches, on its 2-LSB grid), the analog filter
+  `SELECT band`, `STREAM packing [paths]` (acknowledged when the stream ends; `paths` 2 leaves
+  ICAP0's packer off, so that a beat is both of the band's capture paths, chains 0 and 1, at
+  two sample times each: two channels at the band's rate, which cost what one costs at twice
+  it; refused at the 320 MHz class, whose capture is another datapath), and `STEP` for
+  development. The LO (TUNE: any Hz the synthesizer reaches, on its 2-LSB grid; HOLD: the same by
+  the frequency words alone within 16 MHz of the last lock, 12 on band 0, the lock and with it the
+  phase between the band's chains kept; REPHASE: one chain's blocks off and on, which lands its
+  LO in either of its two phases against the others), the analog filter
   (FILTER), gain and trim are RF commands of their own; the filter is independent of the
   bandwidth and no SETUP or RATE touches it.
 - **The radio code** (`radio/`, in a CRAM region at `0xe0040000`, above the ROM's download

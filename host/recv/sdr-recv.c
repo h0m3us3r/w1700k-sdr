@@ -6,7 +6,9 @@
  * It follows one run (stream) in slot order: from its first slice when started before the run,
  * else from the newest. Every slice becomes 2048 samples of the recording; a lost one is recorded
  * as zeros so that sample time stays true, and a firmware event (no samples, no sample time) is
- * left out. A slot the ring overwrote before it was read counts as an overrun (zeros too). It
+ * left out. A run of two channels (two receive chains sampled together) is recorded a sample
+ * time at a time: channel 0's I and Q, then channel 1's, 1024 sample times to a slice; a lost
+ * slice is zeros in both, so the channels stay beside each other. A slot the ring overwrote before it was read counts as an overrun (zeros too). It
  * stops after --seconds of wall time from the first slice, when the run ends (a new one begins),
  * after --idle-ms without a new slice, or when --capacity-mib is full. With --out, PATH holds the
  * samples and PATH.json what they are; a JSON line goes to stdout every --report seconds and at
@@ -61,6 +63,7 @@ static double number(const char *option, const char *text)
 
 struct tally {
 	uint64_t run, first, slices, samples, events, lost, overruns, flattened;
+	unsigned channels;
 	uint64_t lost_ex[EXAMPLES], overrun_ex[EXAMPLES];
 	unsigned n_lost_ex, n_overrun_ex;
 	const char *ended;
@@ -70,10 +73,10 @@ static void print_tally(FILE *f, const struct tally *t, double seconds, const ch
 {
 	unsigned i;
 
-	fprintf(f, "{\"run\":%" PRIu64 ",\"first_slice\":%" PRIu64 ",\"slices\":%" PRIu64 ",\"samples\":%" PRIu64
-		",\"events\":%" PRIu64 ",\"lost\":%" PRIu64 ",\"overruns\":%" PRIu64 ",\"flattened\":%" PRIu64
-		",\"seconds\":%.3f,\"lost_examples\":[", t->run, t->first, t->slices, t->samples, t->events, t->lost,
-		t->overruns, t->flattened, seconds);
+	fprintf(f, "{\"run\":%" PRIu64 ",\"channels\":%u,\"first_slice\":%" PRIu64 ",\"slices\":%" PRIu64
+		",\"samples\":%" PRIu64 ",\"events\":%" PRIu64 ",\"lost\":%" PRIu64 ",\"overruns\":%" PRIu64
+		",\"flattened\":%" PRIu64 ",\"seconds\":%.3f,\"lost_examples\":[", t->run, t->channels, t->first,
+		t->slices, t->samples, t->events, t->lost, t->overruns, t->flattened, seconds);
 	for (i = 0; i < t->n_lost_ex; i++)
 		fprintf(f, "%s%" PRIu64, i ? "," : "", t->lost_ex[i]);
 	fprintf(f, "],\"overrun_examples\":[");
@@ -81,7 +84,10 @@ static void print_tally(FILE *f, const struct tally *t, double seconds, const ch
 		fprintf(f, "%s%" PRIu64, i ? "," : "", t->overrun_ex[i]);
 	fprintf(f, "],\"ended\":\"%s\",\"out\":\"%s\"", t->ended ? t->ended : "", out ? out : "");
 	if (out)
-		fprintf(f, ",\"format\":\"ci16: int16 I then int16 Q per sample, 14-bit scale (full scale 8192)\"");
+		fprintf(f, t->channels == 2
+			? ",\"format\":\"ci16, two channels: per sample time int16 I, Q of channel 0, then I, Q of channel 1; "
+			  "14-bit scale (full scale 8192); samples counts sample times\""
+			: ",\"format\":\"ci16: int16 I then int16 Q per sample, 14-bit scale (full scale 8192)\"");
 	fprintf(f, "}\n");
 }
 
@@ -164,7 +170,7 @@ int main(int argc, char **argv)
 		}
 		if (stop)
 			return 1;
-		w1700k_stream_position(h, &run, &newest);
+		w1700k_stream_layout(h, &run, &newest, &t.channels);
 		fprintf(stderr, "sdr-recv: reading %s%s\n", name, run ? ", the current run from now" : ", the next run from its start");
 		if (run) {
 			t.run = run;
@@ -176,11 +182,13 @@ int main(int argc, char **argv)
 					return 1;
 				}
 				usleep(1000);
-				w1700k_stream_position(h, &run, &newest);
+				w1700k_stream_layout(h, &run, &newest, &t.channels);
 			}
 			t.run = run;
 			t.first = 0;
 		}
+		if (t.channels == 2)
+			fprintf(stderr, "sdr-recv: the run has two channels\n");
 	}
 
 	index = t.first;
@@ -233,8 +241,20 @@ int main(int argc, char **argv)
 			}
 			dst = out ? buffer + t.slices * W1700K_STREAM_SLICE * 2 : NULL;
 			if ((tag & ~W1700K_STREAM_TAG_FLAT) == want) {
-				if (dst)
+				if (dst && t.channels == 2) {
+					/* the slot is channel 0 then channel 1; the recording is a sample time at a time */
+					const int16_t *a = w1700k_stream_channel(h, index, 0, 2), *b = w1700k_stream_channel(h, index, 1, 2);
+					unsigned k;
+
+					for (k = 0; k < W1700K_STREAM_SLICE / 2; k++) {
+						dst[4 * k] = a[2 * k];
+						dst[4 * k + 1] = a[2 * k + 1];
+						dst[4 * k + 2] = b[2 * k];
+						dst[4 * k + 3] = b[2 * k + 1];
+					}
+				} else if (dst) {
 					memcpy(dst, w1700k_stream_slice(h, index), slice_bytes);
+				}
 				__atomic_thread_fence(__ATOMIC_ACQUIRE);
 				ok = w1700k_stream_load(&w1700k_stream_tags(h)[index & (h->ring_slices - 1)]) == tag;
 				t.flattened += ok && (tag & W1700K_STREAM_TAG_FLAT);
@@ -253,7 +273,7 @@ int main(int argc, char **argv)
 				}
 			}
 			t.slices++;
-			t.samples += W1700K_STREAM_SLICE;
+			t.samples += w1700k_stream_slice_samples(t.channels);
 		}
 	}
 done:

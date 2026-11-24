@@ -114,7 +114,7 @@ struct Span {
 
 struct Publisher::Worker {
     std::thread thread;
-    FlattenRun flatten;
+    FlattenRun flatten, flatten2;    // the second for a two-channel run's other channel
     std::vector<Slot> kinds;
     std::vector<Span> spans;         // a correction job's input samples, in order
     std::vector<int16_t *> targets;  // ... and where each of its sample slots' output goes (nullptr: lost)
@@ -154,13 +154,14 @@ const Flatten *Publisher::correction() const
     return Flatten::for_rate(double(rate));
 }
 
-void Publisher::publish_position(uint64_t run, uint64_t newest)
+void Publisher::publish_position(uint64_t run, uint64_t newest, unsigned channels)
 {
     const uint64_t seq = load(&out_->position_seq);
     store(&out_->position_seq, seq + 1);
     std::atomic_thread_fence(std::memory_order_release);
     store(&out_->run, run);
     store(&out_->newest, newest);
+    store(&out_->run_channels, uint64_t(channels));
     store(&out_->position_seq, seq + 2);
 }
 
@@ -206,6 +207,10 @@ void Publisher::schedule()
     uint64_t seen_newest = 0, seen_at = 0, reported = 0, restarts = load(&out_->restart_requests);
     uint64_t late_since = 0, late_newest = 0;  // the wait for overdue slots: its start, and the newest then
     const Flatten *active = nullptr;
+    // A run is of one channel or of two, as the control said when it began; a change of that word
+    // makes the next completion a new run's first, so that no run is of both.
+    auto wanted_channels = [&] { return load(&out_->radio_channels) == 2 ? 2u : 1u; };
+    unsigned channels = 1, wanted = wanted_channels();
     for (;;) {
         const uint64_t t = w1700k_stream_now_ns();
         if (t - reported >= kReportNs) {
@@ -213,8 +218,10 @@ void Publisher::schedule()
             reported = t;
         }
         const uint64_t requests = load(&out_->restart_requests);
-        if (requests != restarts) {
+        const unsigned now_wanted = wanted_channels();
+        if (requests != restarts || now_wanted != wanted) {
             restarts = requests;
+            wanted = now_wanted;
             ingest_.restart_run();
         }
 
@@ -230,12 +237,13 @@ void Publisher::schedule()
                 ++next_publish;
             }
             lock.unlock();
-            if (run) publish_position(run, published);
+            if (run) publish_position(run, published, channels);
             run = p.run;
+            channels = wanted;
             resolved = dispatched = published = 0;
             seen_newest = 0;
             late_since = 0;
-            publish_position(run, 0);
+            publish_position(run, 0, channels);
         }
         if (p.newest != seen_newest) {
             seen_newest = p.newest;
@@ -252,7 +260,7 @@ void Publisher::schedule()
         if (p.newest > resolved + 2 * reach) {
             std::unique_lock<std::mutex> lock(mutex_);
             if (resolved > dispatched) {  // what is in and settled goes out first
-                jobs_.push_back(Job{sequence++, run, dispatched, resolved, active, true});
+                jobs_.push_back(Job{sequence++, run, dispatched, resolved, active, true, channels});
                 dispatched = resolved;
                 work_ready_.notify_one();
             }
@@ -267,7 +275,7 @@ void Publisher::schedule()
             lost_ += to - dispatched;
             resolved = dispatched = published = to;
             late_since = 0;
-            publish_position(run, published);
+            publish_position(run, published, channels);
         }
 
         bool overdue = false;
@@ -309,7 +317,7 @@ void Publisher::schedule()
             std::unique_lock<std::mutex> lock(mutex_);
             if (stopping_) return;
             while (jobs_.size() + busy_ < 2 * worker_count_) {
-                Job job{sequence, run, dispatched, 0, f, false};
+                Job job{sequence, run, dispatched, 0, f, false, channels};
                 if (resolved >= dispatched + kChunk + (f ? 1 : 0)) {
                     job.last = dispatched + kChunk;
                 } else if (idle && resolved > dispatched) {
@@ -333,7 +341,7 @@ void Publisher::schedule()
             }
             if (moved) {
                 lock.unlock();
-                publish_position(run, published);
+                publish_position(run, published, channels);
                 continue;
             }
             if (waiting) job_done_.wait_for(lock, std::chrono::microseconds(200));
@@ -404,7 +412,11 @@ void Publisher::process(Worker &w, const Job &job)
             }
             if (kind == Slot::Data) {
                 claim(s);
-                words_to_int16(raw_.slice(s), kSliceSamples, w1700k_stream_slice(out_, s));
+                if (job.channels == 2)
+                    words_to_int16_2ch(raw_.slice(s), kSliceSamples / 4, w1700k_stream_channel(out_, s, 0, 2),
+                                       w1700k_stream_channel(out_, s, 1, 2));
+                else
+                    words_to_int16(raw_.slice(s), kSliceSamples, w1700k_stream_slice(out_, s));
                 if (raw_.tag(s) == SampleRing::tag_of(job.run, s)) {
                     finish(s, 0);
                     continue;
@@ -424,7 +436,13 @@ void Publisher::process(Worker &w, const Job &job)
     // The samples are never laid out as one array: each transform block is filled from the receive
     // ring and its outputs rounded straight into the shared ring, so a worker's working set is the
     // block (16 KiB), not the job's samples twice over as floats.
-    const unsigned D = Flatten::kDelay;
+    // A two-channel run is corrected a channel at a time, each as a stream of its own: a slot
+    // holds S sample times, sample time t of it at words C * t (two channels: beat t / 2, where
+    // both channels' samples of that time are). Every count below is even, so the two-channel
+    // path moves whole beats.
+    static_assert(Flatten::kDelay % 2 == 0 && Flatten::kBlock % 2 == 0 && Flatten::kFft % 2 == 0 && kSliceSamples % 4 == 0,
+                  "two channels are converted a beat (two sample times) at a time");
+    const unsigned D = Flatten::kDelay, C = job.channels == 2 ? 2 : 1, S = kSliceSamples / C;
     auto words_of = [&](uint64_t s, Slot kind) { return kind == Slot::Data ? raw_.slice(s) : nullptr; };
     w.spans.clear();
     w.targets.clear();
@@ -435,10 +453,10 @@ void Publisher::process(Worker &w, const Job &job)
         for (uint64_t s = job.first; need && s-- > 0;) {
             const Slot kind = classify(job.run, s, false);
             if (kind == Slot::Event) continue;
-            const unsigned take = std::min(need, kSliceSamples);
+            const unsigned take = std::min(need, S);
             need -= take;
             const uint32_t *words = words_of(s, kind);
-            w.spans.push_back({words ? words + (kSliceSamples - take) : nullptr, take});
+            w.spans.push_back({words ? words + C * (S - take) : nullptr, take});
         }
         if (need) w.spans.push_back({nullptr, need});  // before the run's first slot
         std::reverse(w.spans.begin() + at, w.spans.end());
@@ -447,17 +465,17 @@ void Publisher::process(Worker &w, const Job &job)
     for (uint64_t s = job.first; s < job.last; ++s) {
         const Slot kind = w.kinds[s - job.first];
         if (kind == Slot::Event) continue;
-        w.spans.push_back({words_of(s, kind), kSliceSamples});
+        w.spans.push_back({words_of(s, kind), S});
         if (kind == Slot::Data) claim(s);
         w.targets.push_back(kind == Slot::Data ? w1700k_stream_slice(out_, s) : nullptr);
-        n += kSliceSamples;
+        n += S;
     }
     {
         unsigned need = D;
         for (uint64_t s = job.last; need && s < job.last + 4; ++s) {
             const Slot kind = classify(job.run, s, false);
             if (kind == Slot::Event) continue;
-            const unsigned take = std::min(need, kSliceSamples);
+            const unsigned take = std::min(need, S);
             w.spans.push_back({words_of(s, kind), take});
             need -= take;
         }
@@ -468,14 +486,20 @@ void Publisher::process(Worker &w, const Job &job)
     // above and gives outputs [j, j + kBlock), output t centred on input t + kDelay.
     uint64_t clipped = 0;
     size_t span = 0, offset = 0;  // where input j is
-    fftwf_complex *const block = w.flatten.block();
+    fftwf_complex *const block = w.flatten.block(), *const block2 = w.flatten2.block();
     for (size_t j = 0; j < n; j += Flatten::kBlock) {
         size_t filled = 0, sp = span, off = offset;
         while (filled < Flatten::kFft && sp < w.spans.size()) {
             const Span &a = w.spans[sp];
             const unsigned take = unsigned(std::min<size_t>(Flatten::kFft - filled, a.count - off));
-            if (a.words) words_to_float(a.words + off, take, block[filled]);
-            else std::memset(block[filled], 0, take * sizeof(fftwf_complex));
+            if (!a.words) {
+                std::memset(block[filled], 0, take * sizeof(fftwf_complex));
+                if (C == 2) std::memset(block2[filled], 0, take * sizeof(fftwf_complex));
+            } else if (C == 2) {
+                words_to_float_2ch(a.words + 2 * off, take / 2, block[filled], block2[filled]);
+            } else {
+                words_to_float(a.words + off, take, block[filled]);
+            }
             filled += take;
             off += take;
             if (off == a.count) {
@@ -483,7 +507,10 @@ void Publisher::process(Worker &w, const Job &job)
                 off = 0;
             }
         }
-        if (filled < Flatten::kFft) std::memset(block[filled], 0, (Flatten::kFft - filled) * sizeof(fftwf_complex));
+        if (filled < Flatten::kFft) {
+            std::memset(block[filled], 0, (Flatten::kFft - filled) * sizeof(fftwf_complex));
+            if (C == 2) std::memset(block2[filled], 0, (Flatten::kFft - filled) * sizeof(fftwf_complex));
+        }
         for (size_t step = Flatten::kBlock; step && span < w.spans.size();) {  // input j + kBlock, for the next block
             const size_t take = std::min<size_t>(step, w.spans[span].count - offset);
             step -= take;
@@ -494,11 +521,16 @@ void Publisher::process(Worker &w, const Job &job)
             }
         }
         w.flatten.filter(*job.flatten);
-        const float *y = block[Flatten::kTaps - 1];
+        if (C == 2) w.flatten2.filter(*job.flatten);
+        const float *y = block[Flatten::kTaps - 1], *y2 = block2[Flatten::kTaps - 1];
         for (size_t at = j, left = std::min<size_t>(Flatten::kBlock, n - j); left;) {
-            const size_t slot = at / kSliceSamples, o = at % kSliceSamples, take = std::min<size_t>(left, kSliceSamples - o);
-            if (int16_t *dst = w.targets[slot]) clipped += floats_to_int16(y, unsigned(2 * take), dst + 2 * o);
+            const size_t slot = at / S, o = at % S, take = std::min<size_t>(left, S - o);
+            if (int16_t *dst = w.targets[slot]) {
+                clipped += floats_to_int16(y, unsigned(2 * take), dst + 2 * o);
+                if (C == 2) clipped += floats_to_int16(y2, unsigned(2 * take), dst + 2 * (S + o));  // channel 1's place
+            }
             y += 2 * take;
+            y2 += 2 * take;
             at += take;
             left -= take;
         }

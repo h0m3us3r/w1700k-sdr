@@ -49,12 +49,13 @@ static uint32_t wa_start(void)
 
 _Static_assert(SCHEDULE_COUNT == RADIO_PACKINGS, "one schedule per RADIO_PACKING_* code");
 
-/* STREAM: the WA started if the packing schedule has it pack, the route and ICAP0 armed, the
+/* STREAM: the WA started if the packing schedule has it pack, the route and ICAP0 armed (for
+ * one path, or for two: radio_cmd.h), the
  * result page and the go word cleared, then the producer (linked at WM_PRODUCER) with that
  * schedule until the host's stop word; afterwards the route released, unless the WA never left
  * the packer (a route change under a core that still reads the pool hangs it). Returns the
  * producer's status. */
-static uint32_t stream(uint32_t packing, uint32_t state)
+static uint32_t stream(uint32_t packing, uint32_t paths, uint32_t state)
 {
 	void (*producer)(uint32_t) = (void (*)(uint32_t))(uintptr_t)WM_PRODUCER;
 	uint32_t res, wa, band;
@@ -69,10 +70,15 @@ static uint32_t stream(uint32_t packing, uint32_t state)
 		;
 	if (!(state & RADIO_STATE_UP) || band == RADIO_BANDS || !(state & RADIO_STATE_CAPTURE(band)))
 		return RADIO_STREAM_NOT_READY;
+	/* Two paths come from the two-sample datapath alone: the 320 MHz class captures through
+	 * the wide one, whose beat is laid out by the lane mux (dfe.h). */
+	if (paths > RADIO_STREAM_PATHS_TWO ||
+	    (paths == RADIO_STREAM_PATHS_TWO && radio_band[band].bw >= RADIO_BW_CLASS_320))
+		return RADIO_STREAM_BAD_PATHS;
 	wa = schedules[packing].wa_mask != 0;
 	if (wa && (res = wa_start()))
 		return res;
-	stream_arm();
+	stream_arm(paths == RADIO_STREAM_PATHS_TWO);
 	for (uint32_t i = 0; i < 4; i++)
 		R32(DONE_AT + 4 * i) = 0;
 	/* The fourth of those words is the shift the packers cut radio-reduced chunks at, which
@@ -112,7 +118,7 @@ static void radio_serve(void)
 		arg[i] = ST(WM_RADIO_ARG(i));
 	hal_fail_rec.code = hal_fail_rec.arg = hal_fail_rec.count = 0;
 	t0 = hal_now_us();
-	res = op == RADIO_OP_STREAM ? stream(arg[0], state) : radio_command(op, arg, &state);
+	res = op == RADIO_OP_STREAM ? stream(arg[0], arg[1], state) : radio_command(op, arg, &state);
 	ST(WM_RADIO_US) = op == RADIO_OP_STREAM ? 0 : hal_now_us() - t0;
 	if (op != RADIO_OP_STREAM && ST(WM_TRAPS) != traps) {
 		hal_fail(HAL_FAIL_TRAP, ST(WM_TRAP_TVAL));
