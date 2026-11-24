@@ -284,7 +284,8 @@ class RadioCode(unittest.TestCase):
 
     def test_mt7976_filters(self):
         """Band 0's filter independent of the bandwidth: codes 0..3 with MediaTek's 0x125 [22:20]
-        and the RC code; 320 MHz is code 3 widened, the trim 9 under the RC code (mt7976.h).
+        and the RC code; 320 MHz is code 3 widened, the trim 9 under the RC code where that is
+        not under 8 (mt7976.h; the next test).
         Refused before the bring-up has measured the RC code."""
         rc = 17                                            # radio_smoke RFCTL_RC_CODE
         narrow, wide = self.rfctl((rf.RF_FILTER, 160, 0), (rf.RF_FILTER, 320, 0))
@@ -298,6 +299,30 @@ class RadioCode(unittest.TestCase):
             self.assertEqual(p['out'], 16)
         uncal = self.rfctl((rf.RF_FILTER, 160, 0), (rf.RF_FILTER | 2 << 8, 320, 0), mode='rfctl-uncal')
         self.assertEqual([p['res'] for p in uncal], [CTL_BAD_ARG, 0])
+
+    def test_the_widened_filters_trim_keeps_out_of_the_codes_that_oscillate(self):
+        """The widened filter oscillates at a low trim, and where that begins goes by the code and
+        not by how far it is under the calibrated one: a die calibrated to 13 oscillated at 4,
+        which is 9 under, and was clean from 5 (mt7976.h). So the trim is 9 under the calibrated
+        code but never under 8, and never over the calibrated code; the unwidened filter keeps
+        the calibrated code whatever it is."""
+        def trims(rc):
+            narrow, wide = self.rfctl((rf.RF_FILTER, 160, 0), (rf.RF_FILTER, 320, 0), mode=f'rfctl-rc={rc}')
+            found = []
+            for p in (narrow, wide):
+                words = {o[3] for o in map(tuple, p['ops']) if o[:3] == tuple(rf.armw(rf.reg(0, 0, 0xE51), 0x11F00, 0))[:3]}
+                self.assertEqual(len(words), 1, 'one trim, on every chain')
+                found.append((words.pop() >> 8) & 31)
+            return tuple(found)
+        self.assertEqual(trims(17), (17, 8), 'the die it was tuned on: as before')
+        self.assertEqual(trims(13), (13, 8), 'the die that oscillated at 4')
+        self.assertEqual(trims(31), (31, 22), 'far above the floor: 9 under')
+        self.assertEqual(trims(18), (18, 9))
+        for rc in range(9, 18):
+            self.assertEqual(trims(rc), (rc, 8), rc)
+        for rc in range(0, 9):
+            self.assertEqual(trims(rc), (rc, rc), 'never raised over the calibrated code')
+        self.assertGreater(min(trims(rc)[1] for rc in range(8, 32)), 4, 'the highest code seen to oscillate')
 
     def test_rate_keeps_lo_and_filter(self):
         """RATE re-runs the bandwidth part of the channel set only: no synthesizer word, no filter

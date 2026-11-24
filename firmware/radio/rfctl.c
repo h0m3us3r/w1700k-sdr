@@ -435,7 +435,12 @@ uint32_t rfctl_filter_regs(uint32_t band, uint32_t code, struct rfctl_filter *f)
 	} else {
 		f->code = MT7976_RX_BW_CODE_MAX;
 		f->ext = MT7976_RXF_125_EXT_WIDE;
+		/* Lowered from the calibrated code, but never into the codes at which the
+		 * widened filter oscillates (mt7976.h MT7976_RXF_WIDE_TRIM_MIN), and never
+		 * raised: a die calibrated under the floor keeps its own code. */
 		f->trim = cal > MT7976_RXF_WIDE_TRIM_DROP ? cal - MT7976_RXF_WIDE_TRIM_DROP : 0;
+		if (f->trim < MT7976_RXF_WIDE_TRIM_MIN)
+			f->trim = cal < MT7976_RXF_WIDE_TRIM_MIN ? cal : MT7976_RXF_WIDE_TRIM_MIN;
 	}
 	return 1;
 }

@@ -12,6 +12,7 @@
  *                                DCOC) and CAPTURE, the same RATEs and DCOC, then SELECT band 1
  *   radio_smoke rfctl A B C ...  the RF command builder's program of each RF op {A, B, C}, with die
  *                                0's RC code set as a bring-up leaves it (RFCTL_RC_CODE)
+ *   radio_smoke rfctl-rc=N ...   the same on a die whose RC code is N
  *   radio_smoke rfctl-uncal ...  the same before any bring-up (no RC code)
  *
  * Each band at its default (host/w1700k/radio.py DEFAULT_BANDS): band 0 at an LO of 2442 MHz and
@@ -131,10 +132,10 @@ static int radio(const char *eeprom, int steps)
 	return mock_finish();
 }
 
-static int rfctl(int argc, char **argv, int cal)
+static int rfctl(int argc, char **argv, int rc_code)
 {
-	if (cal) {
-		radio_cal.rc_code[0] = RFCTL_RC_CODE;
+	if (rc_code >= 0) {
+		radio_cal.rc_code[0] = (uint32_t)rc_code;
 		radio_cal.rc_valid = 1u << 0;
 	}
 	for (int i = 0; i + 2 < argc; i += 3) {
@@ -154,9 +155,11 @@ static int rfctl(int argc, char **argv, int cal)
 int main(int argc, char **argv)
 {
 	if (argc >= 2 && !strcmp(argv[1], "rfctl"))
-		return rfctl(argc - 2, argv + 2, 1);
+		return rfctl(argc - 2, argv + 2, RFCTL_RC_CODE);
+	if (argc >= 2 && !strncmp(argv[1], "rfctl-rc=", 9))
+		return rfctl(argc - 2, argv + 2, atoi(argv[1] + 9));
 	if (argc >= 2 && !strcmp(argv[1], "rfctl-uncal"))
-		return rfctl(argc - 2, argv + 2, 0);
+		return rfctl(argc - 2, argv + 2, -1);
 	if (argc != 3 || (strcmp(argv[2], "steps") && strcmp(argv[2], "commands"))) {
 		fprintf(stderr, "usage: radio_smoke EEPROM steps|commands, or radio_smoke rfctl A B C ...\n");
 		return 2;
