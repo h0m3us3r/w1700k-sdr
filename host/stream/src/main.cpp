@@ -32,6 +32,17 @@ constexpr int kNice = -10;
 std::atomic<bool> stop_requested{false};
 void on_signal(int) { stop_requested = true; }
 
+// This process's soft limit on how far it may raise its priority, taken up to its hard limit.
+// `init/host/link keep` gives the user the hard limit alone: the kernel judges a nice level by
+// the soft one, so the user's other programs stay where they are, and this one asks.
+void take_nice_limit()
+{
+    rlimit limit{};
+    if (getrlimit(RLIMIT_NICE, &limit) || limit.rlim_cur >= limit.rlim_max) return;
+    limit.rlim_cur = limit.rlim_max;
+    setrlimit(RLIMIT_NICE, &limit);
+}
+
 void usage()
 {
     std::fprintf(stderr,
@@ -129,7 +140,11 @@ int main(int argc, char **argv)
     // Before any thread is started: each inherits it. On a host with every CPU busy the receive
     // threads at the ordinary priority were starved (2.1 % of a 320 Msps stream lost, 61,000
     // datagrams dropped at the sockets in a minute); at -10, 0.008 to 0.08 % (README.md).
-    // Lowering nice is root's unless the user's limit allows it, which `init/host/link keep` sets.
+    // Lowering nice is root's unless the user's limit allows it, which `init/host/link keep` sets:
+    // the hard limit alone, so that no other program of the user is let to raise itself by it
+    // (a soft limit that allowed -10 let a Chromium desktop application run at -8, and all it
+    // started with it). The service takes its soft limit up to the hard one, then the priority.
+    if (!own_priority) take_nice_limit();
     if (!own_priority && getpriority(PRIO_PROCESS, 0) > kNice && setpriority(PRIO_PROCESS, 0, kNice))
         std::fprintf(stderr,
                      "w1700k-stream: running at the ordinary priority (nice %d: %s); a busy host may starve it "
