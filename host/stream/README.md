@@ -57,7 +57,13 @@ until `init/host/link` gives it to the user; where the service may not open it, 
 and carries on. Between streams the host idles as it likes.
 
 The service raises itself to nice -10 at the start, where the user's limit allows it
-(`init/host/link keep` sets that limit; it holds from the next login). With every CPU of a host
+(`init/host/link keep` sets that limit; it holds from the next login). The limit is the hard
+one alone (`USER hard nice -10`), and the service takes its own soft limit up to it first: the
+kernel judges a nice level by the soft limit, so no other program of the user runs any higher
+for it. Given both limits, as `keep` once wrote them, every program that asks is let, and a
+desktop application built on Chromium asks -8 for its main threads: on the measuring host it
+ran at -8 with everything it started, tests and benchmarks among them, beside the service at
+-10. A host set up by that earlier `keep` needs `keep` once more and a new login. With every CPU of a host
 busy, the receive threads at the ordinary priority were starved: 2.1 % of a 320 Msps stream
 lost in a minute, 61,000 datagrams of it dropped at the sockets. At -10, 0.008 and 0.08 % in two
 such minutes, and with the kernel's own packet thread raised too (`link` does that), between

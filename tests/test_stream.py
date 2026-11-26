@@ -6,11 +6,13 @@ import cmath
 import fcntl
 import math
 import os
+import resource
 import shutil
 import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -104,6 +106,7 @@ class Service(unittest.TestCase):
 
     RECEIVE_MIB, RX_THREADS = 64, 2
     OPTIONS = []
+    before_exec = None                 # run in the service's process before it starts
 
     def setUp(self):
         Service.counter += 1
@@ -112,7 +115,7 @@ class Service(unittest.TestCase):
         self.proc = subprocess.Popen([BINARY, "--bind", "127.0.0.1", "--port", str(self.port), "--name", self.name,
                                       "--ring-mib", "16", "--receive-mib", str(self.RECEIVE_MIB), "--workers", "2",
                                       "--rx-threads", str(self.RX_THREADS), *self.OPTIONS],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=self.before_exec)
         deadline = time.monotonic() + 10
         while True:
             try:
@@ -701,6 +704,37 @@ class TransformPlans(unittest.TestCase):
         self.wait_for(said, "serving", 5)
         self.assertIn("nowhere to keep", "".join(said))
         self.assertEqual(self.measure(homeless).returncode, 1)
+
+
+def soft_nice_limit_none():
+    """As `init/host/link keep` leaves a user: whatever hard limit there is, and no soft one."""
+    resource.setrlimit(resource.RLIMIT_NICE, (0, resource.getrlimit(resource.RLIMIT_NICE)[1]))
+
+
+@unittest.skipIf(build_problem(), build_problem())
+@unittest.skipIf(os.geteuid() == 0, "root raises itself whatever the limits")
+class OwnPriority(Service):
+    """The service raises itself to nice -10 by the user's hard limit, taking its own soft limit
+    up to it; a program that does not is refused, which is why the user is given the hard one alone."""
+    before_exec = staticmethod(soft_nice_limit_none)
+
+    def test_it_takes_the_hard_limit_and_another_program_is_refused(self):
+        hard = resource.getrlimit(resource.RLIMIT_NICE)[1]
+        ours = os.getpriority(os.PRIO_PROCESS, 0)
+        lowest = -20 if hard == resource.RLIM_INFINITY else 20 - hard        # the nice level the hard limit allows
+        its = os.getpriority(os.PRIO_PROCESS, self.proc.pid)
+        if lowest <= -10:
+            self.assertEqual(its, min(ours, -10))
+            with open("/proc/%d/limits" % self.proc.pid) as limits:
+                soft, hard_now = [line.split()[3:5] for line in limits if line.startswith("Max nice")][0]
+            self.assertEqual(soft, hard_now, "its soft limit is now its hard one")
+        else:
+            self.assertEqual(its, ours, "a host whose limit allows no -10: it runs as it was started")
+        raise_itself = "import os; os.setpriority(os.PRIO_PROCESS, 0, os.getpriority(os.PRIO_PROCESS, 0) - 1)"
+        other = subprocess.run([sys.executable, "-c", raise_itself], capture_output=True, text=True,
+                               preexec_fn=soft_nice_limit_none)
+        self.assertNotEqual(other.returncode, 0, "a program that asks without raising its soft limit")
+        self.assertIn("PermissionError", other.stderr)
 
 
 class Options(unittest.TestCase):

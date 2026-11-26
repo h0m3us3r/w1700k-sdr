@@ -206,6 +206,25 @@ class Keep(unittest.TestCase):
         self.assertEqual(host.addresses, [CIDR])
 
 
+    def test_the_user_is_given_the_hard_nice_limit_alone(self):
+        """keep lets the user who ran sudo raise w1700k-stream to nice -10 by the hard limit alone:
+        the kernel judges a nice level by the soft limit, so no other program of the user runs
+        higher for it. What an earlier keep wrote, both limits, is replaced."""
+        host = Host(self, auto_profile())
+        (host.root / 'dev').mkdir()
+        (host.root / 'dev/cpu_dma_latency').symlink_to('/dev/null')      # a character device, as the real one is
+        limit = host.root / 'etc/security/limits.d/60-w1700k-stream.conf'
+        for directory in (host.root / 'etc/udev/rules.d', limit.parent):
+            directory.mkdir(parents=True)
+        limit.write_text('# Written by init/host/link keep\nsomeone - nice -10\n')
+        host.script('chown', 'exit 0\n')
+        host.env.update(SUDO_UID='1000', SUDO_USER='someone')
+        result = host.link('keep', IFACE, CIDR, MTU)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rules = [line for line in limit.read_text().splitlines() if not line.startswith('#')]
+        self.assertEqual(rules, ['someone hard nice -10'])
+        self.assertIn('w1700k-stream run by someone may raise itself to nice -10 from the next login', result.stdout)
+
 class Up(unittest.TestCase):
     def test_beside_a_dhcp_request_that_nobody_answers(self):
         """The address added by hand went when the request timed out. `up` stops the request and
